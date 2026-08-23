@@ -74,6 +74,7 @@ const uatSchemas = [
   "tests/celld/uat/seaweedfs-fixture-v1.schema.json",
   "tests/celld/uat/live-orchestration-v1.schema.json",
   "tests/celld/uat/orchestration-inventory-v1.schema.json",
+  "tests/celld/uat/orchestration-inventory-v2.schema.json",
   "tests/celld/uat/dispatch-gate-v1.schema.json",
   "tests/celld/uat/crash-phase-evidence-v1.schema.json",
   "tests/celld/uat/network-auth-evidence-v1.schema.json",
@@ -90,7 +91,8 @@ const uatSchemas = [
 const parsed = [...schemas, ...uatSchemas].map((path) => [path, JSON.parse(readFileSync(resolve(root, path), "utf8"))]);
 for (const [path, schema] of parsed) {
   if (schema.$schema !== "https://json-schema.org/draft/2020-12/schema") throw new Error(`${path}: JSON Schema draft must be 2020-12`);
-  if (typeof schema.$id !== "string" || !schema.$id.endsWith("/v1")) throw new Error(`${path}: stable v1 $id required`);
+  const expectedVersion = path.endsWith("orchestration-inventory-v2.schema.json") ? "/v2" : "/v1";
+  if (typeof schema.$id !== "string" || !schema.$id.endsWith(expectedVersion)) throw new Error(`${path}: stable ${expectedVersion.slice(1)} $id required`);
   if (schema.type !== "object" && !Array.isArray(schema.oneOf)) throw new Error(`${path}: root must define an object or a oneOf union`);
 }
 

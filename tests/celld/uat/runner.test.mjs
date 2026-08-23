@@ -173,6 +173,37 @@ test("live driver process timeout is an ERROR rather than NOT_RUN or FAIL", () =
   assert.equal(result.cleanup_status, "failed");
 });
 
+test("live protocol distinguishes ordinary driver exit 3 from typed cleanup-residue exit 4", () => {
+  const repoRoot = new URL("../../../", import.meta.url).pathname.replace(/\/$/, "");
+  const context = {
+    driverId: "celld-live-orchestration",
+    scenarioId: "UAT-CELLD-003",
+    runId: "live-test",
+    profilePath: "/tmp/profile.json",
+    outputDir: "/tmp/output",
+    repoRoot,
+  };
+  const driverError = runSafeLiveDriver({
+    program: process.execPath,
+    args: ["tests/celld/uat/fixtures/live-driver-exit.mjs", "3"],
+    timeout_ms: 2_000,
+  }, context);
+  const cleanupResidue = runSafeLiveDriver({
+    program: process.execPath,
+    args: ["tests/celld/uat/fixtures/live-driver-exit.mjs", "4"],
+    timeout_ms: 2_000,
+  }, context);
+
+  assert.equal(driverError.kind, "error");
+  assert.equal(driverError.error_class, "driver_error");
+  assert.equal(driverError.cleanup_status, "unknown");
+  assert.equal(driverError.command.exit_code, 3);
+  assert.equal(cleanupResidue.kind, "error");
+  assert.equal(cleanupResidue.error_class, "cleanup_residue");
+  assert.equal(cleanupResidue.cleanup_status, "failed");
+  assert.equal(cleanupResidue.command.exit_code, 4);
+});
+
 test("an absent registered driver is a pre-mutation NOT_RUN", () => {
   const result = runSafeLiveDriver({ program: process.execPath, args: ["scripts/does-not-exist.mjs"], timeout_ms: 20 }, {
     driverId: "celld-live-orchestration", scenarioId: "UAT-CELLD-003", runId: "live-test", profilePath: "/tmp/profile.json", outputDir: "/tmp/output", repoRoot: process.cwd(),

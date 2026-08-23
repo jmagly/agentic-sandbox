@@ -1,0 +1,136 @@
+{
+  "header": {
+    "schema_version": "agentic-sandbox.celld-orchestration-inventory/v2",
+    "run_id": "golden-run",
+    "working_root": "/dev/shm/agentic-celld-orchestration/golden-run",
+    "owner": {
+      "repository": "roctinam/agentic-sandbox",
+      "workflow": "celld-qualification.yml",
+      "run_id": "golden-run",
+      "uid": 1000,
+      "gid": 1000
+    },
+    "host_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+    "created_at": "2026-08-23T00:00:00.000Z",
+    "updated_at": "2026-08-23T00:00:01.000Z",
+    "state": "active",
+    "last_sequence": 2,
+    "incomplete_mutation_ids": [],
+    "resources": [
+      {
+        "scenario_id": "UAT-CELLD-003",
+        "instance_id": "123e4567-e89b-42d3-a456-426614174000",
+        "name": "celld-golden-provider",
+        "substrate": "docker",
+        "status": "active",
+        "last_sequence": 2,
+        "planned_at": "2026-08-23T00:00:00.000Z",
+        "updated_at": "2026-08-23T00:00:01.000Z"
+      }
+    ],
+    "faults": []
+  },
+  "plan": {
+    "sequence": 1,
+    "mutation_id": "123e4567-e89b-42d3-a456-426614174111",
+    "event": "planned",
+    "mutation": "provider_action",
+    "scenario_id": "UAT-CELLD-003",
+    "subject_type": "provider_resource",
+    "subject": {
+      "instance_id": "123e4567-e89b-42d3-a456-426614174000",
+      "name": "celld-golden-provider",
+      "substrate": "docker",
+      "operation_id": "golden-provision",
+      "generation": 1,
+      "action": "provision",
+      "request_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "recorded_at": "2026-08-23T00:00:00.000Z",
+    "previous_entry_sha256": null,
+    "entry_sha256": "8abc8f7a5efb76e222a59911b329ef40e9a76b47333d40a259cb77d62c769d79"
+  },
+  "vectors": [
+    {
+      "name": "acknowledgement-is-not-terminal",
+      "journal_head_sha256": "0991169f1aa96824fb549823f22bfe094a89fe12515f61f21bea4dd348e5d75b",
+      "terminal": {
+        "sequence": 2,
+        "mutation_id": "123e4567-e89b-42d3-a456-426614174111",
+        "event": "completed",
+        "mutation": "provider_action",
+        "scenario_id": "UAT-CELLD-003",
+        "subject_type": "provider_resource",
+        "subject": {
+          "instance_id": "123e4567-e89b-42d3-a456-426614174000",
+          "name": "celld-golden-provider",
+          "substrate": "docker",
+          "operation_id": "golden-provision",
+          "generation": 1,
+          "action": "provision",
+          "request_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "plan_sequence": 1,
+        "outcome": "acknowledged",
+        "observed_identity_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "recorded_at": "2026-08-23T00:00:01.000Z",
+        "previous_entry_sha256": "8abc8f7a5efb76e222a59911b329ef40e9a76b47333d40a259cb77d62c769d79",
+        "entry_sha256": "0991169f1aa96824fb549823f22bfe094a89fe12515f61f21bea4dd348e5d75b"
+      }
+    },
+    {
+      "name": "provider-action-cannot-be-applied",
+      "journal_head_sha256": "26cd06c7a39b477757e5da850d1924d10ef136a512c8f2ec3732b092f4eb9142",
+      "terminal": {
+        "sequence": 2,
+        "mutation_id": "123e4567-e89b-42d3-a456-426614174111",
+        "event": "completed",
+        "mutation": "provider_action",
+        "scenario_id": "UAT-CELLD-003",
+        "subject_type": "provider_resource",
+        "subject": {
+          "instance_id": "123e4567-e89b-42d3-a456-426614174000",
+          "name": "celld-golden-provider",
+          "substrate": "docker",
+          "operation_id": "golden-provision",
+          "generation": 1,
+          "action": "provision",
+          "request_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "plan_sequence": 1,
+        "outcome": "applied",
+        "observed_identity_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "recorded_at": "2026-08-23T00:00:01.000Z",
+        "previous_entry_sha256": "8abc8f7a5efb76e222a59911b329ef40e9a76b47333d40a259cb77d62c769d79",
+        "entry_sha256": "26cd06c7a39b477757e5da850d1924d10ef136a512c8f2ec3732b092f4eb9142"
+      }
+    },
+    {
+      "name": "provider-action-cannot-be-healed",
+      "journal_head_sha256": "d24e497d985f224b292d58f02bbf093dae2fd2bd574f1eaa8b24a07e21bafda2",
+      "terminal": {
+        "sequence": 2,
+        "mutation_id": "123e4567-e89b-42d3-a456-426614174111",
+        "event": "completed",
+        "mutation": "provider_action",
+        "scenario_id": "UAT-CELLD-003",
+        "subject_type": "provider_resource",
+        "subject": {
+          "instance_id": "123e4567-e89b-42d3-a456-426614174000",
+          "name": "celld-golden-provider",
+          "substrate": "docker",
+          "operation_id": "golden-provision",
+          "generation": 1,
+          "action": "provision",
+          "request_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "plan_sequence": 1,
+        "outcome": "healed",
+        "observed_identity_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "recorded_at": "2026-08-23T00:00:01.000Z",
+        "previous_entry_sha256": "8abc8f7a5efb76e222a59911b329ef40e9a76b47333d40a259cb77d62c769d79",
+        "entry_sha256": "d24e497d985f224b292d58f02bbf093dae2fd2bd574f1eaa8b24a07e21bafda2"
+      }
+    }
+  ]
+}

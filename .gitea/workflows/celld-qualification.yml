@@ -169,6 +169,16 @@ jobs:
           [[ "${docker_image_ref}" =~ ^sha256:[0-9a-f]{64}$ ]]
           echo "CELLD_ORCHESTRATION_DOCKER_IMAGE_REF=${docker_image_ref}" >> "${GITHUB_ENV}"
 
+      - name: Discover and recover retained same-run orchestration inventory
+        run: |
+          set -euo pipefail
+          node scripts/celld-live-orchestration.mjs recover-retained \
+            --run-id "titan-${GITHUB_RUN_ID}" \
+            --orchestration-root /dev/shm/agentic-celld-orchestration \
+            --retained-run-root "/dev/shm/agentic-celld-orchestration/titan-${GITHUB_RUN_ID}" \
+            --profile "/dev/shm/agentic-celld-storage/titan-${GITHUB_RUN_ID}/live-profile.json" \
+            --exact-run-owner "titan-${GITHUB_RUN_ID}"
+
       - name: Prepare pinned storage candidate for UAT-010
         run: |
           set -euo pipefail
@@ -264,6 +274,17 @@ jobs:
             --profile "${CELLD_STORAGE_LIVE_PROFILE}" \
             --output artifacts/celld-qualification-profile-readiness.json
 
+      - name: Recover exact orchestration inventory before qualification
+        run: |
+          set -euo pipefail
+          if [[ "${CELLD_QUALIFICATION_ENABLE_ORCHESTRATION}" != "true" ]]; then
+            echo "Skipping orchestration recovery outside an enabled live-orchestration lane"
+            exit 0
+          fi
+          node scripts/celld-live-orchestration.mjs recover \
+            --config "${CELLD_ORCHESTRATION_CONFIG}" \
+            --profile "${CELLD_STORAGE_LIVE_PROFILE}"
+
       - name: Qualify destination and rehearse verified offline object-store migration
         run: |
           set -euo pipefail
@@ -333,6 +354,19 @@ jobs:
           fi
           exit "${cleanup_rc}"
 
+      - name: Reap exact orchestration controller state
+        if: always()
+        run: |
+          set -euo pipefail
+          if [[ -n "${CELLD_ORCHESTRATION_CONFIG:-}" && -f "${CELLD_ORCHESTRATION_CONFIG}" ]]; then
+            cleanup_rc=0
+            node scripts/celld-live-worker.mjs cleanup --config "${CELLD_ORCHESTRATION_CONFIG}" || cleanup_rc=4
+            node scripts/celld-live-network-auth.mjs cleanup --config "${CELLD_ORCHESTRATION_CONFIG}" || cleanup_rc=4
+            node scripts/celld-live-orchestration.mjs cleanup --config "${CELLD_ORCHESTRATION_CONFIG}" --profile "${CELLD_STORAGE_LIVE_PROFILE}" || cleanup_rc=4
+            rmdir /dev/shm/agentic-celld-orchestration 2>/dev/null || cleanup_rc=4
+            exit "${cleanup_rc}"
+          fi
+
       - name: Reap exact storage fixture
         if: always()
         run: |
@@ -344,17 +378,6 @@ jobs:
           if [[ -n "${CELLD_STORAGE_FIXTURE_CONFIG:-}" && -f "${CELLD_STORAGE_FIXTURE_CONFIG}" ]]; then
             node scripts/celld-seaweedfs-fixture.mjs cleanup --config "${CELLD_STORAGE_FIXTURE_CONFIG}"
             rmdir /dev/shm/agentic-celld-storage 2>/dev/null || true
-          fi
-
-      - name: Reap exact orchestration controller state
-        if: always()
-        run: |
-          set -euo pipefail
-          if [[ -n "${CELLD_ORCHESTRATION_CONFIG:-}" && -f "${CELLD_ORCHESTRATION_CONFIG}" ]]; then
-            node scripts/celld-live-worker.mjs cleanup --config "${CELLD_ORCHESTRATION_CONFIG}"
-            node scripts/celld-live-network-auth.mjs cleanup --config "${CELLD_ORCHESTRATION_CONFIG}"
-            node scripts/celld-live-orchestration.mjs cleanup --config "${CELLD_ORCHESTRATION_CONFIG}"
-            rmdir /dev/shm/agentic-celld-orchestration 2>/dev/null || true
           fi
 
       - name: Remove exact orchestration Docker image

@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+
+import * as liveOrchestration from "../../../scripts/celld-live-orchestration.mjs";
 
 import {
   applyPlannedOrchestrationFault,
@@ -32,6 +34,8 @@ function config(overrides = {}) {
     management_binary_path: "/repo/.celld-target/release/agentic-mgmt",
     agent_client_binary_path: "/repo/.celld-target/release/agent-client",
     callback_relay_binary_path: "/repo/tools/celld-callback-relay/target/x86_64-unknown-linux-musl/release/agentic-celld-callback-relay",
+    qemu_cleanup_helper_path: "/usr/libexec/agentic-sandbox/agentic-celld-qemu-cleanup-helper",
+    qemu_cleanup_helper_sha256: "e".repeat(64),
     docker_image_ref: `sha256:${"a".repeat(64)}`,
     base_images_dir: "/build/agentic-sandbox/base-images",
     vm_storage_dir: "/build/agentic-sandbox/vms",
@@ -199,6 +203,235 @@ function inventory(overrides = {}) {
   };
 }
 
+function canonicalJson(value) {
+  if (value === null || typeof value === "boolean" || typeof value === "string") return JSON.stringify(value);
+  if (typeof value === "number") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
+}
+
+function appendV2JournalEntry(document, entry, recordedAt) {
+  const base = {
+    sequence: document.journal.length + 1,
+    ...entry,
+    recorded_at: recordedAt,
+    previous_entry_sha256: document.journal.at(-1)?.entry_sha256 ?? null,
+  };
+  const record = {
+    ...base,
+    entry_sha256: createHash("sha256").update(canonicalJson(base)).digest("hex"),
+  };
+  document.journal.push(record);
+  document.last_sequence = record.sequence;
+  document.journal_head_sha256 = record.entry_sha256;
+  document.updated_at = recordedAt;
+  const terminal = new Set(document.journal.filter((candidate) => candidate.event !== "planned").map((candidate) => candidate.mutation_id));
+  document.incomplete_mutation_ids = document.journal
+    .filter((candidate) => candidate.event === "planned" && !terminal.has(candidate.mutation_id))
+    .map((candidate) => candidate.mutation_id);
+  return record;
+}
+
+function providerIntent(action = "provision") {
+  return {
+    instance_id: "123e4567-e89b-42d3-a456-426614174000",
+    name: "celld-test-provider",
+    substrate: "docker",
+    operation_id: `operation-${action}`,
+    generation: 1,
+    action,
+    request_sha256: "a".repeat(64),
+  };
+}
+
+function exactDockerTerminalObservation({ present = true, state = "created" } = {}) {
+  if (!present) return { owned: true, present: false, state: "absent", provider_storage_present: false, provider_identity_sha256: null, configuration_sha256: null };
+  return {
+    owned: true,
+    present: true,
+    state,
+    provider_storage_present: false,
+    provider_id: "1".repeat(64),
+    provider_identity_sha256: "c".repeat(64),
+    configuration_sha256: "d".repeat(64),
+    ownership_binding_sha256: "2".repeat(64),
+    managed_network_id: "3".repeat(64),
+    managed_network_identity_sha256: "4".repeat(64),
+    managed_network_configuration_sha256: "5".repeat(64),
+  };
+}
+
+function exactFaultBinding() {
+  return {
+    owned: true,
+    provider_id: "1".repeat(64),
+    target_identity_sha256: "2".repeat(64),
+    target_ownership_sha256: "3".repeat(64),
+  };
+}
+
+function inventoryV2({ includeProvision = true, completedProvision = false } = {}) {
+  const createdAt = "2026-08-23T00:00:00.000Z";
+  const document = {
+    schema_version: "agentic-sandbox.celld-orchestration-inventory/v2",
+    run_id: "test-run",
+    working_root: "/dev/shm/agentic-celld-orchestration/test-run",
+    owner: {
+      repository: "roctinam/agentic-sandbox",
+      workflow: "celld-qualification.yml",
+      run_id: "test-run",
+      uid: typeof process.getuid === "function" ? process.getuid() : 0,
+      gid: typeof process.getgid === "function" ? process.getgid() : 0,
+    },
+    host_sha256: "2".repeat(64),
+    created_at: createdAt,
+    updated_at: createdAt,
+    state: "active",
+    last_sequence: 0,
+    journal_head_sha256: null,
+    incomplete_mutation_ids: [],
+    resources: [],
+    faults: [],
+    journal: [],
+  };
+  if (!includeProvision) {
+    document.state = "prepared";
+    return document;
+  }
+  const mutationId = "123e4567-e89b-42d3-a456-426614174111";
+  const subject = providerIntent();
+  const plan = appendV2JournalEntry(document, {
+    mutation_id: mutationId,
+    event: "planned",
+    mutation: "provider_action",
+    scenario_id: "UAT-CELLD-003",
+    subject_type: "provider_resource",
+    subject,
+  }, createdAt);
+  document.resources.push({
+    scenario_id: "UAT-CELLD-003",
+    instance_id: subject.instance_id,
+    name: subject.name,
+    substrate: subject.substrate,
+    status: completedProvision ? "active" : "planned",
+    last_sequence: plan.sequence,
+    planned_at: createdAt,
+    updated_at: createdAt,
+  });
+  if (completedProvision) {
+    const completedAt = "2026-08-23T00:00:01.000Z";
+    const observation = exactDockerTerminalObservation();
+    const completion = appendV2JournalEntry(document, {
+      mutation_id: mutationId,
+      event: "completed",
+      mutation: "provider_action",
+      scenario_id: "UAT-CELLD-003",
+      subject_type: "provider_resource",
+      subject,
+      plan_sequence: plan.sequence,
+      outcome: "effect_observed",
+      observed_provider_id: observation.provider_id,
+      observed_identity_sha256: observation.provider_identity_sha256,
+      observed_configuration_sha256: observation.configuration_sha256,
+      observed_ownership_binding_sha256: observation.ownership_binding_sha256,
+      observed_managed_network_id: observation.managed_network_id,
+      observed_managed_network_identity_sha256: observation.managed_network_identity_sha256,
+      observed_managed_network_configuration_sha256: observation.managed_network_configuration_sha256,
+    }, completedAt);
+    document.resources[0].last_sequence = completion.sequence;
+    document.resources[0].updated_at = completedAt;
+    document.resources[0].provider_id = observation.provider_id;
+    document.resources[0].provider_identity_sha256 = observation.provider_identity_sha256;
+    document.resources[0].configuration_sha256 = observation.configuration_sha256;
+    document.resources[0].ownership_binding_sha256 = observation.ownership_binding_sha256;
+    document.resources[0].managed_network_id = observation.managed_network_id;
+    document.resources[0].managed_network_identity_sha256 = observation.managed_network_identity_sha256;
+    document.resources[0].managed_network_configuration_sha256 = observation.managed_network_configuration_sha256;
+  }
+  return document;
+}
+
+function exactOrchestrationTestRoot(prefix) {
+  const parent = "/dev/shm/agentic-celld-orchestration";
+  const removeParent = !existsSync(parent);
+  mkdirSync(parent, { recursive: true, mode: 0o700 });
+  const outer = mkdtempSync(join(parent, `${prefix}-`));
+  const root = join(outer, "test-run");
+  mkdirSync(root, { mode: 0o700 });
+  return {
+    outer,
+    root,
+    cleanup() {
+      rmSync(outer, { recursive: true, force: true });
+      if (removeParent) rmdirSync(parent);
+    },
+  };
+}
+
+test("orchestration inventory v2 contract exposes exact typed mutation journal fields", () => {
+  const schema = JSON.parse(readFileSync(new URL("./orchestration-inventory-v2.schema.json", import.meta.url), "utf8"));
+  assert.equal(schema.$id, "https://agentic-sandbox.dev/schemas/celld-orchestration-inventory/v2");
+  assert.equal(schema.properties.schema_version.const, "agentic-sandbox.celld-orchestration-inventory/v2");
+  assert.deepEqual(
+    schema.$defs.journalEntry.properties.mutation.enum,
+    ["provider_action", "provider_cleanup", "fault_apply", "fault_heal"],
+  );
+  for (const field of ["last_sequence", "journal_head_sha256", "incomplete_mutation_ids", "journal"]) {
+    assert.ok(schema.required.includes(field), field);
+  }
+  for (const field of ["target_identity_sha256", "target_ownership_sha256"]) {
+    assert.ok(schema.$defs.faultIntent.required.includes(field), field);
+    assert.ok(schema.$defs.fault.required.includes(field), field);
+  }
+  for (const field of ["provider_id", "ownership_binding_sha256", "managed_network_id", "managed_network_identity_sha256", "managed_network_configuration_sha256", "provider_storage_identity_sha256", "storage_path"]) {
+    assert.ok(schema.$defs.resource.properties[field], field);
+  }
+  for (const field of [
+    "observed_provider_id",
+    "observed_ownership_binding_sha256",
+    "observed_managed_network_id",
+    "observed_managed_network_identity_sha256",
+    "observed_managed_network_configuration_sha256",
+    "observed_provider_storage_identity_sha256",
+    "observed_storage_path",
+  ]) assert.ok(schema.$defs.journalEntry.properties[field], field);
+});
+
+test("orchestration inventory v2 accepts a contiguous hash-chained replayable journal", () => {
+  const liveConfig = config({
+    run_id: "test-run",
+    working_root: "/dev/shm/agentic-celld-orchestration/test-run",
+    inventory_path: "/dev/shm/agentic-celld-orchestration/test-run/orchestration-inventory.json",
+  });
+  assert.deepEqual(
+    validateOrchestrationInventory(inventoryV2(), liveConfig, { expectedHostSha256: "2".repeat(64) }),
+    [],
+  );
+});
+
+test("orchestration inventory v2 rejects broken sequence, hash, completion, and materialized state", () => {
+  const liveConfig = config({
+    run_id: "test-run",
+    working_root: "/dev/shm/agentic-celld-orchestration/test-run",
+    inventory_path: "/dev/shm/agentic-celld-orchestration/test-run/orchestration-inventory.json",
+  });
+  const invalid = [
+    (document) => { document.journal[0].sequence = 2; },
+    (document) => { document.journal[0].entry_sha256 = "f".repeat(64); },
+    (document) => { document.journal[0].event = "completed"; },
+    (document) => { document.resources[0].instance_id = "123e4567-e89b-42d3-a456-426614174999"; },
+    (document) => { document.incomplete_mutation_ids = []; },
+  ];
+  for (const corrupt of invalid) {
+    const document = inventoryV2();
+    corrupt(document);
+    assert.notDeepEqual(
+      validateOrchestrationInventory(document, liveConfig, { expectedHostSha256: "2".repeat(64) }),
+      [],
+    );
+  }
+});
+
 test("orchestration inventory binds the exact run, repository, workflow, host, and fixed path", () => {
   const liveConfig = config({
     run_id: "test-run",
@@ -281,6 +514,540 @@ test("provider resources and fault targets are durably planned before mutation",
   await healPlannedOrchestrationFault(runtime, fault, async () => events.push("fault-heal"));
   assert.ok(events.indexOf("fault-heal") < events.indexOf("persist:1:1:healed"));
   assert.deepEqual(validateOrchestrationInventory(runtime.orchestrationInventory, liveConfig, { expectedHostSha256: "2".repeat(64) }), []);
+});
+
+test("Worker acknowledgement leaves every provider action incomplete until independent terminal observation", async (t) => {
+  const completeObserved = liveOrchestration.completeObservedProviderMutation;
+  for (const action of ["provision", "start", "stop", "destroy"]) {
+    await t.test(action, async () => {
+      const document = action === "provision"
+        ? inventoryV2({ includeProvision: false })
+        : inventoryV2({ completedProvision: true });
+      const events = [];
+      const instanceId = "123e4567-e89b-42d3-a456-426614174000";
+      const runtime = {
+        scenarioId: "UAT-CELLD-003",
+        config: config({
+          run_id: "test-run",
+          working_root: "/dev/shm/agentic-celld-orchestration/test-run",
+          inventory_path: "/dev/shm/agentic-celld-orchestration/test-run/orchestration-inventory.json",
+        }),
+        orchestrationInventory: document,
+        providerResources: new Map([[instanceId, { instanceId, name: "celld-test-provider", substrate: "docker" }]]),
+        workerEndpoint: "http://127.0.0.1:18080",
+        fleet: { worker_vars_file_ref: "/protected/worker-vars" },
+        persistInventory: (_path, persisted) => {
+          const entry = persisted.journal.at(-1);
+          events.push(`commit:${entry.event}:${entry.mutation}:${entry.subject.action}`);
+        },
+        sendWorkerCommand: async (request) => {
+          events.push(`provider:${request.action}`);
+          return { status: 202, body: { effects: [{ operation_id: request.operationId }] } };
+        },
+      };
+      const effect = await issueCommand(runtime, {
+        instanceId,
+        generation: 1,
+        operationId: `operation-${action}`,
+        action,
+        payload: action === "provision"
+          ? { runtime: "docker", name: "celld-test-provider" }
+          : {},
+      });
+      assert.deepEqual(events, [
+        `commit:planned:provider_action:${action}`,
+        `provider:${action}`,
+      ]);
+      assert.equal(document.incomplete_mutation_ids.length, 1, "HTTP acknowledgement is not provider-terminal evidence");
+      assert.equal(typeof completeObserved, "function", "provider journal completion needs an independent observation boundary");
+
+      const observation = action === "destroy"
+        ? exactDockerTerminalObservation({ present: false })
+        : exactDockerTerminalObservation({ state: action === "start" ? "running" : action === "stop" ? "exited" : "created" });
+      await completeObserved(runtime, { effect, instanceId, generation: 1, action, observation });
+
+      assert.deepEqual(events, [
+        `commit:planned:provider_action:${action}`,
+        `provider:${action}`,
+        `commit:completed:provider_action:${action}`,
+      ]);
+      assert.deepEqual(document.incomplete_mutation_ids, []);
+      if (action === "provision") {
+        assert.equal(document.resources[0].provider_identity_sha256, "c".repeat(64));
+        assert.equal(document.resources[0].configuration_sha256, "d".repeat(64));
+      }
+    });
+  }
+});
+
+test("provider terminal authorization is explicit and transactional before persistence", async (t) => {
+  const vectors = [
+    {
+      name: "missing owned assertion",
+      substrate: "docker",
+      observation: {
+        present: true,
+        state: "created",
+        provider_storage_present: false,
+        provider_identity_sha256: "c".repeat(64),
+        configuration_sha256: "d".repeat(64),
+      },
+      error: /owned|authorization/,
+    },
+    {
+      name: "QEMU provision without owned storage",
+      substrate: "qemu",
+      observation: {
+        owned: true,
+        present: true,
+        state: "shut off",
+        provider_storage_present: false,
+        provider_identity_sha256: "c".repeat(64),
+        configuration_sha256: "d".repeat(64),
+      },
+      error: /storage|owned/,
+    },
+  ];
+  for (const vector of vectors) {
+    await t.test(vector.name, async () => {
+      const document = inventoryV2({ includeProvision: false });
+      const instanceId = "123e4567-e89b-42d3-a456-426614174000";
+      let persistCalls = 0;
+      const runtime = {
+        scenarioId: "UAT-CELLD-003",
+        config: config({
+          run_id: "test-run",
+          working_root: "/dev/shm/agentic-celld-orchestration/test-run",
+          inventory_path: "/dev/shm/agentic-celld-orchestration/test-run/orchestration-inventory.json",
+        }),
+        orchestrationInventory: document,
+        providerResources: new Map(),
+        workerEndpoint: "http://127.0.0.1:18080",
+        fleet: { worker_vars_file_ref: "/protected/worker-vars" },
+        persistInventory: () => { persistCalls += 1; },
+        sendWorkerCommand: async (request) => ({ status: 202, body: { effects: [{ operation_id: request.operationId }] } }),
+      };
+      const effect = await issueCommand(runtime, {
+        instanceId,
+        generation: 1,
+        operationId: `unauthorized-${vector.substrate}`,
+        action: "provision",
+        payload: { runtime: vector.substrate, name: "celld-test-provider" },
+      });
+      const beforeTerminal = structuredClone(document);
+      await assert.rejects(
+        liveOrchestration.completeObservedProviderMutation(runtime, {
+          effect,
+          instanceId,
+          generation: 1,
+          action: "provision",
+          observation: vector.observation,
+        }),
+        vector.error,
+      );
+      assert.deepEqual(document, beforeTerminal, "invalid terminal evidence must not mutate the in-memory journal or materialized view");
+      assert.equal(persistCalls, 1, "only the durable plan may be persisted");
+    });
+  }
+});
+
+test("provider provision persists immutable run-owned destructive bindings for Docker and QEMU", async (t) => {
+  const vectors = [
+    {
+      substrate: "docker",
+      observation: {
+        owned: true,
+        present: true,
+        state: "created",
+        provider_storage_present: false,
+        provider_id: "1".repeat(64),
+        provider_identity_sha256: "2".repeat(64),
+        configuration_sha256: "3".repeat(64),
+        ownership_binding_sha256: "4".repeat(64),
+        managed_network_id: "5".repeat(64),
+        managed_network_identity_sha256: "6".repeat(64),
+        managed_network_configuration_sha256: "7".repeat(64),
+      },
+      fields: ["ownership_binding_sha256", "managed_network_identity_sha256", "managed_network_configuration_sha256"],
+    },
+    {
+      substrate: "qemu",
+      observation: {
+        owned: true,
+        present: true,
+        state: "shut off",
+        provider_storage_present: true,
+        provider_id: "11111111-2222-4333-8444-555555555555",
+        provider_identity_sha256: "8".repeat(64),
+        configuration_sha256: "9".repeat(64),
+        ownership_binding_sha256: "a".repeat(64),
+        provider_storage_identity_sha256: "b".repeat(64),
+        storage_path: "/build/agentic-sandbox/vms/celld-test-provider",
+        storage_device: "8",
+        storage_inode: "9",
+        storage_uid: "1000",
+        storage_gid: "1000",
+      },
+      fields: ["ownership_binding_sha256", "provider_storage_identity_sha256"],
+    },
+  ];
+  for (const vector of vectors) {
+    await t.test(vector.substrate, async () => {
+      const document = inventoryV2({ includeProvision: false });
+      const instanceId = "123e4567-e89b-42d3-a456-426614174000";
+      const runtime = {
+        scenarioId: "UAT-CELLD-003",
+        config: config({
+          run_id: "test-run",
+          working_root: "/dev/shm/agentic-celld-orchestration/test-run",
+          inventory_path: "/dev/shm/agentic-celld-orchestration/test-run/orchestration-inventory.json",
+        }),
+        orchestrationInventory: document,
+        providerResources: new Map(),
+        workerEndpoint: "http://127.0.0.1:18080",
+        fleet: { worker_vars_file_ref: "/protected/worker-vars" },
+        persistInventory: () => {},
+        sendWorkerCommand: async (request) => ({ status: 202, body: { effects: [{ operation_id: request.operationId }] } }),
+      };
+      const effect = await issueCommand(runtime, {
+        instanceId,
+        generation: 1,
+        operationId: `binding-${vector.substrate}`,
+        action: "provision",
+        payload: { runtime: vector.substrate, name: "celld-test-provider" },
+      });
+      const resource = await liveOrchestration.completeObservedProviderMutation(runtime, {
+        effect,
+        instanceId,
+        generation: 1,
+        action: "provision",
+        observation: vector.observation,
+      });
+      assert.equal(resource.provider_identity_sha256, vector.observation.provider_identity_sha256);
+      assert.equal(resource.configuration_sha256, vector.observation.configuration_sha256);
+      for (const field of vector.fields) assert.equal(resource[field], vector.observation[field], field);
+    });
+  }
+});
+
+test("fault apply and heal require independent observers before journal completion", async () => {
+  const document = inventoryV2({ includeProvision: false });
+  const events = [];
+  let faultPresent = false;
+  const binding = exactFaultBinding();
+  const runtime = {
+    scenarioId: "UAT-CELLD-006",
+    runId: "test-run",
+    config: config({
+      run_id: "test-run",
+      working_root: "/dev/shm/agentic-celld-orchestration/test-run",
+      inventory_path: "/dev/shm/agentic-celld-orchestration/test-run/orchestration-inventory.json",
+    }),
+    orchestrationInventory: document,
+    resolveFaultTarget: async () => binding,
+    revalidateFaultTarget: async () => binding,
+    persistInventory: (_path, persisted) => {
+      const entry = persisted.journal.at(-1);
+      events.push(`commit:${entry.event}:${entry.mutation}`);
+    },
+    observeFaultTarget: async ({ plan }) => {
+      events.push(`observe:${plan.mutation}:${faultPresent ? "present" : "absent"}`);
+      return { ...binding, present: faultPresent };
+    },
+  };
+
+  const record = await applyPlannedOrchestrationFault(
+    runtime,
+    { kind: "callback_relay_pause", target: "celld-test-relay" },
+    async () => {
+      events.push("fault-apply");
+      faultPresent = true;
+    },
+  );
+  await healPlannedOrchestrationFault(runtime, record, async () => {
+    events.push("fault-heal");
+    faultPresent = false;
+  });
+
+  assert.deepEqual(events, [
+    "commit:planned:fault_apply",
+    "fault-apply",
+    "observe:fault_apply:present",
+    "commit:completed:fault_apply",
+    "commit:planned:fault_heal",
+    "fault-heal",
+    "observe:fault_heal:absent",
+    "commit:completed:fault_heal",
+  ]);
+});
+
+test("fault mutation persists an immutable run-owned target binding before the destructive callback", async () => {
+  const document = inventoryV2({ includeProvision: false });
+  const events = [];
+  const binding = {
+    owned: true,
+    provider_id: "1".repeat(64),
+    target_identity_sha256: "2".repeat(64),
+    target_ownership_sha256: "3".repeat(64),
+    labels: { "agentic-run-id": "test-run", "agentic-source": "celld-live-orchestration" },
+  };
+  const runtime = {
+    scenarioId: "UAT-CELLD-006",
+    runId: "test-run",
+    config: config({
+      run_id: "test-run",
+      working_root: "/dev/shm/agentic-celld-orchestration/test-run",
+      inventory_path: "/dev/shm/agentic-celld-orchestration/test-run/orchestration-inventory.json",
+    }),
+    orchestrationInventory: document,
+    resolveFaultTarget: async () => {
+      events.push("resolve-exact-target");
+      return binding;
+    },
+    observeFaultTarget: async ({ plan }) => {
+      events.push("observe-effect");
+      assert.equal(plan.subject.target_identity_sha256, binding.target_identity_sha256);
+      assert.equal(plan.subject.target_ownership_sha256, binding.target_ownership_sha256);
+      return { ...binding, present: true };
+    },
+    persistInventory: (_path, inventory) => events.push(`commit:${inventory.journal.at(-1).event}`),
+  };
+  let destructiveCalls = 0;
+  await applyPlannedOrchestrationFault(
+    runtime,
+    { kind: "callback_relay_pause", target: "celld-test-relay" },
+    async (exactTarget) => {
+      events.push("destructive-effect");
+      destructiveCalls += 1;
+      assert.deepEqual(exactTarget, binding);
+    },
+  );
+  assert.deepEqual(events, ["resolve-exact-target", "commit:planned", "destructive-effect", "observe-effect", "commit:completed"]);
+  assert.equal(destructiveCalls, 1);
+  assert.equal(document.faults[0].target_identity_sha256, binding.target_identity_sha256);
+  assert.equal(document.faults[0].target_ownership_sha256, binding.target_ownership_sha256);
+});
+
+test("fault target substitution immediately before the effect makes zero destructive calls", async () => {
+  const document = inventoryV2({ includeProvision: false });
+  const authorized = {
+    owned: true,
+    provider_id: "1".repeat(64),
+    target_identity_sha256: "2".repeat(64),
+    target_ownership_sha256: "3".repeat(64),
+  };
+  const substituted = { ...authorized, provider_id: "4".repeat(64), target_identity_sha256: "5".repeat(64) };
+  const runtime = {
+    scenarioId: "UAT-CELLD-006",
+    runId: "test-run",
+    config: config({
+      run_id: "test-run",
+      working_root: "/dev/shm/agentic-celld-orchestration/test-run",
+      inventory_path: "/dev/shm/agentic-celld-orchestration/test-run/orchestration-inventory.json",
+    }),
+    orchestrationInventory: document,
+    resolveFaultTarget: async () => authorized,
+    revalidateFaultTarget: async () => substituted,
+    observeFaultTarget: async () => ({ ...substituted, present: true }),
+    persistInventory: () => {},
+  };
+  let destructiveCalls = 0;
+  await assert.rejects(
+    applyPlannedOrchestrationFault(
+      runtime,
+      { kind: "callback_relay_pause", target: "celld-test-relay" },
+      async () => { destructiveCalls += 1; },
+    ),
+    /substitut|binding|identity|ownership/,
+  );
+  assert.equal(destructiveCalls, 0);
+});
+
+test("fault mutation is refused before apply when no exact observer is installed", async () => {
+  let applyCalls = 0;
+  const document = inventoryV2({ includeProvision: false });
+  const runtime = {
+    scenarioId: "UAT-CELLD-006",
+    config: config({
+      run_id: "test-run",
+      working_root: "/dev/shm/agentic-celld-orchestration/test-run",
+      inventory_path: "/dev/shm/agentic-celld-orchestration/test-run/orchestration-inventory.json",
+    }),
+    orchestrationInventory: document,
+    persistInventory: () => {},
+  };
+  await assert.rejects(
+    applyPlannedOrchestrationFault(runtime, { kind: "callback_relay_pause", target: "celld-test-relay" }, async () => { applyCalls += 1; }),
+    /observer/,
+  );
+  assert.equal(applyCalls, 0);
+  assert.deepEqual(document.incomplete_mutation_ids, []);
+});
+
+test("fault journal completion refuses an independently observed mismatched terminal state", async (t) => {
+  await t.test("apply remains incomplete when the target is still absent", async () => {
+    let applyCalls = 0;
+    let observeCalls = 0;
+    const document = inventoryV2({ includeProvision: false });
+    const binding = exactFaultBinding();
+    const runtime = {
+      scenarioId: "UAT-CELLD-006",
+      runId: "test-run",
+      config: config({
+        run_id: "test-run",
+        working_root: "/dev/shm/agentic-celld-orchestration/test-run",
+        inventory_path: "/dev/shm/agentic-celld-orchestration/test-run/orchestration-inventory.json",
+      }),
+      orchestrationInventory: document,
+      resolveFaultTarget: async () => binding,
+      revalidateFaultTarget: async () => binding,
+      persistInventory: () => {},
+      observeFaultTarget: async () => {
+        observeCalls += 1;
+        return { ...binding, present: false };
+      },
+    };
+    await assert.rejects(
+      applyPlannedOrchestrationFault(runtime, { kind: "callback_relay_pause", target: "celld-test-relay" }, async () => { applyCalls += 1; }),
+      /observ|effect|present/,
+    );
+    assert.equal(applyCalls, 1);
+    assert.equal(observeCalls, 1);
+    assert.equal(document.incomplete_mutation_ids.length, 1);
+  });
+
+  await t.test("heal remains incomplete when the target is still present", async () => {
+    let faultPresent = false;
+    let healCalls = 0;
+    const document = inventoryV2({ includeProvision: false });
+    const binding = exactFaultBinding();
+    const runtime = {
+      scenarioId: "UAT-CELLD-006",
+      runId: "test-run",
+      config: config({
+        run_id: "test-run",
+        working_root: "/dev/shm/agentic-celld-orchestration/test-run",
+        inventory_path: "/dev/shm/agentic-celld-orchestration/test-run/orchestration-inventory.json",
+      }),
+      orchestrationInventory: document,
+      resolveFaultTarget: async () => binding,
+      revalidateFaultTarget: async () => binding,
+      persistInventory: () => {},
+      observeFaultTarget: async () => ({ ...binding, present: faultPresent }),
+    };
+    const record = await applyPlannedOrchestrationFault(
+      runtime,
+      { kind: "callback_relay_pause", target: "celld-test-relay" },
+      async () => { faultPresent = true; },
+    );
+    await assert.rejects(
+      healPlannedOrchestrationFault(runtime, record, async () => { healCalls += 1; }),
+      /observ|effect|absent/,
+    );
+    assert.equal(healCalls, 1);
+    assert.equal(document.incomplete_mutation_ids.length, 1);
+  });
+});
+
+test("authorized orchestration inventory rejects unsafe run-root and hard-link ownership before mutation", async (t) => {
+  await t.test("group-accessible run root", () => {
+    const fixture = exactOrchestrationTestRoot("red-owner");
+    const { root } = fixture;
+    try {
+      const inventoryPath = join(root, "orchestration-inventory.json");
+      const liveConfig = config({ run_id: "test-run", working_root: root, inventory_path: inventoryPath });
+      const profile = { run_id: "test-run", authorization: { destructive_faults: true, exact_run_owner: "test-run", inventory_path: inventoryPath } };
+      writeFileSync(inventoryPath, `${JSON.stringify(inventory({ working_root: root }))}\n`, { mode: 0o600 });
+      chmodSync(root, 0o750);
+      assert.throws(() => loadAuthorizedOrchestrationInventory(profile, liveConfig, "2".repeat(64)));
+    } finally {
+      chmodSync(root, 0o700);
+      fixture.cleanup();
+    }
+  });
+
+  await t.test("hard-linked inventory", () => {
+    const fixture = exactOrchestrationTestRoot("red-hardlink");
+    const { root } = fixture;
+    try {
+      const inventoryPath = join(root, "orchestration-inventory.json");
+      const backingPath = join(root, "backing.json");
+      const liveConfig = config({ run_id: "test-run", working_root: root, inventory_path: inventoryPath });
+      const profile = { run_id: "test-run", authorization: { destructive_faults: true, exact_run_owner: "test-run", inventory_path: inventoryPath } };
+      writeFileSync(backingPath, `${JSON.stringify(inventory({ working_root: root }))}\n`, { mode: 0o600 });
+      linkSync(backingPath, inventoryPath);
+      assert.throws(() => loadAuthorizedOrchestrationInventory(profile, liveConfig, "2".repeat(64)));
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  await t.test("symlinked run-root component", () => {
+    const parent = "/dev/shm/agentic-celld-orchestration";
+    const removeParent = !existsSync(parent);
+    mkdirSync(parent, { recursive: true, mode: 0o700 });
+    const outer = mkdtempSync(join(parent, "red-parent-link-"));
+    try {
+      const realRoot = join(outer, "real-root");
+      const linkedRoot = join(outer, "test-run");
+      mkdirSync(realRoot, { mode: 0o700 });
+      symlinkSync(realRoot, linkedRoot);
+      const inventoryPath = join(linkedRoot, "orchestration-inventory.json");
+      const liveConfig = config({ run_id: "test-run", working_root: linkedRoot, inventory_path: inventoryPath });
+      const profile = { run_id: "test-run", authorization: { destructive_faults: true, exact_run_owner: "test-run", inventory_path: inventoryPath } };
+      writeFileSync(join(realRoot, "orchestration-inventory.json"), `${JSON.stringify(inventory({ working_root: linkedRoot }))}\n`, { mode: 0o600 });
+      assert.throws(() => loadAuthorizedOrchestrationInventory(profile, liveConfig, "2".repeat(64)));
+    } finally {
+      rmSync(outer, { recursive: true, force: true });
+      if (removeParent) rmdirSync(parent);
+    }
+  });
+});
+
+test("restart recovery reconciles an incomplete provider plan without replay and is idempotent", async () => {
+  const recover = liveOrchestration.recoverOrchestrationInventory;
+  assert.equal(typeof recover, "function", "the orchestration inventory needs an explicit restart-recovery boundary");
+
+  const document = inventoryV2();
+  const instanceId = document.resources[0].instance_id;
+  let providerPresent = true;
+  let providerActionCalls = 0;
+  let cleanupCalls = 0;
+  let observationCalls = 0;
+  const runtime = {
+    scenarioId: "UAT-CELLD-003",
+    runId: "test-run",
+    config: config({
+      run_id: "test-run",
+      working_root: "/dev/shm/agentic-celld-orchestration/test-run",
+      inventory_path: "/dev/shm/agentic-celld-orchestration/test-run/orchestration-inventory.json",
+    }),
+    orchestrationInventory: document,
+    providerResources: new Map([[instanceId, { instanceId, name: "celld-test-provider", substrate: "docker" }]]),
+    sendWorkerCommand: async () => { providerActionCalls += 1; },
+    persistInventory: () => {},
+  };
+  const dependencies = {
+    observeProviderResource: async () => {
+      observationCalls += 1;
+      return providerPresent
+        ? exactDockerTerminalObservation()
+        : exactDockerTerminalObservation({ present: false });
+    },
+    removeProviderResource: async () => {
+      cleanupCalls += 1;
+      providerPresent = false;
+    },
+  };
+
+  await recover(runtime, dependencies);
+  await recover(runtime, dependencies);
+
+  assert.equal(providerActionCalls, 0, "recovery must never replay the incomplete original action");
+  assert.equal(cleanupCalls, 1, "the exact observed target is removed once");
+  assert.ok(observationCalls >= 2, "absence is independently observed");
+  assert.deepEqual(document.incomplete_mutation_ids, []);
+  assert.equal(document.resources[0].status, "removed");
 });
 
 test("provider observations use exact owned Docker and libvirt targets", () => {
@@ -420,4 +1187,181 @@ test("Celld ownership observation rejects foreign nodes and disagreeing epochs",
     observeCelldOwnership(ownerRuntime({ epochs: [7, 8] }), { instanceId }),
     /disagree on owner identity or epoch/,
   );
+});
+
+test("provider observation rejects production-realistic Docker metadata without exact external run ownership", () => {
+  const instanceId = "123e4567-e89b-42d3-a456-426614174000";
+  const providerId = "1".repeat(64);
+  const networkId = "2".repeat(64);
+  const runtime = {
+    runId: "test-run",
+    config: config(),
+    providerResources: new Map([[instanceId, { instanceId, name: "celld-test-provider", substrate: "docker" }]]),
+    runCommand: (program, args) => {
+      assert.equal(program, "docker");
+      if (args[0] === "ps") return providerId;
+      if (args[0] === "network") {
+        return `${networkId}|${JSON.stringify({ "agentic-sandbox": "celld", "agentic-egress": "deny" })}`;
+      }
+      if (args[2].includes(".State.Status")) {
+        return `${providerId}|created|sha256:${"a".repeat(64)}|${instanceId}|admin-v2|celld-provider-network`;
+      }
+      return JSON.stringify({
+        "agentic-instance-id": instanceId,
+        "agentic-source": "admin-v2",
+        "agentic-managed-network": "celld-provider-network",
+      });
+    },
+  };
+  assert.throws(
+    () => observeOrchestrationProvider(runtime, { instanceId, name: "celld-test-provider", substrate: "docker" }),
+    /run|ownership|label|external|verif/,
+  );
+});
+
+test("provider observation rejects QEMU identity synthesized from requested name UUID and local path", () => {
+  const fixture = exactOrchestrationTestRoot("red-qemu-metadata");
+  const instanceId = "123e4567-e89b-42d3-a456-426614174000";
+  const name = "celld-test-provider";
+  const storageRoot = join(fixture.root, "vms");
+  try {
+    mkdirSync(join(storageRoot, name), { recursive: true, mode: 0o700 });
+    const runtime = {
+      runId: "test-run",
+      config: config({ vm_storage_dir: storageRoot }),
+      providerResources: new Map([[instanceId, { instanceId, name, substrate: "qemu" }]]),
+      runCommand: (program, args) => {
+        assert.equal(program, "virsh");
+        if (args.includes("list")) return `${name}\n`;
+        if (args.includes("domuuid")) return "11111111-2222-4333-8444-555555555555\n";
+        if (args.includes("domstate")) return "shut off\n";
+        if (args.includes("dumpxml")) return `<domain><name>${name}</name><devices><disk><source file="${join(storageRoot, name, "disk.qcow2")}"/></disk></devices></domain>`;
+        throw new Error(`unexpected virsh arguments: ${args.join(" ")}`);
+      },
+    };
+    assert.throws(
+      () => observeOrchestrationProvider(runtime, { instanceId, name, substrate: "qemu" }),
+      /run|ownership|metadata|external|verif/,
+    );
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("UAT-004 healing accepts only a typed same-run management PID replacement", async (t) => {
+  function processHandle(pid, runId) {
+    return {
+      pid,
+      exitCode: null,
+      signalCode: null,
+      killed: false,
+      spawn_identity: {
+        run_id: runId,
+        executable_sha256: "6".repeat(64),
+        process_start_time_ticks: String(10_000 + pid),
+      },
+    };
+  }
+
+  async function appliedManagementFault() {
+    const document = inventoryV2({ includeProvision: false });
+    const oldHandle = processHandle(4101, "test-run");
+    const runtime = {
+      scenarioId: "UAT-CELLD-004",
+      runId: "test-run",
+      config: config({
+        run_id: "test-run",
+        working_root: "/dev/shm/agentic-celld-orchestration/test-run",
+        inventory_path: "/dev/shm/agentic-celld-orchestration/test-run/orchestration-inventory.json",
+      }),
+      orchestrationInventory: document,
+      management: { processHandle: oldHandle },
+      persistInventory: () => {},
+      resolveFaultTarget: liveOrchestration.resolveOrchestrationFaultTarget,
+      revalidateFaultTarget: liveOrchestration.resolveOrchestrationFaultTarget,
+      observeFaultTarget: liveOrchestration.observeOrchestrationFaultTarget,
+    };
+    const record = await applyPlannedOrchestrationFault(runtime, { kind: "management_process_kill", target: "management" }, async () => {
+      oldHandle.killed = true;
+      oldHandle.signalCode = "SIGKILL";
+    });
+    return { document, runtime, record };
+  }
+
+  await t.test("same-run replacement is an expected heal transition", async () => {
+    const { document, runtime, record } = await appliedManagementFault();
+    runtime.management = { processHandle: processHandle(4102, "test-run") };
+    let healCalls = 0;
+    await healPlannedOrchestrationFault(runtime, record, async () => { healCalls += 1; });
+    assert.equal(healCalls, 1);
+    assert.equal(record.status, "healed");
+    const terminal = document.journal.at(-1);
+    assert.equal(terminal.target_transition?.kind, "management_process_replacement");
+    assert.equal(terminal.target_transition?.replacement_provider_id, "4102");
+  });
+
+  await t.test("foreign replacement remains denied before heal effect", async () => {
+    const { runtime, record } = await appliedManagementFault();
+    runtime.management = { processHandle: processHandle(5102, "foreign-run") };
+    let healCalls = 0;
+    await assert.rejects(
+      healPlannedOrchestrationFault(runtime, record, async () => { healCalls += 1; }),
+      /foreign|ownership|substitut|run/,
+    );
+    assert.equal(healCalls, 0);
+  });
+});
+
+test("UAT-005 response-loss signal addresses the persisted revalidated container ID, never its mutable name", async () => {
+  const signal = liveOrchestration.signalExactCallbackResponseLoss;
+  assert.equal(typeof signal, "function", "the production UAT-005 signal needs a behavior-testable exact-ID boundary");
+  const providerId = "3".repeat(64);
+  const calls = [];
+  await signal({
+    runId: "test-run",
+    runCommand: (program, args) => { calls.push([program, args]); return ""; },
+  }, {
+    owned: true,
+    target: "celld-test-node-1-callback-relay",
+    provider_id: providerId,
+    target_identity_sha256: createHash("sha256").update(`docker:${providerId}`).digest("hex"),
+    target_ownership_sha256: "4".repeat(64),
+  });
+  assert.deepEqual(calls, [["docker", ["kill", "--signal", "SIGUSR1", providerId]]]);
+  assert.equal(calls.flat(2).includes("celld-test-node-1-callback-relay"), false);
+});
+
+test("fault target resolution rejects exact-name containers with foreign or missing authoritative labels", async (t) => {
+  const providerId = "5".repeat(64);
+  const exactLabels = {
+    "dev.agentic-sandbox.repository": "roctinam/agentic-sandbox",
+    "dev.agentic-sandbox.workflow": "celld-qualification",
+    "dev.agentic-sandbox.run": "test-run",
+    "dev.agentic-sandbox.scope": "celld-qualification",
+  };
+  const vectors = [
+    { name: "fleet node foreign repository", kind: "fleet_node_stop", target: "celld-test-node-1", alter: (labels) => { labels["dev.agentic-sandbox.repository"] = "someone/else"; } },
+    { name: "fleet node missing workflow", kind: "fleet_node_stop", target: "celld-test-node-1", alter: (labels) => { delete labels["dev.agentic-sandbox.workflow"]; } },
+    { name: "callback relay foreign run", kind: "callback_response_loss", target: "celld-test-node-1-callback-relay", alter: (labels) => { labels["dev.agentic-sandbox.run"] = "foreign-run"; } },
+    { name: "callback relay missing scope", kind: "callback_relay_pause", target: "celld-test-node-1-callback-relay", alter: (labels) => { delete labels["dev.agentic-sandbox.scope"]; } },
+  ];
+  for (const vector of vectors) {
+    await t.test(vector.name, async () => {
+      const labels = structuredClone(exactLabels);
+      vector.alter(labels);
+      const runtime = {
+        runId: "test-run",
+        fleet: { nodes: [{ name: "celld-test-node-1" }] },
+        runCommand: (program, args) => {
+          assert.equal(program, "docker");
+          assert.equal(args.at(-1), vector.target, "the exact allowed target must still be inspected");
+          return `${providerId}|${JSON.stringify(labels)}`;
+        },
+      };
+      await assert.rejects(
+        liveOrchestration.resolveOrchestrationFaultTarget({ runtime, fault: { kind: vector.kind, target: vector.target } }),
+        /foreign|missing|repository|workflow|run|scope|ownership|label/,
+      );
+    });
+  }
 });

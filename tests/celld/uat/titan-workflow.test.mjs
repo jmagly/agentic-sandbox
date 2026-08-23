@@ -106,6 +106,31 @@ test("Celld qualification builds and enables the fixed live orchestration driver
   assert.match(workflow, /celld-live-orchestration\.mjs cleanup/);
 });
 
+test("Celld qualification recovers before UAT and attempts every scoped cleaner while preserving residue exit 4", () => {
+  const recovery = workflow.indexOf("celld-live-orchestration.mjs recover");
+  const catalog = workflow.indexOf("Execute automated Celld qualification catalog");
+  assert.ok(recovery > 0 && recovery < catalog, "startup recovery must precede the UAT catalog");
+
+  const cleanup = exactWorkflowStep(workflow, "Reap exact orchestration controller state");
+  assert.match(cleanup.body, /cleanup_rc=0/);
+  assert.match(cleanup.body, /node scripts\/celld-live-worker\.mjs cleanup[^\n]*\|\| cleanup_rc=4/);
+  assert.match(cleanup.body, /node scripts\/celld-live-network-auth\.mjs cleanup[^\n]*\|\| cleanup_rc=4/);
+  assert.match(cleanup.body, /node scripts\/celld-live-orchestration\.mjs cleanup[^\n]*\|\| cleanup_rc=4/);
+  assert.match(cleanup.body, /exit "\$\{cleanup_rc\}"/);
+});
+
+test("Celld qualification discovers a retained same-run inventory before preparation and never adopts another run", () => {
+  const discovery = exactWorkflowStep(workflow, "Discover and recover retained same-run orchestration inventory");
+  const prepare = exactWorkflowStep(workflow, "Prepare pinned storage candidate for UAT-010");
+  const catalog = exactWorkflowStep(workflow, "Execute automated Celld qualification catalog");
+  assert.ok(discovery.start < prepare.start && prepare.start < catalog.start);
+  assert.match(discovery.body, /celld-live-orchestration\.mjs recover-retained/);
+  assert.match(discovery.body, /--run-id "titan-\$\{GITHUB_RUN_ID\}"/);
+  assert.match(discovery.body, /--orchestration-root \/dev\/shm\/agentic-celld-orchestration/);
+  assert.match(discovery.body, /--exact-run-owner "titan-\$\{GITHUB_RUN_ID\}"/);
+  assert.doesNotMatch(discovery.body, /find [^\n]*-exec|for [^\n]*agentic-celld-orchestration\/\*/);
+});
+
 test("Celld qualification rehearses an exact two-store offline migration before UAT", () => {
   const prepare = workflow.indexOf("Prepare pinned storage candidate for UAT-010");
   const migration = workflow.indexOf("Qualify destination and rehearse verified offline object-store migration");

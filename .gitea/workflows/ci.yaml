@@ -1251,6 +1251,10 @@ jobs:
           for crate in management agent-rs cli; do
             ( cd "$crate" && cargo build --release --target "$TARGET" )
           done
+          (
+            cd tools/celld-callback-relay
+            cargo build --release --target "$TARGET"
+          )
 
       - name: Build .deb and .rpm packages
         run: |
@@ -1276,10 +1280,12 @@ jobs:
           dpkg-deb --info "$DEB"
           dpkg-deb --contents "$DEB" | grep -E '/usr/bin/(agentic-mgmt|agent-client|sandboxctl|vm-event-bridge|agentic-host-runtime-daemon)$'
           dpkg-deb --contents "$DEB" | grep -E '/usr/bin/agentic-sandbox( -> sandboxctl)?$'
+          dpkg-deb --contents "$DEB" | grep -E '/usr/libexec/agentic-sandbox/agentic-celld-qemu-cleanup-helper$'
           RPMDB="$(pwd)/dist/packages/rpmdb"
           mkdir -p "$RPMDB"
           rpm --dbpath "$RPMDB" -qip "$RPM"
           rpm --dbpath "$RPMDB" -qlp "$RPM" | grep -E '^/usr/bin/(agentic-mgmt|agent-client|sandboxctl|agentic-sandbox|vm-event-bridge|agentic-host-runtime-daemon)$'
+          rpm --dbpath "$RPMDB" -qlp "$RPM" | grep -E '^/usr/libexec/agentic-sandbox/agentic-celld-qemu-cleanup-helper$'
           test -f deploy/packaging/systemd/agentic-mgmt.service
           test -f deploy/packaging/systemd/agent-client.service
 

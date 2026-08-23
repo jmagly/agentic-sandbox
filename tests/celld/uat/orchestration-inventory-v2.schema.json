@@ -1,0 +1,374 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentic-sandbox.dev/schemas/celld-orchestration-inventory/v2",
+  "title": "Celld exact-run orchestration mutation inventory v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "run_id", "working_root", "owner", "host_sha256",
+    "created_at", "updated_at", "state", "last_sequence",
+    "journal_head_sha256", "incomplete_mutation_ids", "resources", "faults",
+    "journal"
+  ],
+  "properties": {
+    "schema_version": { "const": "agentic-sandbox.celld-orchestration-inventory/v2" },
+    "run_id": { "$ref": "#/$defs/runId" },
+    "working_root": { "type": "string", "pattern": "^/dev/shm/agentic-celld-orchestration/" },
+    "owner": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "workflow", "run_id", "uid", "gid"],
+      "properties": {
+        "repository": { "const": "roctinam/agentic-sandbox" },
+        "workflow": { "const": "celld-qualification.yml" },
+        "run_id": { "$ref": "#/$defs/runId" },
+        "uid": { "type": "integer", "minimum": 0 },
+        "gid": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "host_sha256": { "$ref": "#/$defs/sha256" },
+    "created_at": { "type": "string", "format": "date-time" },
+    "updated_at": { "type": "string", "format": "date-time" },
+    "state": { "enum": ["prepared", "active", "recovering", "cleanup_residue", "clean"] },
+    "last_sequence": { "type": "integer", "minimum": 0 },
+    "journal_head_sha256": {
+      "oneOf": [
+        { "$ref": "#/$defs/sha256" },
+        { "type": "null" }
+      ]
+    },
+    "incomplete_mutation_ids": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/mutationId" }
+    },
+    "resources": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/resource" }
+    },
+    "faults": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/fault" }
+    },
+    "journal": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/journalEntry" }
+    }
+  },
+  "$defs": {
+    "runId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "decimalId": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]{0,19})$"
+    },
+    "nonzeroDecimalId": {
+      "type": "string",
+      "pattern": "^[1-9][0-9]{0,19}$"
+    },
+    "mutationId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "scenarioId": {
+      "enum": ["UAT-CELLD-003", "UAT-CELLD-004", "UAT-CELLD-005", "UAT-CELLD-006"]
+    },
+    "instanceId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "resourceName": {
+      "type": "string",
+      "pattern": "^celld-[a-z0-9-]{1,62}$"
+    },
+    "faultId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "faultKind": {
+      "enum": ["management_process_kill", "fleet_node_stop", "callback_response_loss", "callback_relay_pause"]
+    },
+    "faultTarget": {
+      "type": "string",
+      "pattern": "^(management|celld-[a-z0-9-]{1,80})$"
+    },
+    "providerIntent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["instance_id", "name", "substrate", "operation_id", "generation", "action", "request_sha256"],
+      "properties": {
+        "instance_id": { "$ref": "#/$defs/instanceId" },
+        "name": { "$ref": "#/$defs/resourceName" },
+        "substrate": { "enum": ["qemu", "docker"] },
+        "operation_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "generation": { "type": "integer", "minimum": 1 },
+        "action": { "enum": ["provision", "start", "stop", "destroy", "cleanup"] },
+        "request_sha256": { "$ref": "#/$defs/sha256" },
+        "storage_quarantine_path": { "type": "string", "pattern": "^/" },
+        "storage_quarantine_identity_sha256": { "$ref": "#/$defs/sha256" },
+        "storage_final_capture_path": { "type": "string", "pattern": "^/" },
+        "storage_final_capture_identity_sha256": { "$ref": "#/$defs/sha256" },
+        "storage_expected_device": { "$ref": "#/$defs/decimalId" },
+        "storage_expected_inode": { "$ref": "#/$defs/nonzeroDecimalId" },
+        "storage_expected_uid": { "$ref": "#/$defs/decimalId" },
+        "storage_expected_gid": { "$ref": "#/$defs/decimalId" }
+      }
+    },
+    "faultIntent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fault_id", "kind", "target", "target_identity_sha256", "target_ownership_sha256"],
+      "properties": {
+        "fault_id": { "$ref": "#/$defs/faultId" },
+        "kind": { "$ref": "#/$defs/faultKind" },
+        "target": { "$ref": "#/$defs/faultTarget" },
+        "target_identity_sha256": { "$ref": "#/$defs/sha256" },
+        "target_ownership_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "resource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scenario_id", "instance_id", "name", "substrate", "status", "last_sequence", "planned_at", "updated_at"],
+      "properties": {
+        "scenario_id": { "$ref": "#/$defs/scenarioId" },
+        "instance_id": { "$ref": "#/$defs/instanceId" },
+        "name": { "$ref": "#/$defs/resourceName" },
+        "substrate": { "enum": ["qemu", "docker"] },
+        "status": { "enum": ["planned", "active", "cleanup_pending", "removed"] },
+        "provider_id": {
+          "oneOf": [
+            { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" }
+          ]
+        },
+        "provider_identity_sha256": { "$ref": "#/$defs/sha256" },
+        "configuration_sha256": { "$ref": "#/$defs/sha256" },
+        "ownership_binding_sha256": { "$ref": "#/$defs/sha256" },
+        "managed_network_id": { "type": "string", "pattern": "^[0-9a-f]{12,64}$" },
+        "managed_network_identity_sha256": { "$ref": "#/$defs/sha256" },
+        "managed_network_configuration_sha256": { "$ref": "#/$defs/sha256" },
+        "provider_storage_identity_sha256": { "$ref": "#/$defs/sha256" },
+        "storage_path": { "type": "string", "pattern": "^/" },
+        "storage_quarantine_path": { "type": "string", "pattern": "^/" },
+        "storage_quarantine_identity_sha256": { "$ref": "#/$defs/sha256" },
+        "storage_final_capture_path": { "type": "string", "pattern": "^/" },
+        "storage_final_capture_identity_sha256": { "$ref": "#/$defs/sha256" },
+        "storage_device": { "$ref": "#/$defs/decimalId" },
+        "storage_inode": { "$ref": "#/$defs/nonzeroDecimalId" },
+        "storage_uid": { "$ref": "#/$defs/decimalId" },
+        "storage_gid": { "$ref": "#/$defs/decimalId" },
+        "storage_expected_device": { "$ref": "#/$defs/decimalId" },
+        "storage_expected_inode": { "$ref": "#/$defs/nonzeroDecimalId" },
+        "storage_expected_uid": { "$ref": "#/$defs/decimalId" },
+        "storage_expected_gid": { "$ref": "#/$defs/decimalId" },
+        "last_sequence": { "type": "integer", "minimum": 1 },
+        "planned_at": { "type": "string", "format": "date-time" },
+        "updated_at": { "type": "string", "format": "date-time" },
+        "removed_at": { "type": "string", "format": "date-time" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "status": { "enum": ["active", "cleanup_pending"] } } },
+          "then": { "required": ["provider_id", "provider_identity_sha256", "configuration_sha256", "ownership_binding_sha256"] }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": { "enum": ["active", "cleanup_pending"] },
+              "substrate": { "const": "docker" }
+            },
+            "required": ["status", "substrate"]
+          },
+          "then": { "required": ["managed_network_id", "managed_network_identity_sha256", "managed_network_configuration_sha256"] }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": { "enum": ["active", "cleanup_pending"] },
+              "substrate": { "const": "qemu" }
+            },
+            "required": ["status", "substrate"]
+          },
+          "then": { "required": ["provider_storage_identity_sha256", "storage_path", "storage_device", "storage_inode", "storage_uid", "storage_gid"] }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": { "const": "cleanup_pending" },
+              "substrate": { "const": "qemu" }
+            },
+            "required": ["status", "substrate"]
+          },
+          "then": { "required": ["storage_quarantine_path", "storage_quarantine_identity_sha256", "storage_final_capture_path", "storage_final_capture_identity_sha256", "storage_expected_device", "storage_expected_inode", "storage_expected_uid", "storage_expected_gid"] }
+        }
+      ]
+    },
+    "fault": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "scenario_id", "kind", "target", "target_identity_sha256", "target_ownership_sha256", "status", "last_sequence", "planned_at", "updated_at"],
+      "properties": {
+        "id": { "$ref": "#/$defs/faultId" },
+        "scenario_id": { "$ref": "#/$defs/scenarioId" },
+        "kind": { "$ref": "#/$defs/faultKind" },
+        "target": { "$ref": "#/$defs/faultTarget" },
+        "target_identity_sha256": { "$ref": "#/$defs/sha256" },
+        "target_ownership_sha256": { "$ref": "#/$defs/sha256" },
+        "status": { "enum": ["planned", "applied", "heal_pending", "healed"] },
+        "last_sequence": { "type": "integer", "minimum": 1 },
+        "planned_at": { "type": "string", "format": "date-time" },
+        "updated_at": { "type": "string", "format": "date-time" },
+        "applied_at": { "type": "string", "format": "date-time" },
+        "healed_at": { "type": "string", "format": "date-time" }
+      }
+    },
+    "journalEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sequence", "mutation_id", "event", "mutation", "scenario_id",
+        "subject_type", "subject", "recorded_at", "previous_entry_sha256",
+        "entry_sha256"
+      ],
+      "properties": {
+        "sequence": { "type": "integer", "minimum": 1 },
+        "mutation_id": { "$ref": "#/$defs/mutationId" },
+        "event": { "enum": ["planned", "completed", "recovered"] },
+        "mutation": { "enum": ["provider_action", "provider_cleanup", "fault_apply", "fault_heal"] },
+        "scenario_id": { "$ref": "#/$defs/scenarioId" },
+        "subject_type": { "enum": ["provider_resource", "fault"] },
+        "subject": {
+          "oneOf": [
+            { "$ref": "#/$defs/providerIntent" },
+            { "$ref": "#/$defs/faultIntent" }
+          ]
+        },
+        "plan_sequence": { "type": "integer", "minimum": 1 },
+        "outcome": { "enum": ["acknowledged", "effect_observed", "applied", "healed", "absent", "not_observed"] },
+        "observed_identity_sha256": {
+          "oneOf": [
+            { "$ref": "#/$defs/sha256" },
+            { "type": "null" }
+          ]
+        },
+        "observed_configuration_sha256": {
+          "oneOf": [
+            { "$ref": "#/$defs/sha256" },
+            { "type": "null" }
+          ]
+        },
+        "observed_provider_id": {
+          "oneOf": [
+            { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" }
+          ]
+        },
+        "observed_ownership_binding_sha256": { "$ref": "#/$defs/sha256" },
+        "observed_managed_network_id": { "type": "string", "pattern": "^[0-9a-f]{12,64}$" },
+        "observed_managed_network_identity_sha256": { "$ref": "#/$defs/sha256" },
+        "observed_managed_network_configuration_sha256": { "$ref": "#/$defs/sha256" },
+        "observed_provider_storage_identity_sha256": { "$ref": "#/$defs/sha256" },
+        "observed_storage_path": { "type": "string", "pattern": "^/" },
+        "observed_storage_device": { "$ref": "#/$defs/decimalId" },
+        "observed_storage_inode": { "$ref": "#/$defs/nonzeroDecimalId" },
+        "observed_storage_uid": { "$ref": "#/$defs/decimalId" },
+        "observed_storage_gid": { "$ref": "#/$defs/decimalId" },
+        "target_transition": { "$ref": "#/$defs/targetTransition" },
+        "recorded_at": { "type": "string", "format": "date-time" },
+        "previous_entry_sha256": {
+          "oneOf": [
+            { "$ref": "#/$defs/sha256" },
+            { "type": "null" }
+          ]
+        },
+        "entry_sha256": { "$ref": "#/$defs/sha256" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "event": { "enum": ["completed", "recovered"] } } },
+          "then": { "required": ["plan_sequence", "outcome"] }
+        },
+        {
+          "if": {
+            "properties": {
+              "event": { "enum": ["completed", "recovered"] },
+              "subject_type": { "const": "provider_resource" },
+              "outcome": { "const": "effect_observed" }
+            }
+          },
+          "then": {
+            "required": ["observed_provider_id", "observed_identity_sha256", "observed_configuration_sha256", "observed_ownership_binding_sha256"],
+            "properties": {
+              "observed_identity_sha256": { "$ref": "#/$defs/sha256" },
+              "observed_configuration_sha256": { "$ref": "#/$defs/sha256" }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "event": { "enum": ["completed", "recovered"] },
+              "outcome": { "const": "effect_observed" },
+              "subject": {
+                "properties": { "substrate": { "const": "docker" } },
+                "required": ["substrate"]
+              }
+            },
+            "required": ["event", "outcome", "subject"]
+          },
+          "then": { "required": ["observed_managed_network_id", "observed_managed_network_identity_sha256", "observed_managed_network_configuration_sha256"] }
+        },
+        {
+          "if": {
+            "properties": {
+              "event": { "enum": ["completed", "recovered"] },
+              "outcome": { "const": "effect_observed" },
+              "subject": {
+                "properties": { "substrate": { "const": "qemu" } },
+                "required": ["substrate"]
+              }
+            },
+            "required": ["event", "outcome", "subject"]
+          },
+          "then": { "required": ["observed_provider_storage_identity_sha256", "observed_storage_path", "observed_storage_device", "observed_storage_inode", "observed_storage_uid", "observed_storage_gid"] }
+        },
+        {
+          "if": {
+            "properties": {
+              "mutation": { "const": "provider_cleanup" },
+              "subject": {
+                "properties": { "substrate": { "const": "qemu" } },
+                "required": ["substrate"]
+              }
+            },
+            "required": ["mutation", "subject"]
+          },
+          "then": {
+            "properties": {
+              "subject": { "required": ["storage_quarantine_path", "storage_quarantine_identity_sha256", "storage_final_capture_path", "storage_final_capture_identity_sha256", "storage_expected_device", "storage_expected_inode", "storage_expected_uid", "storage_expected_gid"] }
+            }
+          }
+        }
+      ]
+    },
+    "targetTransition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "previous_identity_sha256", "replacement_identity_sha256", "replacement_ownership_sha256", "replacement_provider_id"],
+      "properties": {
+        "kind": { "const": "management_process_replacement" },
+        "previous_identity_sha256": { "$ref": "#/$defs/sha256" },
+        "replacement_identity_sha256": { "$ref": "#/$defs/sha256" },
+        "replacement_ownership_sha256": { "$ref": "#/$defs/sha256" },
+        "replacement_provider_id": { "type": "string", "pattern": "^[1-9][0-9]*$" }
+      }
+    }
+  }
+}

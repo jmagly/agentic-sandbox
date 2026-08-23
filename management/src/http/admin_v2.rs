@@ -3301,6 +3301,9 @@ async fn provision_instance_inner(
                     .clone()
                     .unwrap_or_else(|| "libvirt".to_string());
                 cmd.env("AGENTIC_BACKEND", &provider);
+                if let Some(run_owner) = req.labels.get("agentic-run-id") {
+                    cmd.env("AGENTIC_ORCHESTRATION_RUN_ID", run_owner);
+                }
                 let vsock_transport_configured = std::env::var("AGENTIC_GRPC_VSOCK_PORT")
                     .ok()
                     .map(|value| !value.trim().is_empty())

@@ -579,6 +579,8 @@ test("crash cleanup reads only the two fixed issue-lane inventory paths", () => 
     management_binary_path: `${repoRoot}/management/target/release/agentic-mgmt`,
     agent_client_binary_path: `${repoRoot}/management/target/release/agent-client`,
     callback_relay_binary_path: `${repoRoot}/tools/celld-callback-relay/target/x86_64-unknown-linux-musl/release/agentic-celld-callback-relay`,
+    qemu_cleanup_helper_path: "/usr/libexec/agentic-sandbox/agentic-celld-qemu-cleanup-helper",
+    qemu_cleanup_helper_sha256: "e".repeat(64),
     docker_image_ref: `sha256:${"a".repeat(64)}`,
     base_images_dir: "/build/agentic-sandbox/base-images",
     vm_storage_dir: "/build/agentic-sandbox/vms",

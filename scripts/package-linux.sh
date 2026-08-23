@@ -49,6 +49,7 @@ require_file "management/target/${TARGET}/release/agentic-mgmt"
 require_file "management/target/${TARGET}/release/agentic-host-runtime-daemon"
 require_file "management/target/${TARGET}/release/vm-event-bridge"
 require_file "management/target/${TARGET}/release/agentic-celld-preflight"
+require_file "tools/celld-callback-relay/target/${TARGET}/release/agentic-celld-qemu-cleanup-helper"
 require_file "agent-rs/target/${TARGET}/release/agent-client"
 require_file "cli/target/${TARGET}/release/sandboxctl"
 
@@ -75,6 +76,7 @@ stage_payload() {
   install -m 0755 "management/target/${TARGET}/release/agentic-host-runtime-daemon" "$stage/usr/bin/agentic-host-runtime-daemon"
   install -m 0755 "management/target/${TARGET}/release/vm-event-bridge" "$stage/usr/bin/vm-event-bridge"
   install -m 0755 "management/target/${TARGET}/release/agentic-celld-preflight" "$stage/usr/libexec/agentic-sandbox/agentic-celld-preflight"
+  install -m 0755 "tools/celld-callback-relay/target/${TARGET}/release/agentic-celld-qemu-cleanup-helper" "$stage/usr/libexec/agentic-sandbox/agentic-celld-qemu-cleanup-helper"
   install -m 0755 "agent-rs/target/${TARGET}/release/agent-client" "$stage/usr/bin/agent-client"
   install -m 0755 "cli/target/${TARGET}/release/sandboxctl" "$stage/usr/bin/sandboxctl"
   ln -s sandboxctl "$stage/usr/bin/agentic-sandbox"
@@ -153,6 +155,7 @@ ${DESCRIPTION}
 /usr/bin/agentic-host-runtime-daemon
 /usr/bin/vm-event-bridge
 /usr/libexec/agentic-sandbox/agentic-celld-preflight
+/usr/libexec/agentic-sandbox/agentic-celld-qemu-cleanup-helper
 /usr/bin/agent-client
 /usr/bin/sandboxctl
 /usr/bin/agentic-sandbox

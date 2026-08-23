@@ -1249,6 +1249,19 @@ EOF
     xml_path=$(backend_create_vm "${backend_create_args[@]}")
     log_success "VM defined: $vm_name"
 
+    if [[ -n "${AGENTIC_ORCHESTRATION_RUN_ID:-}" ]]; then
+        if [[ ! "$AGENTIC_ORCHESTRATION_RUN_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]; then
+            log_error "Invalid orchestration run identity for provider ownership metadata"
+            exit 1
+        fi
+        if [[ "$ACTIVE_BACKEND" != "libvirt" ]]; then
+            log_error "External orchestration ownership metadata is unsupported by backend: $ACTIVE_BACKEND"
+            exit 1
+        fi
+        virsh_cmd desc "$vm_name" --config --title "agentic-run-id=$AGENTIC_ORCHESTRATION_RUN_ID" >/dev/null
+        log_info "Bound VM definition to the exact orchestration run identity"
+    fi
+
     # Enable autostart if requested
     if [[ "$autostart" == "true" ]]; then
         backend_set_autostart "$vm_name" "true"

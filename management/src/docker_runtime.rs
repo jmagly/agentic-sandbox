@@ -401,12 +401,26 @@ pub async fn managed_grpc_uds_host_path() -> Result<PathBuf, String> {
 }
 
 fn managed_network_create_args(platform: DockerHostPlatform, network: &str) -> Vec<String> {
+    managed_network_create_args_with_run_owner(platform, network, None)
+}
+
+fn managed_network_create_args_with_run_owner(
+    platform: DockerHostPlatform,
+    network: &str,
+    run_owner: Option<&str>,
+) -> Vec<String> {
     let mut args = vec![
         "network".into(),
         "create".into(),
         "--label".into(),
         "agentic-sandbox=true".into(),
     ];
+    if let Some(run_owner) = run_owner {
+        args.extend([
+            "--label".into(),
+            format!("agentic-run-id={run_owner}"),
+        ]);
+    }
     if platform == DockerHostPlatform::Macos {
         args.extend([
             "--label".into(),
@@ -597,7 +611,15 @@ pub async fn spawn_container(name: &str, image: &str, opts: &SpawnOpts) -> Resul
             );
         }
         let output = Command::new(docker_command())
-            .args(managed_network_create_args(platform, &network))
+            .args(managed_network_create_args_with_run_owner(
+                platform,
+                &network,
+                effective_opts
+                    .labels
+                    .iter()
+                    .find(|(key, _)| key == "agentic-run-id")
+                    .map(|(_, value)| value.as_str()),
+            ))
             .output()
             .await
             .map_err(|e| format!("failed to create isolated Docker network: {e}"))?;

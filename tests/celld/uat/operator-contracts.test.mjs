@@ -12,6 +12,8 @@ test("Celld service calls the packageable read-only preflight helper", () => {
   assert.match(unit, /ExecStartPre=\/usr\/libexec\/agentic-sandbox\/agentic-celld-preflight/);
   assert.match(unit, /ExecStart=\/opt\/agentic-sandbox\/celld\/v0\.2\.1\/celld$/m);
   assert.match(packaging, /release\/agentic-celld-preflight/);
+  assert.match(packaging, /release\/agentic-celld-qemu-cleanup-helper/);
+  assert.match(packaging, /\/usr\/libexec\/agentic-sandbox\/agentic-celld-qemu-cleanup-helper/);
   assert.match(packaging, /agentic-celld\.service/);
   assert.match(helper, /scope: "local_prestart"/);
   assert.match(helper, /live_qualification: false/);

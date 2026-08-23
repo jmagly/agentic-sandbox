@@ -203,7 +203,17 @@ export function runSafeLiveDriver(definition, context, redact = String) {
   const ended = new Date();
   const command = { argv_redacted: [definition.program, ...args].map(redact), shell: false, started_at: started.toISOString(), ended_at: ended.toISOString(), exit_code: outcome.status, signal: outcome.signal, stdout_sha256: sha256(redact(outcome.stdout ?? "")), stderr_sha256: sha256(redact(outcome.stderr ?? "")), stderr_tail: redact(outcome.stderr ?? "").slice(-4096), redacted: true };
   if (outcome.error?.code === "ENOENT") return { kind: "not_run", reason: `registered live driver is not installed: ${context.driverId}`, cleanup_status: "not_required", command };
-  if (outcome.error || outcome.status !== 0) return { kind: "error", reason: redact(outcome.error?.message ?? `live driver exited ${outcome.status}`), cleanup_status: "failed", command };
+  if (outcome.error || outcome.status !== 0) {
+    const cleanupResidue = outcome.status === 4;
+    const driverDidNotExit = outcome.status === null || (outcome.error !== undefined && outcome.error !== null);
+    return {
+      kind: "error",
+      error_class: cleanupResidue ? "cleanup_residue" : "driver_error",
+      reason: redact(outcome.error?.message ?? `live driver exited ${outcome.status}`),
+      cleanup_status: cleanupResidue || driverDidNotExit || outcome.status !== 3 ? "failed" : "unknown",
+      command,
+    };
+  }
   try { return { kind: "observation", observation: JSON.parse(outcome.stdout), command }; }
   catch (error) { return { kind: "error", reason: `live driver emitted invalid JSON: ${redact(error.message)}`, cleanup_status: "failed", command }; }
 }

@@ -4,13 +4,18 @@ import { spawn, spawnSync } from "node:child_process";
 import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import {
   chmodSync,
+  closeSync,
+  constants,
   existsSync,
+  fstatSync,
   lstatSync,
   mkdirSync,
+  openSync,
   readFileSync,
   readdirSync,
   renameSync,
   rmSync,
+  rmdirSync,
   writeFileSync,
 } from "node:fs";
 import { Agent as HttpsAgent, request as httpsRequest } from "node:https";
@@ -34,6 +39,20 @@ import {
   prepareFixture,
   startFixture,
 } from "./celld-seaweedfs-fixture.mjs";
+import {
+  acquireOrchestrationInventoryLifecycle,
+  commitOrchestrationInventory,
+  createOrchestrationInventoryV2,
+  finishOrchestrationMutation,
+  isOrchestrationInventoryV2,
+  loadProtectedJson,
+  loadProtectedOrchestrationInventory,
+  newFaultId,
+  planOrchestrationMutation,
+  releaseOrchestrationInventoryLifecycle,
+  validateOrchestrationInventoryDocument,
+  QEMU_CLEANUP_CAPTURE_ROOT,
+} from "./celld-orchestration-inventory.mjs";
 import { getWorkerCell, sendWorkerCommand } from "./celld-worker-client.mjs";
 import { validateLiveProfile } from "./celld-uat-live-protocol.mjs";
 
@@ -41,12 +60,10 @@ const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const REPO_ROOT = resolve(dirname(SCRIPT_PATH), "..");
 const OBSERVATION_SCHEMA = "agentic-sandbox.celld-live-observation/v1";
 const CONFIG_SCHEMA = "agentic-sandbox.celld-live-orchestration/v1";
-const INVENTORY_SCHEMA = "agentic-sandbox.celld-orchestration-inventory/v1";
 const DRIVER_ID = "celld-live-orchestration";
 const DRIVER_VERSION = "celld-live-orchestration/v1";
 const DISPATCH_GATE_SCHEMA = "agentic-sandbox.celld-dispatch-gate/v1";
 const CRASH_PHASE_EVIDENCE_SCHEMA = "agentic-sandbox.celld-crash-phase-evidence/v1";
-const ORCHESTRATION_OWNER = Object.freeze({ repository: "roctinam/agentic-sandbox", workflow: "celld-qualification.yml" });
 const CALLBACK_PATH = "/api/v2/celld/effects";
 const RUN_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const SHA256 = /^[0-9a-f]{64}$/;
@@ -58,6 +75,18 @@ const CRASH_POINTS = ["before_dispatch", "during_dispatch", "after_dispatch"];
 const FAULT_KINDS = new Set(["management_process_kill", "fleet_node_stop", "callback_response_loss", "callback_relay_pause"]);
 const INSTANCE_CELL_SCRIPT = "agentic-instance-cell";
 const INSTANCE_CELL_CLASS = "InstanceCell";
+export const QEMU_CLEANUP_HELPER_PATH = "/usr/libexec/agentic-sandbox/agentic-celld-qemu-cleanup-helper";
+const QEMU_CLEANUP_HELPER_NAME = basename(QEMU_CLEANUP_HELPER_PATH);
+const QEMU_CLEANUP_HELPER_MAX_INPUT = 8192;
+const QEMU_CLEANUP_HELPER_MAX_OUTPUT = 4096;
+
+export class OrchestrationCleanupResidueError extends Error {
+  constructor(message, options = {}) {
+    super(message, options);
+    this.name = "OrchestrationCleanupResidueError";
+    this.exitCode = 4;
+  }
+}
 
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
@@ -91,6 +120,11 @@ function argument(args, name) {
   return args[index + 1];
 }
 
+function optionalArgument(args, name) {
+  const index = args.indexOf(name);
+  return index < 0 ? null : args[index + 1] ?? null;
+}
+
 function run(program, args, options = {}) {
   const result = spawnSync(program, args, { encoding: "utf8", shell: false, ...options });
   if (result.error || result.status !== 0) throw new Error(`${basename(program)} failed: ${(result.error?.message ?? result.stderr ?? "").trim()}`);
@@ -102,10 +136,7 @@ function available(program, args = ["--version"]) {
 }
 
 function protectedJson(path, description) {
-  if (!isAbsolute(path) || !existsSync(path)) throw new Error(`${description} is missing`);
-  const metadata = lstatSync(path);
-  if (!metadata.isFile() || metadata.isSymbolicLink() || (metadata.mode & 0o077) !== 0) throw new Error(`${description} must be a protected regular non-symlink file`);
-  return JSON.parse(readFileSync(path, "utf8"));
+  return loadProtectedJson(path, description);
 }
 
 function atomicJson(path, value) {
@@ -123,65 +154,14 @@ function validTimestamp(value) {
   return typeof value === "string" && Number.isFinite(Date.parse(value));
 }
 
-export function validateOrchestrationInventory(inventory, config, { expectedHostSha256 } = {}) {
-  const errors = [];
-  if (!inventory || typeof inventory !== "object" || Array.isArray(inventory)) return ["inventory must be an object"];
-  const allowed = new Set(["schema_version", "run_id", "working_root", "owner", "host_sha256", "created_at", "updated_at", "state", "resources", "faults"]);
-  for (const key of Object.keys(inventory)) if (!allowed.has(key)) errors.push(`inventory.${key} is not allowed`);
-  if (inventory.schema_version !== INVENTORY_SCHEMA) errors.push(`inventory.schema_version must be ${INVENTORY_SCHEMA}`);
-  if (inventory.run_id !== config.run_id
-      || inventory.working_root !== config.working_root
-      || inventory.owner?.repository !== ORCHESTRATION_OWNER.repository
-      || inventory.owner?.workflow !== ORCHESTRATION_OWNER.workflow
-      || inventory.owner?.run_id !== config.run_id) errors.push("inventory run/owner does not match orchestration config");
-  if (!SHA256.test(inventory.host_sha256 ?? "") || (expectedHostSha256 && inventory.host_sha256 !== expectedHostSha256)) errors.push("inventory host does not match the authorized host");
-  if (!validTimestamp(inventory.created_at) || !validTimestamp(inventory.updated_at)) errors.push("inventory timestamps are invalid");
-  if (!["prepared", "active", "cleanup_residue", "clean"].includes(inventory.state)) errors.push("inventory state is invalid");
-  if (!Array.isArray(inventory.resources) || !Array.isArray(inventory.faults)) errors.push("inventory resources/faults must be arrays");
-
-  const resourceKeys = new Set();
-  for (const [index, resource] of (inventory.resources ?? []).entries()) {
-    const allowedResource = new Set(["scenario_id", "instance_id", "name", "substrate", "status", "planned_at", "updated_at", "removed_at"]);
-    for (const key of Object.keys(resource ?? {})) if (!allowedResource.has(key)) errors.push(`inventory.resources[${index}].${key} is not allowed`);
-    const key = resource?.instance_id ?? "";
-    if (resourceKeys.has(key)) errors.push(`inventory resource is duplicated: ${key}`);
-    resourceKeys.add(key);
-    if (!SCENARIOS.has(resource?.scenario_id)
-        || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(resource?.instance_id ?? "")
-        || !/^celld-[a-z0-9-]{1,62}$/.test(resource?.name ?? "")
-        || !SUBSTRATES.includes(resource?.substrate)
-        || !["planned", "removed"].includes(resource?.status)
-        || !validTimestamp(resource?.planned_at)
-        || !validTimestamp(resource?.updated_at)
-        || (resource?.status === "removed" && !validTimestamp(resource?.removed_at))) errors.push(`inventory resource is invalid at index ${index}`);
-  }
-
-  const faultIds = new Set();
-  for (const [index, fault] of (inventory.faults ?? []).entries()) {
-    const allowedFault = new Set(["id", "scenario_id", "kind", "target", "status", "planned_at", "updated_at", "applied_at", "healed_at"]);
-    for (const key of Object.keys(fault ?? {})) if (!allowedFault.has(key)) errors.push(`inventory.faults[${index}].${key} is not allowed`);
-    if (faultIds.has(fault?.id)) errors.push(`inventory fault is duplicated: ${fault?.id}`);
-    faultIds.add(fault?.id);
-    if (!/^[0-9a-f]{32}$/.test(fault?.id ?? "")
-        || !SCENARIOS.has(fault?.scenario_id)
-        || !FAULT_KINDS.has(fault?.kind)
-        || !/^(?:management|celld-[a-z0-9-]{1,80})$/.test(fault?.target ?? "")
-        || !["planned", "applied", "healed"].includes(fault?.status)
-        || !validTimestamp(fault?.planned_at)
-        || !validTimestamp(fault?.updated_at)
-        || (["applied", "healed"].includes(fault?.status) && !validTimestamp(fault?.applied_at))
-        || (fault?.status === "healed" && !validTimestamp(fault?.healed_at))) errors.push(`inventory fault is invalid at index ${index}`);
-  }
-  return errors;
+export function validateOrchestrationInventory(inventory, config, options = {}) {
+  return validateOrchestrationInventoryDocument(inventory, config, options);
 }
 
 export function loadAuthorizedOrchestrationInventory(profile, config, expectedHostSha256) {
   if (profile.authorization?.destructive_faults !== true || profile.authorization?.exact_run_owner !== profile.run_id) throw new Error("exact-run destructive authorization is required");
   if (resolve(profile.authorization.inventory_path ?? "") !== resolve(config.inventory_path ?? "")) throw new Error("authorization inventory path is not the fixed orchestration inventory");
-  const inventory = protectedJson(config.inventory_path, "orchestration inventory");
-  const errors = validateOrchestrationInventory(inventory, config, { expectedHostSha256 });
-  if (errors.length) throw new Error(errors.join("; "));
-  return inventory;
+  return loadProtectedOrchestrationInventory(config.inventory_path, config, { expectedHostSha256 });
 }
 
 function executable(path, description) {
@@ -191,12 +171,38 @@ function executable(path, description) {
   return null;
 }
 
+function fileSha256(path) {
+  return sha256(readFileSync(path));
+}
+
+function builtQemuCleanupHelperPath(callbackRelayBinaryPath) {
+  return join(dirname(resolve(callbackRelayBinaryPath)), QEMU_CLEANUP_HELPER_NAME);
+}
+
+export function verifyQemuCleanupHelperInstallation(config) {
+  try {
+    if (config.qemu_cleanup_helper_path !== QEMU_CLEANUP_HELPER_PATH
+        || !SHA256.test(config.qemu_cleanup_helper_sha256 ?? "")) return false;
+    const builtPath = builtQemuCleanupHelperPath(config.callback_relay_binary_path);
+    const built = lstatSync(builtPath);
+    const installed = lstatSync(QEMU_CLEANUP_HELPER_PATH);
+    if (!built.isFile() || built.isSymbolicLink() || built.nlink !== 1 || (built.mode & 0o111) === 0
+        || !installed.isFile() || installed.isSymbolicLink() || installed.nlink !== 1
+        || installed.uid !== 0 || installed.gid !== 0 || (installed.mode & 0o777) !== 0o755) return false;
+    const builtDigest = fileSha256(builtPath);
+    return builtDigest === config.qemu_cleanup_helper_sha256 && fileSha256(QEMU_CLEANUP_HELPER_PATH) === builtDigest;
+  } catch {
+    return false;
+  }
+}
+
 export function validateOrchestrationConfig(config, { repoRoot = REPO_ROOT } = {}) {
   const errors = [];
   if (!config || typeof config !== "object" || Array.isArray(config)) return ["config must be an object"];
   const allowed = new Set([
     "schema_version", "run_id", "working_root", "inventory_path", "management_binary_path", "agent_client_binary_path",
     "callback_relay_binary_path", "docker_image_ref", "base_images_dir",
+    "qemu_cleanup_helper_path", "qemu_cleanup_helper_sha256",
     "vm_storage_dir", "agentshare_root", "libvirt_uri", "management_grpc_port",
   ]);
   for (const key of Object.keys(config)) if (!allowed.has(key)) errors.push(`config.${key} is not allowed`);
@@ -213,6 +219,8 @@ export function validateOrchestrationConfig(config, { repoRoot = REPO_ROOT } = {
   const relay = resolve(config.callback_relay_binary_path ?? "");
   const relayRoot = resolve(repoRoot, "tools/celld-callback-relay/target");
   if (!isAbsolute(config.callback_relay_binary_path ?? "") || basename(relay) !== "agentic-celld-callback-relay" || !relay.startsWith(`${relayRoot}${sep}`)) errors.push("config.callback_relay_binary_path is outside the fixed relay target");
+  if (config.qemu_cleanup_helper_path !== QEMU_CLEANUP_HELPER_PATH) errors.push("config.qemu_cleanup_helper_path must be the fixed installed root helper");
+  if (!SHA256.test(config.qemu_cleanup_helper_sha256 ?? "")) errors.push("config.qemu_cleanup_helper_sha256 must bind the reviewed built helper bytes");
   if (!IMAGE_ID.test(config.docker_image_ref ?? "")) errors.push("config.docker_image_ref must be an immutable local OCI image ID");
   if (config.base_images_dir !== "/build/agentic-sandbox/base-images") errors.push("config.base_images_dir must be the reviewed Titan base-image directory");
   if (config.vm_storage_dir !== "/build/agentic-sandbox/vms") errors.push("config.vm_storage_dir must be the reviewed Titan VM directory");
@@ -224,6 +232,7 @@ export function validateOrchestrationConfig(config, { repoRoot = REPO_ROOT } = {
 
 export function prepareOrchestrationConfig({ runId, workingRoot, managementBinaryPath, agentClientBinaryPath, callbackRelayBinaryPath, dockerImageRef, agentshareRoot, managementGrpcPort = 38120, now = new Date(), host = hostname() }) {
   const resolvedWorkingRoot = resolve(workingRoot);
+  const cleanupHelperBuiltPath = builtQemuCleanupHelperPath(callbackRelayBinaryPath);
   const config = {
     schema_version: CONFIG_SCHEMA,
     run_id: runId,
@@ -232,6 +241,8 @@ export function prepareOrchestrationConfig({ runId, workingRoot, managementBinar
     management_binary_path: resolve(managementBinaryPath),
     agent_client_binary_path: resolve(agentClientBinaryPath),
     callback_relay_binary_path: resolve(callbackRelayBinaryPath),
+    qemu_cleanup_helper_path: QEMU_CLEANUP_HELPER_PATH,
+    qemu_cleanup_helper_sha256: fileSha256(cleanupHelperBuiltPath),
     docker_image_ref: dockerImageRef,
     base_images_dir: "/build/agentic-sandbox/base-images",
     vm_storage_dir: "/build/agentic-sandbox/vms",
@@ -241,21 +252,10 @@ export function prepareOrchestrationConfig({ runId, workingRoot, managementBinar
   };
   const errors = validateOrchestrationConfig(config);
   if (errors.length) throw new Error(errors.join("; "));
+  if (!verifyQemuCleanupHelperInstallation(config)) throw new Error("installed QEMU cleanup helper is missing or does not match the exact reviewed build");
   if (existsSync(config.working_root)) throw new Error("orchestration working root already exists");
   const path = join(config.working_root, "orchestration.json");
-  const timestamp = now.toISOString();
-  const inventory = {
-    schema_version: INVENTORY_SCHEMA,
-    run_id: config.run_id,
-    working_root: config.working_root,
-    owner: { ...ORCHESTRATION_OWNER, run_id: config.run_id },
-    host_sha256: sha256(host),
-    created_at: timestamp,
-    updated_at: timestamp,
-    state: "prepared",
-    resources: [],
-    faults: [],
-  };
+  const inventory = createOrchestrationInventoryV2({ runId: config.run_id, workingRoot: config.working_root, hostSha256: sha256(host), now });
   const inventoryErrors = validateOrchestrationInventory(inventory, config, { expectedHostSha256: inventory.host_sha256 });
   if (inventoryErrors.length) throw new Error(inventoryErrors.join("; "));
   try {
@@ -263,8 +263,7 @@ export function prepareOrchestrationConfig({ runId, workingRoot, managementBinar
     chmodSync(config.working_root, 0o700);
     writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600, flag: "wx" });
     chmodSync(path, 0o600);
-    writeFileSync(config.inventory_path, `${JSON.stringify(inventory, null, 2)}\n`, { mode: 0o600, flag: "wx" });
-    chmodSync(config.inventory_path, 0o600);
+    commitOrchestrationInventory(config.inventory_path, inventory, { config });
   } catch (error) {
     rmSync(config.working_root, { recursive: true, force: true });
     throw error;
@@ -548,6 +547,15 @@ export function launchManagement(config, fleet, managementHost, celldTransport =
     shell: false,
     stdio: ["ignore", "pipe", "pipe"],
   });
+  const stat = readFileSync(`/proc/${processHandle.pid}/stat`, "utf8");
+  const fieldsAfterCommand = stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/);
+  const processStartTimeTicks = fieldsAfterCommand[19];
+  if (!/^[0-9]+$/.test(processStartTimeTicks ?? "")) throw new Error("management process start identity is unavailable");
+  processHandle.spawn_identity = {
+    run_id: config.run_id,
+    executable_sha256: sha256(readFileSync(config.management_binary_path)),
+    process_start_time_ticks: processStartTimeTicks,
+  };
   const append = (chunk) => {
     const previous = existsSync(logPath) ? readFileSync(logPath) : Buffer.alloc(0);
     const combined = Buffer.concat([previous, chunk]).subarray(-1024 * 1024);
@@ -664,21 +672,37 @@ export function clearDispatchGate(runtime, id) {
 
 function provisionPayload(config, substrate, name) {
   return substrate === "qemu"
-    ? { name, runtime: "qemu", provider: "libvirt", start: false, agentshare: false }
-    : { name, runtime: "docker", image: config.docker_image_ref, start: false, agentshare: false };
+    ? { name, runtime: "qemu", provider: "libvirt", start: false, agentshare: false, labels: { "agentic-run-id": config.run_id } }
+    : { name, runtime: "docker", image: config.docker_image_ref, start: false, agentshare: false, labels: { "agentic-run-id": config.run_id } };
 }
 
-function persistOrchestrationInventory(runtime, now = new Date()) {
+function persistOrchestrationInventory(runtime, now = new Date(), forcedState = null) {
   runtime.orchestrationInventory.updated_at = now.toISOString();
-  runtime.orchestrationInventory.state = runtime.orchestrationInventory.resources.some((entry) => entry.status !== "removed")
-    || runtime.orchestrationInventory.faults.some((entry) => entry.status !== "healed") ? "active" : "prepared";
+  runtime.orchestrationInventory.state = forcedState ?? (runtime.orchestrationInventory.resources.some((entry) => entry.status !== "removed")
+    || runtime.orchestrationInventory.faults.some((entry) => entry.status !== "healed") ? "active" : "prepared");
   const errors = validateOrchestrationInventory(runtime.orchestrationInventory, runtime.config, { expectedHostSha256: runtime.orchestrationInventory.host_sha256 });
   if (errors.length) throw new Error(errors.join("; "));
-  (runtime.persistInventory ?? atomicJson)(runtime.config.inventory_path, runtime.orchestrationInventory);
+  if (runtime.persistInventory) {
+    runtime.persistInventory(runtime.config.inventory_path, runtime.orchestrationInventory);
+  } else {
+    const expectedJournalHeadSha256 = runtime.persistedJournalHeadSha256;
+    commitOrchestrationInventory(runtime.config.inventory_path, runtime.orchestrationInventory, {
+      config: runtime.config,
+      ...(expectedJournalHeadSha256 !== undefined ? { expectedJournalHeadSha256 } : {}),
+    });
+  }
+  runtime.persistedJournalHeadSha256 = runtime.orchestrationInventory.journal_head_sha256;
 }
 
 function planProviderResource(runtime, { instanceId, name, substrate }, now = new Date()) {
   const existing = runtime.orchestrationInventory.resources.find((entry) => entry.instance_id === instanceId);
+  if (isOrchestrationInventoryV2(runtime.orchestrationInventory)) {
+    if (existing && (existing.name !== name || existing.substrate !== substrate)) {
+      throw new Error("provider resource identity changed after inventory persistence");
+    }
+    runtime.providerResources.set(instanceId, { instanceId, name, substrate });
+    return existing ?? null;
+  }
   if (existing) {
     if (existing.name !== name || existing.substrate !== substrate) throw new Error("provider resource identity changed after inventory persistence");
     runtime.providerResources.set(instanceId, { instanceId, name, substrate });
@@ -705,6 +729,7 @@ export function observeOrchestrationProvider(runtime, { instanceId, name, substr
   };
   const absent = (providerStoragePresent = false) => ({
     ...base,
+    owned: true,
     present: false,
     state: "absent",
     provider_storage_present: providerStoragePresent,
@@ -725,14 +750,52 @@ export function observeOrchestrationProvider(runtime, { instanceId, name, substr
     const state = execute("virsh", ["-c", runtime.config.libvirt_uri, "domstate", name], { timeout: 30_000 }).trim().toLowerCase().replace(/\s+/g, " ");
     if (!["running", "idle", "paused", "in shutdown", "shut off", "crashed", "pmsuspended", "blocked", "nostate"].includes(state)) throw new Error("libvirt provider state is invalid");
     const xml = execute("virsh", ["-c", runtime.config.libvirt_uri, "dumpxml", "--inactive", name], { timeout: 30_000 });
-    return {
+    const diskSourcePaths = [...xml.matchAll(/<source\b[^>]*\bfile=(?:"([^"]+)"|'([^']+)')[^>]*>/g)]
+      .map((match) => (match[1] ?? match[2])
+        .replaceAll("&quot;", '"')
+        .replaceAll("&apos;", "'")
+        .replaceAll("&lt;", "<")
+        .replaceAll("&gt;", ">")
+        .replaceAll("&amp;", "&"));
+    if (runtime.runId !== undefined) {
+      let externalRunOwner;
+      try {
+        externalRunOwner = execute("virsh", ["-c", runtime.config.libvirt_uri, "desc", name, "--config", "--title"], { timeout: 30_000 }).trim();
+      } catch {
+        throw new Error("QEMU external run ownership metadata verification failed");
+      }
+      if (externalRunOwner !== `agentic-run-id=${runtime.runId}`) throw new Error("QEMU external run ownership metadata does not match the exact run");
+    }
+    const observation = {
       ...base,
+      owned: true,
       present: true,
       state,
       provider_storage_present: storagePresent,
+      provider_id: uuid,
+      disk_source_paths: diskSourcePaths,
       provider_identity_sha256: sha256(`qemu:${uuid}`),
-      configuration_sha256: sha256(xml),
+      configuration_sha256: sha256(canonicalJson({ xml, storage_path: join(runtime.config.vm_storage_dir, name) })),
     };
+    if (runtime.runId !== undefined) {
+      const storagePath = join(runtime.config.vm_storage_dir, name);
+      const storage = lstatSync(storagePath);
+      if (!storage.isDirectory() || storage.isSymbolicLink()) throw new Error("libvirt provider storage identity is not an exact directory");
+      observation.storage_path = storagePath;
+      observation.storage_device = String(storage.dev);
+      observation.storage_inode = String(storage.ino);
+      observation.storage_uid = String(storage.uid);
+      observation.storage_gid = String(storage.gid);
+      observation.ownership_binding_sha256 = sha256(canonicalJson({ run_id: runtime.runId, instance_id: instanceId, name, provider_id: uuid }));
+      observation.provider_storage_identity_sha256 = sha256(canonicalJson({
+        path: storagePath,
+        device: String(storage.dev),
+        inode: String(storage.ino),
+        uid: storage.uid,
+        gid: storage.gid,
+      }));
+    }
+    return observation;
   }
 
   if (substrate === "docker") {
@@ -744,22 +807,48 @@ export function observeOrchestrationProvider(runtime, { instanceId, name, substr
     const inspected = execute("docker", [
       "inspect",
       "--format",
-      '{{.Id}}|{{.State.Status}}|{{.Config.Image}}|{{index .Config.Labels "agentic-instance-id"}}|{{index .Config.Labels "agentic-source"}}',
+      '{{.Id}}|{{.State.Status}}|{{.Config.Image}}|{{index .Config.Labels "agentic-instance-id"}}|{{index .Config.Labels "agentic-source"}}|{{index .Config.Labels "agentic-managed-network"}}',
       ids[0],
     ], { timeout: 30_000 }).split("|");
-    if (inspected.length !== 5 || !/^[0-9a-f]{64}$/.test(inspected[0]) || inspected[3] !== instanceId || inspected[4] !== "admin-v2") {
+    if (![5, 6].includes(inspected.length) || !/^[0-9a-f]{64}$/.test(inspected[0]) || inspected[3] !== instanceId || inspected[4] !== "admin-v2") {
       throw new Error("Docker provider identity is not bound to the owned management resource");
     }
     const state = inspected[1];
     if (!["created", "running", "restarting", "exited", "paused", "dead", "removing"].includes(state)) throw new Error("Docker provider state is invalid");
-    return {
+    const observation = {
       ...base,
+      owned: true,
       present: true,
       state,
       provider_storage_present: false,
+      provider_id: inspected[0],
+      managed_network: inspected[5] && inspected[5] !== "<no value>" ? inspected[5] : null,
       provider_identity_sha256: sha256(`docker:${inspected[0]}`),
-      configuration_sha256: sha256(canonicalJson({ image: inspected[2], instance_id: inspected[3], source: inspected[4] })),
+      configuration_sha256: sha256(canonicalJson({ image: inspected[2], instance_id: inspected[3], source: inspected[4], managed_network: inspected[5] && inspected[5] !== "<no value>" ? inspected[5] : null })),
     };
+    if (runtime.runId !== undefined) {
+      const providerLabels = JSON.parse(execute("docker", ["inspect", "--format", "{{json .Config.Labels}}", inspected[0]], { timeout: 30_000 }));
+      if (!providerLabels || typeof providerLabels !== "object" || Array.isArray(providerLabels)
+          || providerLabels["agentic-instance-id"] !== instanceId || providerLabels["agentic-source"] !== "admin-v2"
+          || providerLabels["agentic-run-id"] !== runtime.runId) {
+        throw new Error("Docker provider labels are not bound to the exact owned management resource");
+      }
+      const networkName = observation.managed_network;
+      if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(networkName ?? "")) throw new Error("Docker provider has no exact managed-network binding");
+      const networkParts = execute("docker", ["network", "inspect", "--format", "{{.Id}}|{{json .Labels}}", networkName], { timeout: 30_000 }).split("|");
+      if (networkParts.length !== 2 || !/^[0-9a-f]{12,64}$/.test(networkParts[0])) throw new Error("Docker managed-network identity is invalid");
+      const networkLabels = JSON.parse(networkParts[1]);
+      if (!networkLabels || typeof networkLabels !== "object" || Array.isArray(networkLabels)
+          || networkLabels["agentic-run-id"] !== runtime.runId) throw new Error("Docker managed-network labels lack exact external run ownership");
+      observation.provider_labels = providerLabels;
+      observation.ownership_binding_sha256 = sha256(canonicalJson({ run_id: runtime.runId, labels: providerLabels }));
+      observation.managed_network_id = networkParts[0];
+      observation.managed_network_labels = networkLabels;
+      observation.managed_network_identity_sha256 = sha256(`docker-network:${networkParts[0]}`);
+      observation.managed_network_configuration_sha256 = sha256(canonicalJson(networkLabels));
+      observation.configuration_sha256 = sha256(canonicalJson({ image: inspected[2], labels: providerLabels, managed_network_id: networkParts[0] }));
+    }
+    return observation;
   }
   throw new Error("provider observation substrate is outside the fixed allowlist");
 }
@@ -771,6 +860,61 @@ function markProviderResourceRemoved(runtime, instanceId, substrate, now = new D
   record.status = "removed";
   record.removed_at = timestamp;
   record.updated_at = timestamp;
+  persistOrchestrationInventory(runtime, now);
+}
+
+function providerMutationSubject(runtime, { instanceId, generation, operationId: id, action, payload }) {
+  const provisionSubstrate = action === "provision"
+    ? payload.runtime === "qemu" ? "qemu" : payload.runtime === "docker" ? "docker" : null
+    : null;
+  const owned = runtime.providerResources.get(instanceId);
+  const name = action === "provision" ? payload.name : owned?.name;
+  const substrate = action === "provision" ? provisionSubstrate : owned?.substrate;
+  if (!/^celld-[a-z0-9-]{1,62}$/.test(name ?? "") || !SUBSTRATES.includes(substrate)
+      || (owned && (owned.name !== name || owned.substrate !== substrate))) {
+    throw new Error("provider mutation target is not an exact-owned orchestration resource");
+  }
+  runtime.providerResources.set(instanceId, { instanceId, name, substrate });
+  return {
+    instance_id: instanceId,
+    name,
+    substrate,
+    operation_id: id,
+    generation,
+    action,
+    request_sha256: requestHash({ operationId: id, instanceId, generation, action, payload }),
+  };
+}
+
+function planProviderCleanup(runtime, resource, now = new Date(), allowConflictWithMutationId = null) {
+  if (!isOrchestrationInventoryV2(runtime.orchestrationInventory)) return null;
+  const subject = {
+    instance_id: resource.instanceId,
+    name: resource.name,
+    substrate: resource.substrate,
+    operation_id: `cleanup-${randomUUID()}`,
+    generation: 1,
+    action: "cleanup",
+    request_sha256: sha256(canonicalJson({ run_id: runtime.runId ?? runtime.config.run_id, scenario_id: runtime.scenarioId, instance_id: resource.instanceId, action: "cleanup" })),
+  };
+  const planned = planOrchestrationMutation(runtime.orchestrationInventory, {
+    mutation: "provider_cleanup",
+    scenarioId: runtime.scenarioId,
+    subjectType: "provider_resource",
+    subject,
+    allowConflictWithMutationId,
+  }, now);
+  persistOrchestrationInventory(runtime, now);
+  return planned.entry;
+}
+
+function completeProviderCleanup(runtime, plan, observation, now = new Date()) {
+  if (!plan) return;
+  finishOrchestrationMutation(runtime.orchestrationInventory, plan, {
+    outcome: "absent",
+    observedIdentitySha256: null,
+    observedConfigurationSha256: null,
+  }, now);
   persistOrchestrationInventory(runtime, now);
 }
 
@@ -793,8 +937,155 @@ function markFault(runtime, record, status, now = new Date()) {
   persistOrchestrationInventory(runtime, now);
 }
 
+export async function resolveOrchestrationFaultTarget({ runtime, fault, plan }) {
+  const subject = fault ?? plan?.subject;
+  if (!subject || !FAULT_KINDS.has(subject.kind)) throw new Error("fault target resolution lacks an exact persisted subject");
+  if (subject.kind === "management_process_kill") {
+    if (subject.target !== "management" || !runtime.management?.processHandle || !Number.isSafeInteger(runtime.management.processHandle.pid)) {
+      throw new Error("management fault target is not an exact owned process");
+    }
+    const spawnIdentity = runtime.management.processHandle.spawn_identity;
+    if (!spawnIdentity || spawnIdentity.run_id !== runtime.runId
+        || !SHA256.test(spawnIdentity.executable_sha256 ?? "")
+        || !/^[0-9]+$/.test(spawnIdentity.process_start_time_ticks ?? "")) {
+      throw new Error("management fault process has foreign or unverifiable run ownership");
+    }
+    const providerId = String(runtime.management.processHandle.pid);
+    return {
+      owned: true,
+      provider_id: providerId,
+      spawn_identity: { ...spawnIdentity },
+      target_identity_sha256: sha256(canonicalJson({ pid: providerId, ...spawnIdentity })),
+      target_ownership_sha256: sha256(canonicalJson(spawnIdentity)),
+    };
+  }
+  const ownedContainers = new Set([
+    ...(runtime.fleet?.nodes ?? []).map((node) => node.name),
+    ...(runtime.fleet?.nodes ?? []).map((_node, index) => relayName(runtime.fleet, index)),
+  ]);
+  if (!ownedContainers.has(subject.target)) throw new Error("container fault target is not exact-owned");
+  const execute = runtime.runCommand ?? run;
+  const parts = execute("docker", ["inspect", "--format", "{{.Id}}|{{json .Config.Labels}}", subject.target], { timeout: 30_000 }).split("|");
+  if (parts.length !== 2 || !/^[0-9a-f]{64}$/.test(parts[0])) throw new Error("container fault identity is invalid");
+  const labels = JSON.parse(parts[1]);
+  if (!labels || typeof labels !== "object" || Array.isArray(labels)) throw new Error("container fault ownership labels are invalid");
+  const requiredLabels = {
+    "dev.agentic-sandbox.repository": "roctinam/agentic-sandbox",
+    "dev.agentic-sandbox.workflow": "celld-qualification",
+    "dev.agentic-sandbox.run": runtime.runId,
+    "dev.agentic-sandbox.scope": "celld-qualification",
+  };
+  for (const [key, expected] of Object.entries(requiredLabels)) {
+    if (typeof expected !== "string" || labels[key] !== expected) {
+      throw new Error(`container fault target has foreign or missing authoritative ${key} ownership label`);
+    }
+  }
+  return {
+    owned: true,
+    provider_id: parts[0],
+    labels,
+    target_identity_sha256: sha256(`docker:${parts[0]}`),
+    target_ownership_sha256: sha256(canonicalJson({ run_id: runtime.runId, target: subject.target, labels })),
+  };
+}
+
+export async function observeOrchestrationFaultTarget({ runtime, plan }) {
+  const subject = plan?.subject;
+  if (!subject || !FAULT_KINDS.has(subject.kind)) throw new Error("fault observation lacks an exact persisted subject");
+  const isHeal = plan.mutation === "fault_heal";
+  const binding = runtime.runId !== undefined ? await resolveOrchestrationFaultTarget({ runtime, fault: subject, plan }) : null;
+  if (subject.kind === "management_process_kill") {
+    if (subject.target !== "management" || !runtime.management?.processHandle) throw new Error("management fault observation target is not exact-owned");
+    const handle = runtime.management.processHandle;
+    const absent = handle.exitCode !== null || handle.signalCode !== null || handle.killed;
+    return { owned: true, present: absent, ...(binding ?? {}) };
+  }
+  const ownedContainers = new Set([
+    ...(runtime.fleet?.nodes ?? []).map((node) => node.name),
+    ...(runtime.fleet?.nodes ?? []).map((_node, index) => relayName(runtime.fleet, index)),
+  ]);
+  if (!ownedContainers.has(subject.target)) throw new Error("container fault observation target is not exact-owned");
+  const execute = runtime.runCommand ?? run;
+  if (subject.kind === "callback_response_loss") {
+    if (isHeal) {
+      const running = execute("docker", ["inspect", "--format", "{{.State.Running}}", subject.target], { timeout: 30_000 }).trim() === "true";
+      return { owned: true, present: !running, ...(binding ?? {}) };
+    }
+    let logs;
+    if (runtime.runCommand) {
+      logs = execute("docker", ["logs", "--since", plan.recorded_at, subject.target], { timeout: 30_000 });
+    } else {
+      const result = spawnSync("docker", ["logs", "--since", plan.recorded_at, subject.target], { encoding: "utf8", shell: false, timeout: 30_000 });
+      if (result.error || result.status !== 0) throw new Error("callback response-loss observation could not read the exact relay log");
+      logs = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
+    }
+    return { owned: true, present: logs.includes("Celld callback relay injected one response loss"), ...(binding ?? {}) };
+  }
+  const format = subject.kind === "callback_relay_pause" ? "{{.State.Paused}}" : "{{.State.Running}}";
+  const state = execute("docker", ["inspect", "--format", format, subject.target], { timeout: 30_000 }).trim() === "true";
+  const active = subject.kind === "callback_relay_pause" ? state : !state;
+  return { owned: true, present: active, ...(binding ?? {}) };
+}
+
+function exactFaultBinding(binding, description) {
+  if (!binding || binding.owned !== true || !SHA256.test(binding.target_identity_sha256 ?? "")
+      || !SHA256.test(binding.target_ownership_sha256 ?? "")) {
+    throw new Error(`${description} lacks an exact owned fault identity binding`);
+  }
+  return binding;
+}
+
+function sameFaultBinding(left, right) {
+  return left?.target_identity_sha256 === right?.target_identity_sha256
+    && left?.target_ownership_sha256 === right?.target_ownership_sha256
+    && (left?.provider_id === undefined || right?.provider_id === undefined || left.provider_id === right.provider_id);
+}
+
+export async function signalExactCallbackResponseLoss(runtime, binding) {
+  const exact = exactFaultBinding(binding, "callback response-loss signal");
+  if (!/^[0-9a-f]{64}$/.test(exact.provider_id ?? "")
+      || exact.target_identity_sha256 !== sha256(`docker:${exact.provider_id}`)) {
+    throw new Error("callback response-loss signal lacks the persisted exact container identity");
+  }
+  const execute = runtime.runCommand ?? run;
+  execute("docker", ["kill", "--signal", "SIGUSR1", exact.provider_id], { timeout: 30_000 });
+}
+
 export async function applyPlannedOrchestrationFault(runtime, fault, apply) {
   if (typeof apply !== "function") throw new Error("fault apply callback is required");
+  if (isOrchestrationInventoryV2(runtime.orchestrationInventory)) {
+    if (typeof runtime.observeFaultTarget !== "function") throw new Error("an exact fault observer is required before fault apply");
+    const resolvedBinding = runtime.resolveFaultTarget
+      ? exactFaultBinding(await runtime.resolveFaultTarget({ runtime, fault }), "fault authorization")
+      : null;
+    const subject = {
+      fault_id: newFaultId(), kind: fault.kind, target: fault.target,
+      ...(resolvedBinding ? {
+        target_identity_sha256: resolvedBinding.target_identity_sha256,
+        target_ownership_sha256: resolvedBinding.target_ownership_sha256,
+      } : {}),
+    };
+    const planned = planOrchestrationMutation(runtime.orchestrationInventory, {
+      mutation: "fault_apply",
+      scenarioId: runtime.scenarioId,
+      subjectType: "fault",
+      subject,
+    });
+    persistOrchestrationInventory(runtime);
+    const effectBinding = runtime.revalidateFaultTarget
+      ? exactFaultBinding(await runtime.revalidateFaultTarget({ runtime, fault, plan: planned.entry, authorized: resolvedBinding }), "fault effect revalidation")
+      : resolvedBinding;
+    if (resolvedBinding && !sameFaultBinding(resolvedBinding, effectBinding)) throw new Error("fault effect target identity or ownership binding was substituted");
+    await apply(effectBinding);
+    const observation = await runtime.observeFaultTarget({ runtime, plan: planned.entry, fault: planned.materialized, subject });
+    if (!observation || observation.owned !== true || observation.present !== true) {
+      throw new Error("fault apply effect was not independently observed present on the exact-owned target");
+    }
+    if (resolvedBinding && !sameFaultBinding(resolvedBinding, observation)) throw new Error("fault terminal observation substituted the authorized identity binding");
+    const completed = finishOrchestrationMutation(runtime.orchestrationInventory, planned.entry, { outcome: "applied" });
+    persistOrchestrationInventory(runtime);
+    return completed.materialized;
+  }
   const record = planFault(runtime, fault);
   await apply();
   markFault(runtime, record, "applied");
@@ -803,12 +1094,68 @@ export async function applyPlannedOrchestrationFault(runtime, fault, apply) {
 
 export async function healPlannedOrchestrationFault(runtime, record, heal) {
   if (typeof heal !== "function") throw new Error("fault heal callback is required");
+  if (isOrchestrationInventoryV2(runtime.orchestrationInventory)) {
+    if (!runtime.orchestrationInventory.faults.includes(record) || record.status !== "applied") throw new Error("fault record is not an applied exact-owned fault");
+    if (typeof runtime.observeFaultTarget !== "function") throw new Error("an exact fault observer is required before fault heal");
+    const planned = planOrchestrationMutation(runtime.orchestrationInventory, {
+      mutation: "fault_heal",
+      scenarioId: runtime.scenarioId,
+      subjectType: "fault",
+      subject: {
+        fault_id: record.id, kind: record.kind, target: record.target,
+        ...(record.target_identity_sha256 ? { target_identity_sha256: record.target_identity_sha256 } : {}),
+        ...(record.target_ownership_sha256 ? { target_ownership_sha256: record.target_ownership_sha256 } : {}),
+      },
+    });
+    persistOrchestrationInventory(runtime);
+    const authorizedBinding = record.target_identity_sha256 ? {
+      owned: true,
+      target_identity_sha256: record.target_identity_sha256,
+      target_ownership_sha256: record.target_ownership_sha256,
+    } : null;
+    const effectBinding = runtime.revalidateFaultTarget
+      ? exactFaultBinding(await runtime.revalidateFaultTarget({ runtime, fault: record, plan: planned.entry, authorized: authorizedBinding }), "fault heal effect revalidation")
+      : null;
+    let targetTransition;
+    if (authorizedBinding && !sameFaultBinding(authorizedBinding, effectBinding)) {
+      if (record.kind !== "management_process_kill" || effectBinding?.spawn_identity?.run_id !== runtime.runId) {
+        throw new Error("fault heal effect target identity or ownership binding was substituted");
+      }
+      targetTransition = {
+        kind: "management_process_replacement",
+        previous_identity_sha256: authorizedBinding.target_identity_sha256,
+        replacement_identity_sha256: effectBinding.target_identity_sha256,
+        replacement_ownership_sha256: effectBinding.target_ownership_sha256,
+        replacement_provider_id: effectBinding.provider_id,
+      };
+    }
+    await heal(effectBinding);
+    const observation = await runtime.observeFaultTarget({ runtime, plan: planned.entry, fault: record, subject: planned.entry.subject });
+    if (!observation || observation.owned !== true || observation.present !== false) {
+      throw new Error("fault heal effect was not independently observed absent on the exact-owned target");
+    }
+    if (authorizedBinding && !sameFaultBinding(targetTransition ? effectBinding : authorizedBinding, observation)) throw new Error("fault heal terminal observation substituted the authorized identity binding");
+    finishOrchestrationMutation(runtime.orchestrationInventory, planned.entry, { outcome: "healed", targetTransition });
+    persistOrchestrationInventory(runtime);
+    return;
+  }
   await heal();
   markFault(runtime, record, "healed");
 }
 
 export async function issueCommand(runtime, { instanceId, generation, operationId: id, action, payload }) {
-  if (action === "provision") {
+  const journaledAction = isOrchestrationInventoryV2(runtime.orchestrationInventory) && ACTIONS.includes(action);
+  let mutationPlan = null;
+  if (journaledAction) {
+    const subject = providerMutationSubject(runtime, { instanceId, generation, operationId: id, action, payload });
+    mutationPlan = planOrchestrationMutation(runtime.orchestrationInventory, {
+      mutation: "provider_action",
+      scenarioId: runtime.scenarioId,
+      subjectType: "provider_resource",
+      subject,
+    }).entry;
+    persistOrchestrationInventory(runtime);
+  } else if (action === "provision") {
     const substrate = payload.runtime === "qemu" ? "qemu" : payload.runtime === "docker" ? "docker" : null;
     if (substrate && typeof payload.name === "string") planProviderResource(runtime, { instanceId, name: payload.name, substrate });
   }
@@ -818,6 +1165,359 @@ export async function issueCommand(runtime, { instanceId, generation, operationI
   const effect = result.body?.effects?.find((candidate) => candidate.operation_id === id);
   if (!effect) throw new Error("Worker acknowledgement omitted the original effect identity");
   return effect;
+}
+
+export async function completeObservedProviderMutation(runtime, { effect, instanceId, generation, action, observation }, now = new Date()) {
+  if (!isOrchestrationInventoryV2(runtime.orchestrationInventory)) return null;
+  const operationIdValue = effect?.operation_id;
+  const plan = runtime.orchestrationInventory.journal.find((entry) => entry.event === "planned"
+    && runtime.orchestrationInventory.incomplete_mutation_ids.includes(entry.mutation_id)
+    && entry.mutation === "provider_action"
+    && entry.subject.instance_id === instanceId
+    && entry.subject.generation === generation
+    && entry.subject.action === action
+    && entry.subject.operation_id === operationIdValue);
+  if (!plan) throw new Error("provider terminal observation has no exact incomplete mutation plan");
+  const record = runtime.orchestrationInventory.resources.find((resource) => resource.instance_id === instanceId);
+  if (!record || record.name !== plan.subject.name || record.substrate !== plan.subject.substrate) {
+    throw new Error("provider terminal observation target is not the persisted exact-owned resource");
+  }
+  const presentTerminal = action !== "destroy";
+  const expectedStates = {
+    provision: new Set(["created", "shut off"]),
+    start: new Set(["running"]),
+    stop: new Set(["exited", "shut off"]),
+  };
+  if (!observation || observation.owned !== true) {
+    throw new Error("provider effect terminal observation lacks explicit exact-owned authorization");
+  }
+  if (action === "provision" && record.substrate === "qemu" && observation.provider_storage_present !== true) {
+    throw new Error("QEMU provider provision terminal lacks exact-owned storage evidence");
+  }
+  if (observation.present !== presentTerminal
+      || (action === "destroy" && observation.provider_storage_present !== false)
+      || (presentTerminal && !expectedStates[action]?.has(observation.state))) {
+    throw new Error("provider effect terminal state was not independently observed");
+  }
+  if (presentTerminal) {
+    if (!SHA256.test(observation.provider_identity_sha256 ?? "") || !SHA256.test(observation.configuration_sha256 ?? "")) {
+      throw new Error("provider effect observation lacks immutable identity and configuration digests");
+    }
+    if (runtime.runId !== undefined && !hasProviderEffectBinding(record.substrate, observation)) {
+      throw new Error("provider effect observation lacks immutable run-owned destructive bindings");
+    }
+    if (action !== "provision" && record.provider_identity_sha256 && record.provider_identity_sha256 !== observation.provider_identity_sha256) {
+      throw new Error("provider effect observation substituted the persisted immutable identity");
+    }
+    if (action !== "provision" && record.configuration_sha256 && record.configuration_sha256 !== observation.configuration_sha256) {
+      throw new Error("provider effect observation substituted the persisted immutable configuration");
+    }
+    for (const field of [
+      "ownership_binding_sha256", "managed_network_identity_sha256", "managed_network_configuration_sha256", "provider_storage_identity_sha256",
+    ]) {
+      if (observation[field] !== undefined && !SHA256.test(observation[field])) throw new Error(`provider effect observation ${field} is invalid`);
+    }
+  }
+  const terminal = finishOrchestrationMutation(runtime.orchestrationInventory, plan, {
+    outcome: presentTerminal ? "effect_observed" : "absent",
+    observedIdentitySha256: presentTerminal ? observation.provider_identity_sha256 : null,
+    observedConfigurationSha256: presentTerminal ? observation.configuration_sha256 : null,
+    ...(presentTerminal ? {
+      observedProviderId: observation.provider_id,
+      observedOwnershipBindingSha256: observation.ownership_binding_sha256,
+      observedManagedNetworkId: observation.managed_network_id,
+      observedManagedNetworkIdentitySha256: observation.managed_network_identity_sha256,
+      observedManagedNetworkConfigurationSha256: observation.managed_network_configuration_sha256,
+      observedProviderStorageIdentitySha256: observation.provider_storage_identity_sha256,
+      observedStoragePath: observation.storage_path,
+      observedStorageDevice: observation.storage_device,
+      observedStorageInode: observation.storage_inode,
+      observedStorageUid: observation.storage_uid,
+      observedStorageGid: observation.storage_gid,
+    } : {}),
+  }, now);
+  if (presentTerminal) {
+    for (const field of [
+      "ownership_binding_sha256", "managed_network_identity_sha256", "managed_network_configuration_sha256", "provider_storage_identity_sha256",
+      "storage_device", "storage_inode", "storage_uid", "storage_gid",
+    ]) {
+      if (observation[field] !== undefined) terminal.materialized[field] = observation[field];
+    }
+  }
+  persistOrchestrationInventory(runtime, now);
+  return terminal.materialized;
+}
+
+function exactRecoveryProviderResource(runtime, plan) {
+  const subject = plan.subject;
+  const resource = runtime.providerResources?.get(subject.instance_id);
+  if (!resource || resource.instanceId !== subject.instance_id || resource.name !== subject.name || resource.substrate !== subject.substrate) {
+    throw new Error("restart recovery provider target is not exact-owned by this orchestration run");
+  }
+  return resource;
+}
+
+function exactRecoveryFault(runtime, plan) {
+  const subject = plan.subject;
+  const fault = runtime.orchestrationInventory.faults.find((entry) => entry.id === subject.fault_id);
+  if (!fault || fault.kind !== subject.kind || fault.target !== subject.target) throw new Error("restart recovery fault target is not exact-owned by this orchestration run");
+  return fault;
+}
+
+function exactRecoveryProviderObservation(record, observation) {
+  if (!record.provider_identity_sha256 && !record.configuration_sha256
+      && observation && observation.owned === true && observation.ambiguous !== true
+      && typeof observation.present === "boolean") {
+    if (observation.present) return observation;
+    if (observation.provider_storage_present !== true) return { ...observation, provider_storage_present: false };
+  }
+  return exactCleanupObservation(record, observation);
+}
+
+function hasProviderEffectBinding(substrate, observation) {
+  if (!observation || observation.owned !== true || !SHA256.test(observation.provider_identity_sha256 ?? "")
+      || !SHA256.test(observation.configuration_sha256 ?? "") || !SHA256.test(observation.ownership_binding_sha256 ?? "")) return false;
+  if (substrate === "docker") {
+    return SHA256.test(observation.managed_network_identity_sha256 ?? "")
+      && SHA256.test(observation.managed_network_configuration_sha256 ?? "");
+  }
+  return observation.provider_storage_present === true && SHA256.test(observation.provider_storage_identity_sha256 ?? "")
+    && /^(?:0|[1-9][0-9]*)$/.test(observation.storage_device ?? "")
+    && /^[1-9][0-9]*$/.test(observation.storage_inode ?? "")
+    && /^(?:0|[1-9][0-9]*)$/.test(observation.storage_uid ?? "")
+    && /^(?:0|[1-9][0-9]*)$/.test(observation.storage_gid ?? "");
+}
+
+function copyProviderEffectBinding(record, observation) {
+  for (const field of [
+    "provider_id", "ownership_binding_sha256", "managed_network_id", "managed_network_identity_sha256",
+    "managed_network_configuration_sha256", "provider_storage_identity_sha256", "storage_path",
+    "storage_device", "storage_inode", "storage_uid", "storage_gid",
+  ]) if (observation[field] !== undefined) record[field] = observation[field];
+}
+
+function faultObservationActive(observation) {
+  if (!observation || observation.owned !== true
+      || (typeof observation.present !== "boolean" && typeof observation.healed !== "boolean")) {
+    throw new Error("restart recovery fault observation is missing or unowned");
+  }
+  return typeof observation.present === "boolean" ? observation.present : !observation.healed;
+}
+
+function exactRecoveryFaultObservation(subject, observation, requireBinding) {
+  const active = faultObservationActive(observation);
+  const bound = SHA256.test(subject?.target_identity_sha256 ?? "") && SHA256.test(subject?.target_ownership_sha256 ?? "");
+  if (requireBinding && !bound) throw new Error("restart recovery refuses an unbound destructive fault plan");
+  if (bound && (!sameFaultBinding(subject, observation))) throw new Error("restart recovery observed a substituted fault identity binding");
+  return { observation, active };
+}
+
+function incompleteProviderMutationFor(inventory, instanceId) {
+  return inventory.journal.some((entry) => entry.event === "planned"
+    && inventory.incomplete_mutation_ids.includes(entry.mutation_id)
+    && entry.subject_type === "provider_resource"
+    && entry.subject.instance_id === instanceId);
+}
+
+function completeRecoveredProviderEffect(runtime, original, record, observation) {
+  const terminal = finishOrchestrationMutation(runtime.orchestrationInventory, original, {
+    event: "recovered",
+    outcome: "effect_observed",
+    observedIdentitySha256: observation.provider_identity_sha256,
+    observedConfigurationSha256: observation.configuration_sha256,
+    observedProviderId: observation.provider_id,
+    observedOwnershipBindingSha256: observation.ownership_binding_sha256,
+    observedManagedNetworkId: observation.managed_network_id,
+    observedManagedNetworkIdentitySha256: observation.managed_network_identity_sha256,
+    observedManagedNetworkConfigurationSha256: observation.managed_network_configuration_sha256,
+    observedProviderStorageIdentitySha256: observation.provider_storage_identity_sha256,
+    observedStoragePath: observation.storage_path,
+    observedStorageDevice: observation.storage_device,
+    observedStorageInode: observation.storage_inode,
+    observedStorageUid: observation.storage_uid,
+    observedStorageGid: observation.storage_gid,
+  });
+  copyProviderEffectBinding(terminal.materialized, observation);
+  persistOrchestrationInventory(runtime);
+  return terminal.materialized;
+}
+
+async function reconcileRecoveryFault(runtime, plan, fault, dependencies, { requireBinding = true } = {}) {
+  const inventory = runtime.orchestrationInventory;
+  const observeFault = dependencies.observeFaultTarget ?? dependencies.observeFault ?? runtime.observeFaultTarget;
+  const healFault = dependencies.healFaultTarget ?? dependencies.healFault ?? runtime.healFaultTarget;
+  if (typeof observeFault !== "function") throw new Error("restart recovery requires an exact fault observation adapter");
+  const firstResult = exactRecoveryFaultObservation(
+    plan.subject,
+    await observeFault({ runtime, plan, fault, subject: plan.subject }),
+    requireBinding,
+  );
+  if (!firstResult.active) {
+    if (inventory.incomplete_mutation_ids.includes(plan.mutation_id)) {
+      finishOrchestrationMutation(inventory, plan, {
+        event: "recovered",
+        outcome: plan.mutation === "fault_heal" ? "healed" : "not_observed",
+      });
+      persistOrchestrationInventory(runtime);
+    }
+    return;
+  }
+  if (typeof healFault !== "function") throw new Error("restart recovery requires an exact fault heal adapter");
+  let healPlan = plan;
+  if (plan.mutation === "fault_apply") {
+    healPlan = inventory.journal.find((entry) => entry.event === "planned"
+      && entry.mutation === "fault_heal"
+      && entry.subject.fault_id === plan.subject.fault_id
+      && inventory.incomplete_mutation_ids.includes(entry.mutation_id));
+    if (!healPlan) {
+      healPlan = planOrchestrationMutation(inventory, {
+        mutation: "fault_heal",
+        scenarioId: plan.scenario_id,
+        subjectType: "fault",
+        subject: plan.subject,
+        allowConflictWithMutationId: plan.mutation_id,
+      }).entry;
+      persistOrchestrationInventory(runtime);
+    }
+    finishOrchestrationMutation(inventory, plan, { event: "recovered", outcome: "applied" });
+    persistOrchestrationInventory(runtime);
+  }
+  await healFault({ runtime, plan: healPlan, fault, observation: firstResult.observation, subject: healPlan.subject });
+  const finalResult = exactRecoveryFaultObservation(
+    healPlan.subject,
+    await observeFault({ runtime, plan: healPlan, fault, subject: healPlan.subject }),
+    requireBinding,
+  );
+  if (finalResult.active) throw new Error("restart recovery fault heal did not reach an exact healed observation");
+  finishOrchestrationMutation(inventory, healPlan, { event: "recovered", outcome: "healed" });
+  persistOrchestrationInventory(runtime);
+}
+
+export async function recoverOrchestrationInventory(runtime, dependencies = {}) {
+  const inventory = runtime?.orchestrationInventory;
+  if (!inventory || !runtime?.config) throw new Error("restart recovery requires an orchestration runtime and inventory");
+  const errors = validateOrchestrationInventory(inventory, runtime.config, { expectedHostSha256: inventory.host_sha256 });
+  if (errors.length) throw new Error(errors.join("; "));
+  if (!isOrchestrationInventoryV2(inventory)) {
+    throw new Error("orchestration inventory v1 is read-only during recovery; upgrade to v2 before cleanup");
+  }
+
+  const pendingIds = [...inventory.incomplete_mutation_ids];
+  const recovered = [];
+  const activeFaults = inventory.faults.filter((fault) => ["applied", "heal_pending"].includes(fault.status));
+  const activeResources = inventory.resources.filter((resource) => resource.status !== "removed");
+  for (const record of inventory.resources.filter((resource) => resource.status === "removed" && resource.substrate === "qemu")) {
+    const cleanupPlan = latestProviderCleanupPlan(inventory, record.instance_id);
+    if (cleanupPlan) {
+      reconcileQemuQuarantineResidue(runtime, {
+        instanceId: record.instance_id,
+        name: record.name,
+        substrate: record.substrate,
+      }, record, cleanupPlan, dependencies);
+    }
+  }
+  if (pendingIds.length === 0 && activeFaults.length === 0 && activeResources.length === 0) {
+    return { status: "PASS", run_id: inventory.run_id, schema_version: inventory.schema_version, recovered_mutation_ids: [] };
+  }
+  try {
+    persistOrchestrationInventory(runtime, new Date(), "recovering");
+  } catch (error) {
+    if (error instanceof OrchestrationCleanupResidueError) throw error;
+    throw new OrchestrationCleanupResidueError(`restart recovery could not acquire the inventory lifecycle exclusion: ${error.message}`, { cause: error });
+  }
+  try {
+    for (const mutationId of pendingIds) {
+      const original = inventory.journal.find((entry) => entry.event === "planned" && entry.mutation_id === mutationId);
+      if (!original || inventory.journal.some((entry) => entry.event !== "planned" && entry.mutation_id === mutationId)) continue;
+      if (original.subject_type === "provider_resource") {
+        const resource = exactRecoveryProviderResource(runtime, original);
+        const record = inventory.resources.find((entry) => entry.instance_id === resource.instanceId);
+        if (!record) throw new OrchestrationCleanupResidueError("restart recovery resource is absent from the materialized inventory");
+        const observe = dependencies.observeProviderResource
+          ?? (async () => observeOrchestrationProvider(runtime, resource));
+        const remove = dependencies.removeProviderResource
+          ?? (async ({ plan, record: ownedRecord, observation }) => removeExactlyObservedProvider(runtime, resource, ownedRecord, observation, { plan }));
+        const first = exactRecoveryProviderObservation(record, await observe({ runtime, plan: original, resource, record, subject: original.subject }));
+        let cleanupPlan = incompleteProviderCleanupPlan(inventory, resource.instanceId);
+        const newlyBoundEffect = original.mutation === "provider_action"
+          && original.subject.action === "provision"
+          && first.present
+          && !record.provider_identity_sha256
+          && hasProviderEffectBinding(resource.substrate, first);
+        if (first.present && !record.provider_identity_sha256 && !cleanupPlan && !newlyBoundEffect && runtime.runId !== undefined) {
+          throw new OrchestrationCleanupResidueError("restart recovery refuses an unbound provider plan before any destructive effect");
+        }
+        if (newlyBoundEffect) completeRecoveredProviderEffect(runtime, original, record, first);
+        if (first.present) {
+          if (!cleanupPlan) cleanupPlan = planProviderCleanup(runtime, resource, new Date(), newlyBoundEffect ? null : original.mutation_id);
+          await remove({ runtime, plan: cleanupPlan, resource, record, observation: first });
+          const finalObservation = exactRecoveryProviderObservation(record, await observe({ runtime, plan: cleanupPlan, resource, record, subject: original.subject }));
+          if (finalObservation.present) throw new OrchestrationCleanupResidueError("restart recovery provider cleanup did not reach exact observed absence");
+          reconcileQemuQuarantineResidue(runtime, resource, record, cleanupPlan, dependencies);
+          completeProviderCleanup(runtime, cleanupPlan, finalObservation);
+        } else if (cleanupPlan && inventory.incomplete_mutation_ids.includes(cleanupPlan.mutation_id)) {
+          reconcileQemuQuarantineResidue(runtime, resource, record, cleanupPlan, dependencies);
+          completeProviderCleanup(runtime, cleanupPlan, first);
+        }
+        if (!inventory.journal.some((entry) => entry.event !== "planned" && entry.mutation_id === original.mutation_id)) {
+          finishOrchestrationMutation(inventory, original, {
+            event: "recovered",
+            outcome: "absent",
+            observedIdentitySha256: null,
+            observedConfigurationSha256: null,
+          });
+          persistOrchestrationInventory(runtime);
+        }
+        if (!incompleteProviderMutationFor(inventory, resource.instanceId)) runtime.providerResources.delete(resource.instanceId);
+        recovered.push(mutationId);
+        continue;
+      }
+
+      const fault = exactRecoveryFault(runtime, original);
+      await reconcileRecoveryFault(runtime, original, fault, dependencies, { requireBinding: true });
+      recovered.push(mutationId);
+    }
+    if (inventory.resources.some((resource) => resource.status !== "removed")) {
+      await cleanupOwnedProviderResources(runtime, dependencies);
+    }
+    for (const fault of inventory.faults.filter((entry) => entry.status === "applied")) {
+      const observeFault = dependencies.observeFaultTarget ?? dependencies.observeFault ?? runtime.observeFaultTarget;
+      const healFault = dependencies.healFaultTarget ?? dependencies.healFault ?? runtime.healFaultTarget;
+      if (typeof observeFault !== "function" || typeof healFault !== "function") {
+        throw new Error("restart recovery requires exact fault observation and heal adapters");
+      }
+      const subject = {
+        fault_id: fault.id,
+        kind: fault.kind,
+        target: fault.target,
+        ...(fault.target_identity_sha256 ? { target_identity_sha256: fault.target_identity_sha256 } : {}),
+        ...(fault.target_ownership_sha256 ? { target_ownership_sha256: fault.target_ownership_sha256 } : {}),
+      };
+      const firstResult = exactRecoveryFaultObservation(
+        subject,
+        await observeFault({ runtime, plan: null, fault, subject }),
+        false,
+      );
+      const plan = planOrchestrationMutation(inventory, {
+        mutation: "fault_heal",
+        scenarioId: fault.scenario_id,
+        subjectType: "fault",
+        subject,
+      }).entry;
+      persistOrchestrationInventory(runtime);
+      if (firstResult.active) await healFault({ runtime, plan, fault, observation: firstResult.observation, subject });
+      const finalResult = firstResult.active
+        ? exactRecoveryFaultObservation(subject, await observeFault({ runtime, plan, fault, subject }), false)
+        : firstResult;
+      if (finalResult.active) throw new Error("restart recovery fault heal did not reach an exact healed observation");
+      finishOrchestrationMutation(inventory, plan, { event: "recovered", outcome: "healed" });
+      persistOrchestrationInventory(runtime);
+      recovered.push(plan.mutation_id);
+    }
+  } catch (error) {
+    markCleanupResidue(runtime, error);
+  }
+  return { status: "PASS", run_id: inventory.run_id, schema_version: inventory.schema_version, recovered_mutation_ids: recovered };
 }
 
 async function terminalCallback(runtime, instanceId, generation, effect) {
@@ -865,7 +1565,14 @@ async function runOneEffectCampaign(runtime, { prefix, substrate, instanceId, ge
     }
   }
   const cell = await waitCellEffect(runtime, instanceId, generation, id, ["succeeded"]);
-  return { id, effect, terminal: terminal.body, replayStatuses, cell: cell.cell };
+  let providerObservation = null;
+  if (ACTIONS.includes(action)) {
+    const resource = runtime.providerResources.get(instanceId);
+    if (!resource || resource.substrate !== substrate) throw new Error("provider terminal observation target is absent from the exact-run inventory");
+    providerObservation = observeOrchestrationProvider(runtime, resource);
+    await completeObservedProviderMutation(runtime, { effect, instanceId, generation, action, observation: providerObservation });
+  }
+  return { id, effect, terminal: terminal.body, replayStatuses, cell: cell.cell, providerObservation };
 }
 
 async function runUat003(runtime, timeline) {
@@ -1003,7 +1710,7 @@ async function runUat004(runtime, timeline) {
           }
 
           const faultStarted = Date.parse(managementFault.applied_at);
-          nodeFault = await applyPlannedOrchestrationFault(runtime, { kind: "fleet_node_stop", target: ownershipBefore.owner_target }, () => run("docker", ["stop", "--time", "5", ownershipBefore.owner_target], { timeout: 30_000 }));
+          nodeFault = await applyPlannedOrchestrationFault(runtime, { kind: "fleet_node_stop", target: ownershipBefore.owner_target }, (target) => run("docker", ["stop", "--time", "5", target.provider_id], { timeout: 30_000 }));
           const fallbackIndex = runtime.fleet.nodes.findIndex((node) => node.name !== ownershipBefore.owner_target);
           if (fallbackIndex < 0) throw new Error("owner-loss campaign has no surviving Worker endpoint");
           runtime.workerEndpoint = workerEndpoint(runtime.fleet, fallbackIndex);
@@ -1028,8 +1735,8 @@ async function runUat004(runtime, timeline) {
           }
           if (managementFault?.status === "applied") await healPlannedOrchestrationFault(runtime, managementFault, async () => {});
           if (nodeFault?.status === "applied") {
-            await healPlannedOrchestrationFault(runtime, nodeFault, async () => {
-              run("docker", ["start", ownershipBefore.owner_target], { timeout: 30_000 });
+            await healPlannedOrchestrationFault(runtime, nodeFault, async (target) => {
+              run("docker", ["start", target.provider_id], { timeout: 30_000 });
               await waitFor(() => diagnoseFleet(runtime.fleetPath).status === "READY", { timeoutMs: 30_000, intervalMs: 250, description: "three-node fleet heal" });
             });
           }
@@ -1120,15 +1827,21 @@ async function runUat005(runtime, timeline) {
       for (const action of ACTIONS) {
         if (action === "provision") planProviderResource(runtime, { instanceId, name, substrate });
         const providerBefore = observeOrchestrationProvider(runtime, { instanceId, name, substrate });
-        const responseLossFault = await applyPlannedOrchestrationFault(runtime, { kind: "callback_response_loss", target: relayName(runtime.fleet) }, () => run("docker", ["kill", "--signal", "SIGUSR1", relayName(runtime.fleet)]));
         const id = operationId("uat005", substrate, generation, action);
         const started = Date.now();
-        const originalEffect = await issueCommand(runtime, { instanceId, generation, operationId: id, action, payload: payloads[action] });
-        const unknown = await waitCellEffect(runtime, instanceId, generation, id, ["unknown"]);
-        const terminal = await waitCellEffect(runtime, instanceId, generation, id, ["succeeded", "failed", "rejected"]);
+        let originalEffect;
+        let unknown;
+        let terminal;
+        const responseLossFault = await applyPlannedOrchestrationFault(runtime, { kind: "callback_response_loss", target: relayName(runtime.fleet) }, async (target) => {
+          await signalExactCallbackResponseLoss(runtime, target);
+          originalEffect = await issueCommand(runtime, { instanceId, generation, operationId: id, action, payload: payloads[action] });
+          unknown = await waitCellEffect(runtime, instanceId, generation, id, ["unknown"]);
+          terminal = await waitCellEffect(runtime, instanceId, generation, id, ["succeeded", "failed", "rejected"]);
+        });
         if (terminal.effect.status !== "succeeded") throw new Error(`${substrate} ${action} response-loss recovery failed`);
         const managementReplay = await callbackRequest(callbackContext(runtime.fleet, runtime.managementHost, instanceId, generation), originalEffect);
         const providerAfter = observeOrchestrationProvider(runtime, { instanceId, name, substrate });
+        await completeObservedProviderMutation(runtime, { effect: originalEffect, instanceId, generation, action, observation: providerAfter });
         const record = {
           substrate,
           action,
@@ -1173,7 +1886,7 @@ async function runUat006(runtime, timeline) {
     for (const action of ACTIONS) await runOneEffectCampaign(runtime, { prefix: "uat006-old", substrate, instanceId, generation: 1, action, payload: action === "provision" ? provisionPayload(runtime.config, substrate, name) : {} });
     await runOneEffectCampaign(runtime, { prefix: "uat006-active", substrate, instanceId, generation: 2, action: "provision", payload: provisionPayload(runtime.config, substrate, name) });
     const providerBefore = observeOrchestrationProvider(runtime, { instanceId, name, substrate });
-    const partitionFault = await applyPlannedOrchestrationFault(runtime, { kind: "callback_relay_pause", target: relayName(runtime.fleet) }, () => run("docker", ["pause", relayName(runtime.fleet)]));
+    const partitionFault = await applyPlannedOrchestrationFault(runtime, { kind: "callback_relay_pause", target: relayName(runtime.fleet) }, (target) => run("docker", ["pause", target.provider_id]));
     let future;
     try {
       for (const action of ["stop", "destroy"]) {
@@ -1197,7 +1910,7 @@ async function runUat006(runtime, timeline) {
       future = await sendWorkerCommand({ endpoint: runtime.workerEndpoint, varsFile: runtime.fleet.worker_vars_file_ref, instanceId, operationId: operationId("uat006-future", substrate, 4, "destroy"), generation: 4, action: "destroy", payload: {} });
       if (future.status !== 409 || future.body?.error?.code !== "cell.generation_fenced") throw new Error("future generation was not fenced by the active cell");
     } finally {
-      await healPlannedOrchestrationFault(runtime, partitionFault, () => run("docker", ["unpause", relayName(runtime.fleet)]));
+      await healPlannedOrchestrationFault(runtime, partitionFault, (target) => run("docker", ["unpause", target.provider_id]));
     }
     const baseline = await runOneEffectCampaign(runtime, {
       prefix: "uat006-heal",
@@ -1244,11 +1957,12 @@ function artifact(path, relativePath, mimeType) {
   return { path: relativePath, mime_type: mimeType, sha256: sha256(bytes), bytes: bytes.length, contains_restricted_data: false };
 }
 
-function cleanupProviderResources(runtime) {
+function cleanupProviderResourcesLegacy(runtime) {
   if (!runtime) return [];
   const assertions = [];
   for (const resource of runtime.providerResources.values()) {
     if (!/^celld-[a-z0-9-]{1,62}$/.test(resource.name) || !/^[0-9a-f-]{36}$/.test(resource.instanceId)) throw new Error("refusing an unsafe provider cleanup identity");
+    const cleanupPlan = planProviderCleanup(runtime, resource);
     if (resource.substrate === "docker") {
       const ids = run("docker", ["ps", "--all", "--filter", `label=agentic-instance-id=${resource.instanceId}`, "--format", "{{.ID}}"])
         .split(/\r?\n/).filter(Boolean);
@@ -1262,7 +1976,8 @@ function cleanupProviderResources(runtime) {
       }
       const remaining = run("docker", ["ps", "--all", "--filter", `label=agentic-instance-id=${resource.instanceId}`, "--format", "{{.ID}}"]).split(/\r?\n/).filter(Boolean);
       if (remaining.length !== 0) throw new Error("Docker provider cleanup did not reach exact absence");
-      markProviderResourceRemoved(runtime, resource.instanceId, resource.substrate);
+      if (cleanupPlan) completeProviderCleanup(runtime, cleanupPlan, { present: false });
+      else markProviderResourceRemoved(runtime, resource.instanceId, resource.substrate);
       runtime.providerResources.delete(resource.instanceId);
       assertions.push(`Docker provider identity ${sha256(resource.instanceId)} absent`);
       continue;
@@ -1274,11 +1989,690 @@ function cleanupProviderResources(runtime) {
     }
     const remainingDomain = spawnSync("virsh", ["-c", runtime.config.libvirt_uri, "dominfo", resource.name], { encoding: "utf8", shell: false });
     if (remainingDomain.status === 0 || existsSync(directory)) throw new Error("QEMU provider cleanup did not reach exact absence");
-    markProviderResourceRemoved(runtime, resource.instanceId, resource.substrate);
+    if (cleanupPlan) completeProviderCleanup(runtime, cleanupPlan, { present: false });
+    else markProviderResourceRemoved(runtime, resource.instanceId, resource.substrate);
     runtime.providerResources.delete(resource.instanceId);
     assertions.push(`QEMU provider identity ${sha256(resource.instanceId)} absent`);
   }
   return assertions;
+}
+
+function exactCleanupObservation(resource, observation) {
+  if (!observation || typeof observation.present !== "boolean" || observation.owned !== true || observation.ambiguous === true) {
+    throw new OrchestrationCleanupResidueError("provider cleanup observation is ambiguous or foreign");
+  }
+  if (!observation.present) {
+    if (observation.provider_storage_present !== false) {
+      throw new OrchestrationCleanupResidueError("provider domain is absent while owned storage residue remains");
+    }
+    return observation;
+  }
+  if (!SHA256.test(observation.provider_identity_sha256 ?? "") || !SHA256.test(observation.configuration_sha256 ?? "")) {
+    throw new OrchestrationCleanupResidueError("provider cleanup observation lacks immutable identity evidence");
+  }
+  if (resource.provider_identity_sha256 && observation.provider_identity_sha256 !== resource.provider_identity_sha256) {
+    throw new OrchestrationCleanupResidueError("provider cleanup observed a substituted immutable identity");
+  }
+  if (resource.configuration_sha256 && observation.configuration_sha256 !== resource.configuration_sha256) {
+    throw new OrchestrationCleanupResidueError("provider cleanup observed a substituted immutable configuration");
+  }
+  for (const field of [
+    "ownership_binding_sha256", "managed_network_identity_sha256", "managed_network_configuration_sha256", "provider_storage_identity_sha256",
+    "storage_device", "storage_inode", "storage_uid", "storage_gid",
+  ]) {
+    if (resource[field] && observation[field] !== resource[field]) {
+      throw new OrchestrationCleanupResidueError(`provider cleanup observed a substituted ${field} binding`);
+    }
+  }
+  return observation;
+}
+
+async function destroyExactlyObservedProvider(runtime, resource, observation) {
+  if (resource.substrate === "docker") {
+    if (!/^[0-9a-f]{64}$/.test(observation.provider_id ?? "")) {
+      throw new OrchestrationCleanupResidueError("Docker cleanup lacks the exact observed container identity");
+    }
+    if (observation.managed_network_id !== null && observation.managed_network_id !== undefined
+        && !/^[0-9a-f]{12,64}$/.test(observation.managed_network_id)) {
+      throw new OrchestrationCleanupResidueError("Docker cleanup observed an unsafe managed-network identity");
+    }
+    run("docker", ["rm", "--force", "--volumes", observation.provider_id]);
+    if (observation.managed_network_id) run("docker", ["network", "rm", observation.managed_network_id]);
+    return;
+  }
+  throw new OrchestrationCleanupResidueError("provider cleanup substrate is outside the fixed allowlist");
+}
+
+function validateExactQemuStorage(resource, observation) {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(observation.provider_id ?? "")) {
+    throw new OrchestrationCleanupResidueError("QEMU cleanup lacks the exact observed libvirt UUID");
+  }
+  if (!isAbsolute(observation.storage_path ?? "") || resolve(observation.storage_path) !== observation.storage_path
+      || basename(observation.storage_path) !== resource.name) {
+    throw new OrchestrationCleanupResidueError("QEMU cleanup storage path is not the exact provider directory");
+  }
+  let metadata;
+  try {
+    metadata = lstatSync(observation.storage_path);
+  } catch (error) {
+    throw new OrchestrationCleanupResidueError(`QEMU cleanup cannot verify the exact storage directory: ${error.message}`, { cause: error });
+  }
+  if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+    throw new OrchestrationCleanupResidueError("QEMU cleanup storage path is not a protected exact directory");
+  }
+  if (String(metadata.dev) !== observation.storage_device || String(metadata.ino) !== observation.storage_inode
+      || String(metadata.uid) !== observation.storage_uid || String(metadata.gid) !== observation.storage_gid) {
+    throw new OrchestrationCleanupResidueError("QEMU cleanup storage path no longer has its persisted exact owner/device/inode binding");
+  }
+  if (!Array.isArray(observation.disk_source_paths) || observation.disk_source_paths.length === 0) {
+    throw new OrchestrationCleanupResidueError("QEMU cleanup lacks confined XML disk source paths");
+  }
+  const prefix = `${observation.storage_path}${sep}`;
+  for (const diskPath of observation.disk_source_paths) {
+    if (!isAbsolute(diskPath ?? "") || resolve(diskPath) !== diskPath || !diskPath.startsWith(prefix)) {
+      throw new OrchestrationCleanupResidueError("QEMU cleanup XML disk path escapes the exact storage directory confinement");
+    }
+  }
+  return { path: observation.storage_path, metadata };
+}
+
+function sameFileIdentity(left, right) {
+  return left?.dev === right?.dev && left?.ino === right?.ino;
+}
+
+function exactPersistedQemuCleanupPlan(runtime, resource, record, plan, { requireIncomplete = true } = {}) {
+  const inventory = runtime?.orchestrationInventory;
+  if (!isOrchestrationInventoryV2(inventory) || !plan) {
+    throw new OrchestrationCleanupResidueError("QEMU cleanup requires a persisted journal-owned quarantine plan");
+  }
+  let durableInventory;
+  try {
+    durableInventory = loadProtectedOrchestrationInventory(runtime.config.inventory_path, runtime.config, {
+      expectedHostSha256: inventory.host_sha256,
+    });
+  } catch (error) {
+    throw new OrchestrationCleanupResidueError(`QEMU cleanup cannot load the protected durable inventory authority: ${error.message}`, { cause: error });
+  }
+  if (!isOrchestrationInventoryV2(durableInventory)
+      || durableInventory.journal_head_sha256 !== inventory.journal_head_sha256
+      || runtime.persistedJournalHeadSha256 !== durableInventory.journal_head_sha256) {
+    throw new OrchestrationCleanupResidueError("QEMU cleanup in-memory journal head is not the exact protected durable inventory head");
+  }
+  const persisted = inventory.journal.find((entry) => entry.event === "planned"
+    && entry.mutation === "provider_cleanup"
+    && entry.mutation_id === plan.mutation_id);
+  const durablePlan = durableInventory.journal.find((entry) => entry.event === "planned"
+    && entry.mutation === "provider_cleanup"
+    && entry.mutation_id === plan.mutation_id);
+  let exactPlan = false;
+  try {
+    exactPlan = Boolean(persisted) && Boolean(durablePlan)
+      && canonicalJson(persisted) === canonicalJson(plan)
+      && canonicalJson(durablePlan) === canonicalJson(plan);
+  } catch { exactPlan = false; }
+  if (!persisted || !durablePlan || !exactPlan
+      || (requireIncomplete && (!inventory.incomplete_mutation_ids.includes(persisted.mutation_id)
+        || !durableInventory.incomplete_mutation_ids.includes(persisted.mutation_id)))) {
+    throw new OrchestrationCleanupResidueError("QEMU cleanup quarantine plan is not the exact active persisted journal entry");
+  }
+  const materialized = inventory.resources.find((entry) => entry.instance_id === resource.instanceId);
+  const durableMaterialized = durableInventory.resources.find((entry) => entry.instance_id === resource.instanceId);
+  let exactMaterialized = false;
+  try { exactMaterialized = Boolean(materialized) && Boolean(durableMaterialized) && canonicalJson(materialized) === canonicalJson(durableMaterialized); } catch { exactMaterialized = false; }
+  if (!materialized || !durableMaterialized || !exactMaterialized
+      || persisted.subject?.instance_id !== resource.instanceId
+      || persisted.subject?.name !== resource.name
+      || persisted.subject?.substrate !== "qemu"
+      || materialized.name !== resource.name
+      || materialized.substrate !== "qemu"
+      || materialized.provider_id !== record.provider_id
+      || materialized.provider_identity_sha256 !== record.provider_identity_sha256
+      || materialized.configuration_sha256 !== record.configuration_sha256
+      || materialized.ownership_binding_sha256 !== record.ownership_binding_sha256
+      || materialized.provider_storage_identity_sha256 !== record.provider_storage_identity_sha256
+      || materialized.storage_device !== record.storage_device
+      || materialized.storage_inode !== record.storage_inode
+      || materialized.storage_uid !== record.storage_uid
+      || materialized.storage_gid !== record.storage_gid
+      || materialized.storage_path !== record.storage_path
+      || materialized.storage_quarantine_path !== persisted.subject.storage_quarantine_path
+      || materialized.storage_quarantine_identity_sha256 !== persisted.subject.storage_quarantine_identity_sha256
+      || materialized.storage_final_capture_path !== persisted.subject.storage_final_capture_path
+      || materialized.storage_final_capture_identity_sha256 !== persisted.subject.storage_final_capture_identity_sha256
+      || materialized.storage_expected_device !== persisted.subject.storage_expected_device
+      || materialized.storage_expected_inode !== persisted.subject.storage_expected_inode
+      || materialized.storage_expected_uid !== persisted.subject.storage_expected_uid
+      || materialized.storage_expected_gid !== persisted.subject.storage_expected_gid
+      || persisted.subject.storage_expected_device !== record.storage_device
+      || persisted.subject.storage_expected_inode !== record.storage_inode
+      || persisted.subject.storage_expected_uid !== record.storage_uid
+      || persisted.subject.storage_expected_gid !== record.storage_gid) {
+    throw new OrchestrationCleanupResidueError("QEMU cleanup quarantine authority is not bound to the exact materialized provider identity");
+  }
+  return persisted;
+}
+
+function exactQemuQuarantineBinding(storage, record, plan) {
+  if (!plan) throw new OrchestrationCleanupResidueError("QEMU cleanup lacks a persisted journal-owned storage quarantine plan");
+  const expectedPath = join(dirname(storage.path), `.${basename(storage.path)}.cleanup-${plan.mutation_id}`);
+  if (plan.mutation !== "provider_cleanup"
+      || plan.subject?.storage_quarantine_path !== expectedPath
+      || plan.subject?.storage_quarantine_identity_sha256 !== record.provider_storage_identity_sha256) {
+    throw new OrchestrationCleanupResidueError("QEMU cleanup lacks the exact journal-owned storage quarantine binding");
+  }
+  return { path: expectedPath };
+}
+
+function qemuCleanupHelperRequest(runtime, plan) {
+  const subject = plan?.subject;
+  if (!subject || subject.storage_final_capture_path !== join(QEMU_CLEANUP_CAPTURE_ROOT, runtime.runId, `${basename(subject.storage_quarantine_path ?? "")}.final`)) {
+    throw new OrchestrationCleanupResidueError("QEMU cleanup helper request lacks its exact deterministic durable capture binding");
+  }
+  return {
+    schema_version: "agentic-sandbox.celld-qemu-cleanup-helper/v1",
+    operation: "capture-delete",
+    run_id: runtime.runId,
+    source_path: subject.storage_quarantine_path,
+    capture_path: subject.storage_final_capture_path,
+    expected_uid: subject.storage_expected_uid,
+    expected_gid: subject.storage_expected_gid,
+    expected_device: subject.storage_expected_device,
+    expected_inode: subject.storage_expected_inode,
+  };
+}
+
+function invokeInstalledQemuCleanupHelper(runtime, request) {
+  if (!verifyQemuCleanupHelperInstallation(runtime.config)) {
+    throw new OrchestrationCleanupResidueError("installed QEMU cleanup helper is not the exact root-owned reviewed binary");
+  }
+  const input = `${JSON.stringify(request)}\n`;
+  if (Buffer.byteLength(input) > QEMU_CLEANUP_HELPER_MAX_INPUT) {
+    throw new OrchestrationCleanupResidueError("QEMU cleanup helper request exceeds its fixed input bound");
+  }
+  const result = spawnSync("/usr/bin/sudo", ["-n", "--", QEMU_CLEANUP_HELPER_PATH], {
+    encoding: "utf8",
+    shell: false,
+    input,
+    maxBuffer: QEMU_CLEANUP_HELPER_MAX_OUTPUT,
+    timeout: 120_000,
+  });
+  let response = null;
+  try {
+    if (Buffer.byteLength(result.stdout ?? "") <= QEMU_CLEANUP_HELPER_MAX_OUTPUT) response = JSON.parse(result.stdout);
+  } catch { response = null; }
+  if (result.error || result.status !== 0
+      || response?.schema_version !== "agentic-sandbox.celld-qemu-cleanup-helper-result/v1"
+      || !["deleted", "absent"].includes(response?.status)
+      || response.capture_path !== request.capture_path) {
+    throw new OrchestrationCleanupResidueError("privileged QEMU cleanup helper refused or failed the exact journal-owned capture");
+  }
+  return response;
+}
+
+function invokeQemuCleanupHelper(runtime, plan, dependencies = {}) {
+  const request = qemuCleanupHelperRequest(runtime, plan);
+  const adapter = dependencies.qemuCleanupHelper ?? runtime.qemuCleanupHelper;
+  let response;
+  try {
+    response = adapter ? adapter({ runtime, plan, request, dependencies }) : invokeInstalledQemuCleanupHelper(runtime, request);
+  } catch (error) {
+    if (error instanceof OrchestrationCleanupResidueError) throw error;
+    throw new OrchestrationCleanupResidueError("privileged QEMU cleanup helper did not converge", { cause: error });
+  }
+  if (response?.schema_version !== "agentic-sandbox.celld-qemu-cleanup-helper-result/v1"
+      || !["deleted", "absent"].includes(response?.status)
+      || response.capture_path !== request.capture_path) {
+    throw new OrchestrationCleanupResidueError("QEMU cleanup adapter returned invalid bounded evidence");
+  }
+  return response;
+}
+
+function lstatIfPresent(path) {
+  try { return lstatSync(path); } catch (error) {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+function qemuFinalCapturePath(path, operation) {
+  const name = basename(path);
+  const quarantine = operation === "rmdir"
+    ? /^(\..+\.cleanup-)[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.exec(name)
+    : null;
+  return quarantine
+    ? join(dirname(path), `${quarantine[1]}${randomUUID()}`)
+    : join(dirname(path), `.celld-qemu-delete-capture-${randomUUID()}`);
+}
+
+function captureExactQemuFinalName(path, expectedMetadata, operation, { beforeFinalNameOperation, beforeCapturedPathDeletion } = {}) {
+  if (!new Set(["unlink", "rmdir"]).has(operation)) throw new Error("QEMU final name operation is invalid");
+  if (beforeFinalNameOperation !== undefined && typeof beforeFinalNameOperation !== "function") {
+    throw new Error("QEMU final name operation seam must be a function");
+  }
+  if (beforeCapturedPathDeletion !== undefined && typeof beforeCapturedPathDeletion !== "function") {
+    throw new Error("QEMU captured path deletion seam must be a function");
+  }
+  beforeFinalNameOperation?.({ operation, path });
+  const capturePath = qemuFinalCapturePath(path, operation);
+  if (lstatIfPresent(capturePath) !== null) {
+    throw new OrchestrationCleanupResidueError("QEMU cleanup final capture path is unexpectedly occupied");
+  }
+  try {
+    renameSync(path, capturePath);
+  } catch (error) {
+    throw new OrchestrationCleanupResidueError(`QEMU cleanup could not atomically capture the exact final pathname: ${error.message}`, { cause: error });
+  }
+  let captured;
+  try { captured = lstatSync(capturePath); } catch (error) {
+    throw new OrchestrationCleanupResidueError(`QEMU cleanup cannot verify its atomically captured final pathname: ${error.message}`, { cause: error });
+  }
+  if (!sameFileIdentity(captured, expectedMetadata)) {
+    let restoreError = null;
+    try {
+      if (lstatIfPresent(path) === null) renameSync(capturePath, path);
+    } catch (error) {
+      restoreError = error;
+    }
+    throw new OrchestrationCleanupResidueError(`QEMU cleanup captured a substituted final pathname and preserved it${restoreError ? `; restoration failed: ${restoreError.message}` : ""}`);
+  }
+  beforeCapturedPathDeletion?.({
+    operation,
+    originalPath: path,
+    capturedPath: capturePath,
+    device: String(captured.dev),
+    inode: String(captured.ino),
+  });
+  let afterHook;
+  try { afterHook = lstatSync(capturePath); } catch (error) {
+    throw new OrchestrationCleanupResidueError(`QEMU cleanup cannot verify the captured final pathname before deletion: ${error.message}`, { cause: error });
+  }
+  if (sameFileIdentity(afterHook, expectedMetadata)) return capturePath;
+  let restoreError = null;
+  try {
+    if (lstatIfPresent(path) === null) renameSync(capturePath, path);
+  } catch (error) {
+    restoreError = error;
+  }
+  throw new OrchestrationCleanupResidueError(`QEMU cleanup captured a substituted final pathname and preserved it${restoreError ? `; restoration failed: ${restoreError.message}` : ""}`);
+}
+
+function removeDirectoryContentsByDescriptor(descriptor, dependencies = {}) {
+  const descriptorPath = `/proc/self/fd/${descriptor}`;
+  for (const name of readdirSync(descriptorPath)) {
+    const childPath = join(descriptorPath, name);
+    const before = lstatSync(childPath);
+    if (!before.isDirectory() || before.isSymbolicLink()) {
+      const capturedPath = captureExactQemuFinalName(childPath, before, "unlink", dependencies);
+      rmSync(capturedPath, { recursive: false, force: false });
+      continue;
+    }
+    let childDescriptor = null;
+    try {
+      childDescriptor = openSync(childPath, constants.O_RDONLY | constants.O_DIRECTORY | (constants.O_NOFOLLOW ?? 0));
+      const opened = fstatSync(childDescriptor);
+      if (!opened.isDirectory() || !sameFileIdentity(before, opened)) {
+        throw new OrchestrationCleanupResidueError("QEMU cleanup detected a substituted nested storage directory");
+      }
+      removeDirectoryContentsByDescriptor(childDescriptor, dependencies);
+      const capturedPath = captureExactQemuFinalName(childPath, opened, "rmdir", dependencies);
+      const captured = lstatSync(capturedPath);
+      if (!captured.isDirectory() || captured.isSymbolicLink() || !sameFileIdentity(opened, captured)) {
+        throw new OrchestrationCleanupResidueError("QEMU cleanup detected a substituted captured nested storage directory");
+      }
+      rmdirSync(capturedPath);
+    } finally {
+      if (childDescriptor !== null) closeSync(childDescriptor);
+    }
+  }
+}
+
+function removeInodeBoundDirectory(path, expectedMetadata, { beforeDelete, beforeFinalNameOperation, beforeCapturedPathDeletion } = {}) {
+  if (beforeDelete !== undefined && typeof beforeDelete !== "function") {
+    throw new Error("QEMU quarantine pre-delete seam must be a function");
+  }
+  let descriptor = null;
+  try {
+    descriptor = openSync(path, constants.O_RDONLY | constants.O_DIRECTORY | (constants.O_NOFOLLOW ?? 0));
+    const opened = fstatSync(descriptor);
+    if (!opened.isDirectory() || !sameFileIdentity(opened, expectedMetadata)) {
+      throw new OrchestrationCleanupResidueError("QEMU cleanup quarantine descriptor has a substituted storage identity");
+    }
+    beforeDelete?.({ path, device: String(opened.dev), inode: String(opened.ino) });
+    const afterHook = lstatSync(path);
+    if (!afterHook.isDirectory() || afterHook.isSymbolicLink() || !sameFileIdentity(opened, afterHook)) {
+      throw new OrchestrationCleanupResidueError("QEMU cleanup detected a substituted quarantine pathname before deletion");
+    }
+    removeDirectoryContentsByDescriptor(descriptor, { beforeFinalNameOperation, beforeCapturedPathDeletion });
+    const capturedPath = captureExactQemuFinalName(path, opened, "rmdir", { beforeFinalNameOperation, beforeCapturedPathDeletion });
+    const captured = lstatSync(capturedPath);
+    if (!captured.isDirectory() || captured.isSymbolicLink() || !sameFileIdentity(opened, captured)) {
+      throw new OrchestrationCleanupResidueError("QEMU cleanup detected a substituted captured quarantine directory");
+    }
+    const beforeRmdir = lstatSync(capturedPath);
+    if (!beforeRmdir.isDirectory() || beforeRmdir.isSymbolicLink() || !sameFileIdentity(opened, beforeRmdir)) {
+      throw new OrchestrationCleanupResidueError("QEMU cleanup detected a substituted captured quarantine directory after deletion");
+    }
+    rmdirSync(capturedPath);
+  } finally {
+    if (descriptor !== null) closeSync(descriptor);
+  }
+}
+
+function containsQemuPostCaptureTestResidue(path) {
+  for (const name of readdirSync(path)) {
+    if (name.startsWith(".celld-qemu-authorized-residue-")) return true;
+    const childPath = join(path, name);
+    const metadata = lstatSync(childPath);
+    if (metadata.isDirectory() && !metadata.isSymbolicLink() && containsQemuPostCaptureTestResidue(childPath)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// This adapter exists only so the unprivileged Node test process can exercise
+// pre-helper race classification without sudo or the fixed /build layout. The
+// qualification/runtime path never selects it and it refuses the production VM
+// root. Destructive authority remains exclusively in the installed Rust helper.
+export function qemuCleanupHelperTestAdapter({ request, dependencies = {} }) {
+  if (!process.env.NODE_TEST_CONTEXT || request.source_path.startsWith("/build/agentic-sandbox/vms/")) {
+    throw new OrchestrationCleanupResidueError("unprivileged QEMU cleanup test adapter is unavailable outside an isolated Node test fixture");
+  }
+  const physicalCapturePath = dependencies.qemuCleanupPhysicalCapturePath?.(request)
+    ?? `${request.source_path}.final`;
+  const tombstonePath = `${physicalCapturePath}.deleted`;
+  const tombstoneBody = `${JSON.stringify({
+    schema_version: "agentic-sandbox.celld-qemu-cleanup-helper-result/v1",
+    status: "deleted",
+    source_path: request.source_path,
+    capture_path: request.capture_path,
+    expected_uid: request.expected_uid,
+    expected_gid: request.expected_gid,
+    expected_device: request.expected_device,
+    expected_inode: request.expected_inode,
+  })}\n`;
+  const sourceMetadata = lstatIfPresent(request.source_path);
+  const captureMetadata = lstatIfPresent(physicalCapturePath);
+  const tombstoneMetadata = lstatIfPresent(tombstonePath);
+  if (tombstoneMetadata && (sourceMetadata || captureMetadata)) {
+    throw new OrchestrationCleanupResidueError("QEMU cleanup test adapter tombstone conflicts with live storage");
+  }
+  if (!sourceMetadata && !captureMetadata) {
+    if (!tombstoneMetadata || readFileSync(tombstonePath, "utf8") !== tombstoneBody) {
+      throw new OrchestrationCleanupResidueError("QEMU cleanup test adapter refuses absent storage without a helper tombstone");
+    }
+    return {
+      schema_version: "agentic-sandbox.celld-qemu-cleanup-helper-result/v1",
+      status: "absent",
+      capture_path: request.capture_path,
+    };
+  }
+  if (sourceMetadata && captureMetadata) {
+    throw new OrchestrationCleanupResidueError("QEMU cleanup test adapter found source and capture simultaneously");
+  }
+  let metadata = captureMetadata;
+  if (sourceMetadata) {
+    if (String(sourceMetadata.dev) !== request.expected_device || String(sourceMetadata.ino) !== request.expected_inode
+        || String(sourceMetadata.uid) !== request.expected_uid || String(sourceMetadata.gid) !== request.expected_gid) {
+      throw new OrchestrationCleanupResidueError("QEMU cleanup test adapter observed substituted storage identity");
+    }
+    if (lstatIfPresent(physicalCapturePath) !== null) {
+      throw new OrchestrationCleanupResidueError("QEMU cleanup test adapter capture path is occupied");
+    }
+    renameSync(request.source_path, physicalCapturePath);
+    metadata = lstatSync(physicalCapturePath);
+    if (!sameFileIdentity(sourceMetadata, metadata)) {
+      throw new OrchestrationCleanupResidueError("QEMU cleanup test adapter captured a substituted storage identity");
+    }
+  }
+  if (String(metadata.dev) !== request.expected_device || String(metadata.ino) !== request.expected_inode
+      || String(metadata.uid) !== request.expected_uid || String(metadata.gid) !== request.expected_gid) {
+    throw new OrchestrationCleanupResidueError("QEMU cleanup test adapter observed substituted capture identity");
+  }
+  if (containsQemuPostCaptureTestResidue(physicalCapturePath)) {
+    throw new OrchestrationCleanupResidueError("QEMU cleanup test adapter found prior post-capture substitution residue");
+  }
+  dependencies.beforeQemuCapturedPathDeletion?.({
+    operation: "rmdir",
+    originalPath: request.source_path,
+    capturedPath: physicalCapturePath,
+    logicalCapturePath: request.capture_path,
+    device: String(metadata.dev),
+    inode: String(metadata.ino),
+  });
+  const afterHook = lstatSync(physicalCapturePath);
+  if (!sameFileIdentity(metadata, afterHook)) {
+    throw new OrchestrationCleanupResidueError("QEMU cleanup test adapter detected substituted root capture before deletion");
+  }
+  removeInodeBoundDirectory(physicalCapturePath, metadata, {
+    beforeDelete: dependencies.beforeQuarantineDelete,
+    beforeFinalNameOperation: dependencies.beforeQemuFinalNameOperation,
+    beforeCapturedPathDeletion: dependencies.beforeQemuCapturedPathDeletion,
+  });
+  writeFileSync(tombstonePath, tombstoneBody, { mode: 0o600, flag: "wx" });
+  return {
+    schema_version: "agentic-sandbox.celld-qemu-cleanup-helper-result/v1",
+    status: "deleted",
+    capture_path: request.capture_path,
+  };
+}
+
+function removeQuarantinedQemuStorage(runtime, storage, record, plan, dependencies = {}) {
+  let current;
+  try {
+    current = lstatSync(storage.path);
+  } catch (error) {
+    throw new OrchestrationCleanupResidueError(`QEMU cleanup storage pathname changed after undefine: ${error.message}`, { cause: error });
+  }
+  if (!current.isDirectory() || current.isSymbolicLink() || !sameFileIdentity(current, storage.metadata)) {
+    throw new OrchestrationCleanupResidueError("QEMU cleanup detected a substituted storage pathname after undefine");
+  }
+  const quarantine = exactQemuQuarantineBinding(storage, record, plan).path;
+  try {
+    renameSync(storage.path, quarantine);
+    const quarantined = lstatSync(quarantine);
+    if (!quarantined.isDirectory() || quarantined.isSymbolicLink() || !sameFileIdentity(quarantined, storage.metadata)) {
+      if (!existsSync(storage.path)) renameSync(quarantine, storage.path);
+      throw new OrchestrationCleanupResidueError("QEMU cleanup quarantine captured a substituted storage identity");
+    }
+    invokeQemuCleanupHelper(runtime, plan, dependencies);
+  } catch (error) {
+    if (error instanceof OrchestrationCleanupResidueError) throw error;
+    throw new OrchestrationCleanupResidueError(`QEMU cleanup could not remove the inode-verified exact storage quarantine: ${error.message}`, { cause: error });
+  }
+}
+
+function compareObservedProviderBinding(resource, record, authorized, current) {
+  exactCleanupObservation(record, current);
+  const fields = [
+    "provider_id",
+    "provider_identity_sha256",
+    "configuration_sha256",
+    "ownership_binding_sha256",
+    ...(resource.substrate === "docker" ? [
+      "managed_network_id",
+      "managed_network_identity_sha256",
+      "managed_network_configuration_sha256",
+      "provider_labels",
+      "managed_network_labels",
+    ] : [
+      "provider_storage_identity_sha256",
+      "storage_path",
+      "storage_device",
+      "storage_inode",
+      "storage_uid",
+      "storage_gid",
+      "disk_source_paths",
+    ]),
+  ];
+  for (const field of fields) {
+    const expected = authorized?.[field];
+    const observed = current?.[field];
+    if (expected === undefined || observed === undefined || canonicalJson(expected) !== canonicalJson(observed)) {
+      throw new OrchestrationCleanupResidueError(`provider cleanup observed a substituted ${field} identity binding`);
+    }
+  }
+  if (resource.substrate === "qemu" && (authorized.provider_storage_present !== true || current.provider_storage_present !== true)) {
+    throw new OrchestrationCleanupResidueError("QEMU cleanup lacks an exact owned storage binding");
+  }
+  return current;
+}
+
+export async function removeExactlyObservedProvider(runtime, resource, record, authorizedObservation, dependencies = {}) {
+  const qemuPlan = resource.substrate === "qemu"
+    ? exactPersistedQemuCleanupPlan(runtime, resource, record, dependencies.plan)
+    : null;
+  const observeEffectTarget = dependencies.observeProviderEffectTarget
+    ?? (async () => observeOrchestrationProvider(runtime, resource));
+  const current = compareObservedProviderBinding(
+    resource,
+    record,
+    authorizedObservation,
+    await observeEffectTarget({ runtime, resource, record, authorizedObservation }),
+  );
+  if (dependencies.destroyProviderTarget !== undefined) {
+    if (typeof dependencies.destroyProviderTarget !== "function") throw new Error("provider cleanup destroy adapter must be a function");
+    await dependencies.destroyProviderTarget({ runtime, resource, record, observation: current });
+    return;
+  }
+  if (resource.substrate === "docker") {
+    await destroyExactlyObservedProvider(runtime, resource, current);
+    return;
+  }
+  if (resource.substrate !== "qemu") {
+    throw new OrchestrationCleanupResidueError("provider cleanup substrate is outside the fixed allowlist");
+  }
+  validateExactQemuStorage(resource, current);
+  if (!["shut off", "crashed"].includes(current.state)) {
+    run("virsh", ["-c", runtime.config.libvirt_uri, "destroy", current.provider_id], { timeout: 180_000 });
+  }
+  const beforeUndefine = compareObservedProviderBinding(
+    resource,
+    record,
+    authorizedObservation,
+    await observeEffectTarget({ runtime, resource, record, authorizedObservation }),
+  );
+  const storage = validateExactQemuStorage(resource, beforeUndefine);
+  if (!["shut off", "crashed"].includes(beforeUndefine.state)) {
+    throw new OrchestrationCleanupResidueError("QEMU cleanup did not observe the exact domain stopped before undefine");
+  }
+  run("virsh", ["-c", runtime.config.libvirt_uri, "undefine", beforeUndefine.provider_id], { timeout: 180_000 });
+  removeQuarantinedQemuStorage(runtime, storage, record, qemuPlan, dependencies);
+}
+
+function incompleteProviderCleanupPlan(inventory, instanceId) {
+  return inventory.journal.find((entry) => entry.event === "planned"
+    && entry.mutation === "provider_cleanup"
+    && entry.subject.instance_id === instanceId
+    && inventory.incomplete_mutation_ids.includes(entry.mutation_id));
+}
+
+function latestProviderCleanupPlan(inventory, instanceId) {
+  for (let index = inventory.journal.length - 1; index >= 0; index -= 1) {
+    const entry = inventory.journal[index];
+    if (entry.event === "planned" && entry.mutation === "provider_cleanup" && entry.subject.instance_id === instanceId) return entry;
+  }
+  return null;
+}
+
+function qemuStorageIdentityForPersistedPath(record, path) {
+  let metadata;
+  try { metadata = lstatSync(path); } catch (error) {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  }
+  if (!metadata.isDirectory() || metadata.isSymbolicLink()) return null;
+  return sha256(canonicalJson({
+    path: record.storage_path,
+    device: String(metadata.dev),
+    inode: String(metadata.ino),
+    uid: metadata.uid,
+    gid: metadata.gid,
+  }));
+}
+
+function reconcileQemuQuarantineResidue(runtime, resource, record, cleanupPlan, dependencies = {}) {
+  if (record.substrate !== "qemu") return;
+  if (!cleanupPlan) throw new OrchestrationCleanupResidueError("QEMU cleanup residue has no persisted quarantine plan");
+  if (!isAbsolute(record.storage_path ?? "") || resolve(dirname(record.storage_path)) !== resolve(runtime.config.vm_storage_dir ?? "")
+      || basename(record.storage_path) !== resource.name) {
+    throw new OrchestrationCleanupResidueError("QEMU cleanup residue is outside the exact configured storage root");
+  }
+  const persistedPlan = exactPersistedQemuCleanupPlan(runtime, resource, record, cleanupPlan, { requireIncomplete: false });
+  const binding = exactQemuQuarantineBinding({ path: record.storage_path }, record, persistedPlan);
+  const candidatePattern = new RegExp(`^\\.${resource.name.replace(/[.*+?^${}()|[\\]\\]/g, "\\$&")}\\.cleanup-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`);
+  const parent = dirname(record.storage_path);
+  let candidates;
+  try {
+    candidates = readdirSync(parent).filter((name) => candidatePattern.test(name)).map((name) => join(parent, name));
+  } catch (error) {
+    throw new OrchestrationCleanupResidueError(`QEMU cleanup cannot enumerate exact storage quarantine residue: ${error.message}`, { cause: error });
+  }
+  const unknown = candidates.filter((path) => path !== binding.path);
+  if (unknown.length !== 0) {
+    throw new OrchestrationCleanupResidueError("QEMU cleanup found an unbound storage quarantine residue");
+  }
+  if (candidates.includes(binding.path)
+      && qemuStorageIdentityForPersistedPath(record, binding.path) !== cleanupPlan.subject.storage_quarantine_identity_sha256) {
+    throw new OrchestrationCleanupResidueError("QEMU cleanup journal-owned storage quarantine has a substituted persisted identity");
+  }
+  invokeQemuCleanupHelper(runtime, persistedPlan, dependencies);
+  let originalIdentity;
+  try { originalIdentity = qemuStorageIdentityForPersistedPath(record, record.storage_path); } catch (error) {
+    throw new OrchestrationCleanupResidueError(`QEMU cleanup cannot classify original storage residue: ${error.message}`, { cause: error });
+  }
+  if (originalIdentity === record.provider_storage_identity_sha256) {
+    throw new OrchestrationCleanupResidueError("QEMU cleanup retains the authorized original storage identity");
+  }
+}
+
+function markCleanupResidue(runtime, error) {
+  try { persistOrchestrationInventory(runtime, new Date(), "cleanup_residue"); } catch (persistError) {
+    throw new OrchestrationCleanupResidueError(`${error.message}; cleanup residue persistence failed: ${persistError.message}`, { cause: error });
+  }
+  if (error instanceof OrchestrationCleanupResidueError) throw error;
+  throw new OrchestrationCleanupResidueError(error.message, { cause: error });
+}
+
+export async function cleanupOwnedProviderResources(runtime, dependencies = {}) {
+  if (!runtime) return [];
+  if (!isOrchestrationInventoryV2(runtime.orchestrationInventory)) {
+    throw new Error("orchestration inventory v1 is read-only during provider cleanup; upgrade to v2 first");
+  }
+  const observe = dependencies.observeProviderResource
+    ?? (async ({ resource }) => observeOrchestrationProvider(runtime, resource));
+  const remove = dependencies.removeProviderResource
+    ?? (async ({ plan, resource, record, observation }) => removeExactlyObservedProvider(runtime, resource, record, observation, { plan }));
+  const assertions = [];
+  try {
+    for (const record of runtime.orchestrationInventory.resources) {
+      const resource = runtime.providerResources?.get(record.instance_id) ?? {
+        instanceId: record.instance_id,
+        name: record.name,
+        substrate: record.substrate,
+      };
+      if (record.status === "removed") {
+        if (record.substrate === "qemu") reconcileQemuQuarantineResidue(runtime, resource, record, latestProviderCleanupPlan(runtime.orchestrationInventory, record.instance_id), dependencies);
+        runtime.providerResources?.delete(record.instance_id);
+        continue;
+      }
+      const first = exactCleanupObservation(record, await observe({ runtime, resource, record }));
+      let cleanupPlan = incompleteProviderCleanupPlan(runtime.orchestrationInventory, record.instance_id);
+      if (!cleanupPlan) cleanupPlan = planProviderCleanup(runtime, resource);
+      if (first.present) {
+        await remove({ runtime, plan: cleanupPlan, resource, record, observation: first });
+        const finalObservation = exactCleanupObservation(record, await observe({ runtime, plan: cleanupPlan, resource, record }));
+        if (finalObservation.present) throw new OrchestrationCleanupResidueError("provider cleanup did not reach exact observed absence");
+      }
+      reconcileQemuQuarantineResidue(runtime, resource, record, cleanupPlan, dependencies);
+      completeProviderCleanup(runtime, cleanupPlan, { present: false, owned: true, provider_storage_present: false });
+      runtime.providerResources?.delete(record.instance_id);
+      assertions.push(`${record.substrate === "docker" ? "Docker" : "QEMU"} provider identity ${sha256(record.instance_id)} absent`);
+    }
+    return assertions;
+  } catch (error) {
+    markCleanupResidue(runtime, error);
+  }
 }
 
 function unavailable({ scenarioId, runId, profile, startedAt, reasonCode }) {
@@ -1291,12 +2685,22 @@ function unavailable({ scenarioId, runId, profile, startedAt, reasonCode }) {
   };
 }
 
+export function selectOrchestrationRunFailure({ campaignError = null, cleanupErrors = [] } = {}) {
+  const cleanupError = cleanupErrors.find((error) => error instanceof OrchestrationCleanupResidueError || error?.exitCode === 4) ?? null;
+  if (cleanupError) {
+    cleanupError.campaignError = campaignError;
+    return cleanupError;
+  }
+  return campaignError ?? cleanupErrors[0] ?? null;
+}
+
 function prerequisiteReason(config) {
   if (process.platform !== "linux") return "CELLD_ORCHESTRATION_LINUX_REQUIRED";
   for (const [program, args, code] of [["docker", ["compose", "version"], "CELLD_DOCKER_UNAVAILABLE"], ["virsh", ["-c", config.libvirt_uri, "version"], "CELLD_LIBVIRT_UNAVAILABLE"], ["openssl", ["version"], "CELLD_OPENSSL_UNAVAILABLE"]]) if (!available(program, args)) return code;
   if (executable(config.management_binary_path, "management binary")) return "CELLD_MANAGEMENT_BINARY_UNAVAILABLE";
   if (executable(config.agent_client_binary_path, "agent client binary")) return "CELLD_AGENT_CLIENT_BINARY_UNAVAILABLE";
   if (executable(config.callback_relay_binary_path, "callback relay")) return "CELLD_CALLBACK_RELAY_UNAVAILABLE";
+  if (!verifyQemuCleanupHelperInstallation(config)) return "CELLD_QEMU_CLEANUP_HELPER_UNAVAILABLE";
   if (spawnSync("docker", ["image", "inspect", config.docker_image_ref], { encoding: "utf8", shell: false }).status !== 0) return "CELLD_DOCKER_IMAGE_UNAVAILABLE";
   return null;
 }
@@ -1330,6 +2734,8 @@ export async function executeOrchestrationDriver({ scenarioId, runId, liveProfil
   let runtime = null;
   let cleanupStatus = "failed";
   const cleanupAssertions = [];
+  const cleanupErrors = [];
+  let campaignError = null;
   let campaign;
   try {
     const scenarioRoot = join(config.working_root, scenarioId.toLowerCase(), runId);
@@ -1350,8 +2756,12 @@ export async function executeOrchestrationDriver({ scenarioId, runId, liveProfil
     runtime = {
       config, fleet, fleetPath, management, managementHost, workerEndpoint: workerEndpoint(fleet), runId, scenarioId,
       orchestrationInventory, providerResources: new Map(activeResources),
+      persistedJournalHeadSha256: orchestrationInventory.journal_head_sha256,
       persistInventory: dependencies.persistInventory,
       sendWorkerCommand: dependencies.sendWorkerCommand,
+      observeFaultTarget: dependencies.observeFaultTarget ?? observeOrchestrationFaultTarget,
+      resolveFaultTarget: dependencies.resolveFaultTarget ?? resolveOrchestrationFaultTarget,
+      revalidateFaultTarget: dependencies.revalidateFaultTarget ?? resolveOrchestrationFaultTarget,
     };
     const runner = dependencies.runScenario ?? ({
       "UAT-CELLD-003": runUat003, "UAT-CELLD-004": runUat004,
@@ -1359,13 +2769,23 @@ export async function executeOrchestrationDriver({ scenarioId, runId, liveProfil
     })[scenarioId];
     campaign = await runner(runtime, timeline);
     management = runtime.management;
+  } catch (error) {
+    campaignError = error;
   } finally {
-    try { await stopManagementAndWait(runtime?.management ?? management, "SIGKILL"); cleanupAssertions.push("management process terminated"); } catch (error) { cleanupAssertions.push(`management cleanup digest ${sha256(error.message)}`); }
-    try { cleanupAssertions.push(...cleanupProviderResources(runtime)); } catch (error) { cleanupAssertions.push(`provider cleanup digest ${sha256(error.message)}`); }
-    try { if (fleetPath && existsSync(fleetPath)) cleanupFleet(fleetPath); cleanupAssertions.push("exact fleet containers and protected fleet state removed"); } catch (error) { cleanupAssertions.push(`fleet cleanup digest ${sha256(error.message)}`); }
-    try { if (fixture) cleanupFixture(fixture); cleanupAssertions.push("exact storage services, network, volumes, and run directory removed"); } catch (error) { cleanupAssertions.push(`storage cleanup digest ${sha256(error.message)}`); }
+    const retainCleanupError = (kind, error) => {
+      cleanupAssertions.push(`${kind} cleanup digest ${sha256(error.message)}`);
+      cleanupErrors.push(error instanceof OrchestrationCleanupResidueError
+        ? error
+        : new OrchestrationCleanupResidueError(`${kind} cleanup failed`, { cause: error }));
+    };
+    try { await stopManagementAndWait(runtime?.management ?? management, "SIGKILL"); cleanupAssertions.push("management process terminated"); } catch (error) { retainCleanupError("management", error); }
+    try { cleanupAssertions.push(...await cleanupOwnedProviderResources(runtime)); } catch (error) { retainCleanupError("provider", error); }
+    try { if (fleetPath && existsSync(fleetPath)) cleanupFleet(fleetPath); cleanupAssertions.push("exact fleet containers and protected fleet state removed"); } catch (error) { retainCleanupError("fleet", error); }
+    try { if (fixture) cleanupFixture(fixture); cleanupAssertions.push("exact storage services, network, volumes, and run directory removed"); } catch (error) { retainCleanupError("storage", error); }
     cleanupStatus = cleanupAssertions.some((value) => value.includes("digest")) ? "failed" : "passed";
   }
+  const selectedFailure = selectOrchestrationRunFailure({ campaignError, cleanupErrors });
+  if (selectedFailure) throw selectedFailure;
   if (!campaign) throw new Error("orchestration campaign produced no measurements");
 
   const evidence = { schema_version: "agentic-sandbox.celld-orchestration-evidence/v1", run_id: runId, scenario_id: scenarioId, measurements: Object.fromEntries(campaign.assertions.map((item) => [item.id, item.measurements])), faults: campaign.faults, timeline_sha256: sha256(timeline.map((row) => JSON.stringify(row)).join("\n")) };
@@ -1393,38 +2813,144 @@ export async function executeOrchestrationDriver({ scenarioId, runId, liveProfil
   };
 }
 
-export function cleanupOrchestrationRoot(configPath) {
+function loadProtectedOrchestrationRuntime(configPath, profilePath) {
+  const resolvedConfigPath = resolve(configPath);
+  const config = protectedJson(resolvedConfigPath, "orchestration config");
+  const errors = validateOrchestrationConfig(config);
+  if (errors.length) throw new Error(errors.join("; "));
+  if (resolvedConfigPath !== join(config.working_root, "orchestration.json")) throw new Error("orchestration config is not at the fixed run-root path");
+  const profile = protectedJson(resolve(profilePath), "live profile");
+  const profileErrors = validateLiveProfile(profile);
+  if (profileErrors.length) throw new Error(profileErrors.join("; "));
+  const entry = profile.drivers?.[DRIVER_ID];
+  if (!entry?.enabled || resolve(entry.config_path ?? "") !== resolvedConfigPath || profile.run_id !== config.run_id) {
+    throw new Error("protected live profile does not authorize the exact orchestration config");
+  }
+  const observedHostSha256 = sha256(hostname());
+  if (profile.environment.host_sha256 !== observedHostSha256) throw new Error("protected live profile does not authorize this host");
+  const orchestrationInventory = loadAuthorizedOrchestrationInventory(profile, config, observedHostSha256);
+  const activeResources = orchestrationInventory.resources
+    .filter((resource) => resource.status !== "removed")
+    .map((resource) => [resource.instance_id, { instanceId: resource.instance_id, name: resource.name, substrate: resource.substrate }]);
+  return {
+    config,
+    profile,
+    orchestrationInventory,
+    providerResources: new Map(activeResources),
+    runId: config.run_id,
+    scenarioId: activeResources.length > 0 ? orchestrationInventory.resources.find((resource) => resource.status !== "removed").scenario_id : "UAT-CELLD-003",
+    persistedJournalHeadSha256: orchestrationInventory.journal_head_sha256,
+  };
+}
+
+async function recoverRetainedOrchestrationRun({ runId, orchestrationRoot, retainedRunRoot, profilePath, exactRunOwner }) {
+  if (!RUN_ID.test(runId ?? "") || exactRunOwner !== runId) throw new Error("retained recovery requires the exact requested run owner");
+  const root = resolve(orchestrationRoot);
+  const retained = resolve(retainedRunRoot);
+  if (root !== "/dev/shm/agentic-celld-orchestration" || retained !== join(root, runId)) {
+    throw new Error("retained recovery path is not the exact same-run orchestration root");
+  }
+  if (!existsSync(retained)) {
+    return { status: "PASS", run_id: runId, discovered_retained_inventory: false };
+  }
+  const protectedProfilePath = profilePath === null
+    ? join(retained, "live-profile.json")
+    : resolve(profilePath);
+  if (profilePath !== null && protectedProfilePath !== join("/dev/shm/agentic-celld-storage", runId, "live-profile.json")) {
+    throw new Error("retained recovery profile is outside the exact production storage run layout");
+  }
+  const runtime = loadProtectedOrchestrationRuntime(join(retained, "orchestration.json"), protectedProfilePath);
+  if (runtime.runId !== runId || runtime.orchestrationInventory.owner?.run_id !== exactRunOwner) {
+    throw new Error("retained orchestration inventory belongs to another run");
+  }
+  const result = await recoverOrchestrationInventory(runtime);
+  for (const name of ["live-profile.json", "credential-provenance.json"]) {
+    const path = join(retained, name);
+    if (!existsSync(path)) continue;
+    protectedJson(path, `retained ${name}`);
+    rmSync(path, { force: false });
+  }
+  cleanupOrchestrationRoot(join(retained, "orchestration.json"));
+  return { ...result, discovered_retained_inventory: true };
+}
+
+export function cleanupOrchestrationRoot(configPath, options = {}) {
+  if (options.beforeRootDelete !== undefined && typeof options.beforeRootDelete !== "function") {
+    throw new Error("orchestration cleanup root-deletion seam must be a function");
+  }
   const config = protectedJson(resolve(configPath), "orchestration config");
   const errors = validateOrchestrationConfig(config);
   if (errors.length) throw new Error(errors.join("; "));
   if (resolve(configPath) !== join(config.working_root, "orchestration.json")) throw new Error("orchestration config is not at the fixed run-root path");
-  const inventory = protectedJson(config.inventory_path, "orchestration inventory");
-  const inventoryErrors = validateOrchestrationInventory(inventory, config, { expectedHostSha256: sha256(hostname()) });
-  if (inventoryErrors.length) throw new Error(inventoryErrors.join("; "));
-  const activeResources = inventory.resources.filter((resource) => resource.status !== "removed");
-  const activeFaults = inventory.faults.filter((fault) => fault.status !== "healed");
-  if (activeResources.length || activeFaults.length) {
-    inventory.state = "cleanup_residue";
+  let lifecycle;
+  try {
+    lifecycle = acquireOrchestrationInventoryLifecycle(config);
+  } catch (error) {
+    throw new OrchestrationCleanupResidueError(`orchestration cleanup could not acquire exact lifecycle exclusion: ${error.message}`, { cause: error });
+  }
+  try {
+    const inventory = loadProtectedOrchestrationInventory(config.inventory_path, config, { expectedHostSha256: sha256(hostname()) });
+    if (!isOrchestrationInventoryV2(inventory)) {
+      throw new OrchestrationCleanupResidueError("orchestration inventory v1 is read-only and requires an explicit safe upgrade before cleanup");
+    }
+    const activeResources = inventory.resources.filter((resource) => resource.status !== "removed");
+    const activeFaults = inventory.faults.filter((fault) => fault.status !== "healed");
+    if (activeResources.length || activeFaults.length) {
+      inventory.state = "cleanup_residue";
+      inventory.updated_at = new Date().toISOString();
+      commitOrchestrationInventory(config.inventory_path, inventory, {
+        config,
+        lifecycle,
+        expectedJournalHeadSha256: inventory.journal_head_sha256,
+      });
+      throw new OrchestrationCleanupResidueError(`orchestration cleanup inventory retains ${activeResources.length} resources and ${activeFaults.length} faults`);
+    }
+    for (const entry of readdirSync(`/proc/self/fd/${lifecycle.root.descriptor}`, { withFileTypes: true })) {
+      if (["orchestration.json", "orchestration-inventory.json", ".orchestration-inventory.lock"].includes(entry.name)) continue;
+      if (!entry.isDirectory() || entry.isSymbolicLink()) throw new OrchestrationCleanupResidueError("orchestration cleanup found ambiguous residue");
+      const scenarioRoot = `/proc/self/fd/${lifecycle.root.descriptor}/${entry.name}`;
+      if (readdirSync(scenarioRoot).length !== 0) throw new OrchestrationCleanupResidueError(`orchestration scenario residue remains: ${entry.name}`);
+    }
+    inventory.state = "clean";
     inventory.updated_at = new Date().toISOString();
-    atomicJson(config.inventory_path, inventory);
-    throw new Error(`orchestration cleanup inventory retains ${activeResources.length} resources and ${activeFaults.length} faults`);
+    commitOrchestrationInventory(config.inventory_path, inventory, { config, lifecycle });
+    options.beforeRootDelete?.();
+    let pathMetadata;
+    try {
+      pathMetadata = lstatSync(config.working_root);
+    } catch (error) {
+      throw new OrchestrationCleanupResidueError(`orchestration cleanup root identity changed before deletion: ${error.message}`);
+    }
+    if (!pathMetadata.isDirectory() || pathMetadata.isSymbolicLink()
+        || pathMetadata.dev !== lifecycle.root.metadata.dev || pathMetadata.ino !== lifecycle.root.metadata.ino) {
+      throw new OrchestrationCleanupResidueError("orchestration cleanup detected a substituted run-root identity before deletion");
+    }
+    rmSync(config.working_root, { recursive: true, force: false });
+    return { status: "PASS", run_id: config.run_id, residue: [] };
+  } finally {
+    releaseOrchestrationInventoryLifecycle(lifecycle);
   }
-  for (const entry of readdirSync(config.working_root, { withFileTypes: true })) {
-    if (entry.name === "orchestration.json" || entry.name === "orchestration-inventory.json") continue;
-    if (!entry.isDirectory() || entry.isSymbolicLink()) throw new Error("orchestration cleanup found ambiguous residue");
-    const scenarioRoot = join(config.working_root, entry.name);
-    if (readdirSync(scenarioRoot).length !== 0) throw new Error(`orchestration scenario residue remains: ${entry.name}`);
-  }
-  inventory.state = "clean";
-  inventory.updated_at = new Date().toISOString();
-  atomicJson(config.inventory_path, inventory);
-  rmSync(config.working_root, { recursive: true, force: false });
-  return { status: "PASS", run_id: config.run_id, residue: [] };
 }
 
 async function main(args) {
   if (args[0] === "cleanup") {
+    if (args.includes("--profile")) loadProtectedOrchestrationRuntime(argument(args, "--config"), argument(args, "--profile"));
     process.stdout.write(`${JSON.stringify(cleanupOrchestrationRoot(argument(args, "--config")))}\n`);
+    return;
+  }
+  if (args[0] === "recover") {
+    const runtime = loadProtectedOrchestrationRuntime(argument(args, "--config"), argument(args, "--profile"));
+    process.stdout.write(`${JSON.stringify(await recoverOrchestrationInventory(runtime))}\n`);
+    return;
+  }
+  if (args[0] === "recover-retained") {
+    process.stdout.write(`${JSON.stringify(await recoverRetainedOrchestrationRun({
+      runId: argument(args, "--run-id"),
+      orchestrationRoot: argument(args, "--orchestration-root"),
+      retainedRunRoot: argument(args, "--retained-run-root"),
+      profilePath: optionalArgument(args, "--profile"),
+      exactRunOwner: argument(args, "--exact-run-owner"),
+    }))}\n`);
     return;
   }
   if (args[0] === "prepare") {
@@ -1448,6 +2974,6 @@ async function main(args) {
 if (process.argv[1] && SCRIPT_PATH === resolve(process.argv[1])) {
   main(process.argv.slice(2)).catch((error) => {
     process.stderr.write(`CELLD_ORCHESTRATION_DRIVER_ERROR ${sha256(error.message)}\n`);
-    process.exitCode = 3;
+    process.exitCode = error instanceof OrchestrationCleanupResidueError || error?.exitCode === 4 ? 4 : 3;
   });
 }
