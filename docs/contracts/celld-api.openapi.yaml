@@ -116,8 +116,8 @@ paths:
                 generation: { type: integer, minimum: 1 }
                 effect: { $ref: './celld/instance-cell-v1.schema.json#/$defs/effect' }
       responses:
-        '200': { description: Stable terminal effect result or terminal replay, including the durable provider_dispatch_count }
-        '202': { description: Original management operation remains dispatched or outcome-unknown; no replacement effect was created; includes the durable provider_dispatch_count }
+        '200': { description: "Stable terminal effect result or terminal replay, including the durable provider_dispatch_count" }
+        '202': { description: "Original management operation remains dispatched or outcome-unknown; no replacement effect was created; includes the durable provider_dispatch_count" }
         '401': { description: "Missing, stale, or invalid callback authentication" }
         '409': { description: "Nonce replay, operation collision, identity mismatch, or generation fence. Pre-ledger generation fences include provider_dispatch_count_delta=0." }
         '503': { $ref: '#/components/responses/Unavailable' }
