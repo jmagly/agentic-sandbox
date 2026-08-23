@@ -38,9 +38,12 @@ Live automation uses two strict JSON contracts:
 - `network-auth-evidence-v1.schema.json` fixes the raw route-attempt,
   management-ledger counter, bounded probe-pool, directional-partition, and
   cleanup observations for UAT 010 and 012. The adjacent
-  `network-auth-inventory-v1.schema.json` binds every namespace and nftables
-  mutation to an exact run, host, container namespace inode, destination, and
-  non-reusable rule comment before application.
+  `network-auth-inventory-v1.schema.json` binds every namespace, listener
+  guard, private mTLS proxy, and directional nftables mutation to an exact run,
+  host, container namespace inode, destination, and non-reusable rule comment
+  before application. UAT 012 retains nine distinct 1,000-attempt denial
+  classes plus transport negatives; UAT 010 retains all before/during/healed
+  observations for the four directional boundaries.
 
 The three-node Titan fixture is managed by
 `scripts/celld-fleet-fixture.mjs`. Its crash-resumable inventory is persisted
