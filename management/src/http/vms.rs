@@ -801,6 +801,25 @@ mod tests {
         }
     }
 
+    async fn force_libvirt_timeout(operation: &'static str) -> Result<(), VmError> {
+        // Keep the blocking closure pending until after Tokio has observed the
+        // timeout. A fixed sleep can finish first when the test runtime is
+        // starved, turning an intended timeout into a success and resetting
+        // the process-global circuit counter.
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let result = libvirt_blocking_with_timeout(
+            operation,
+            move || {
+                let _ = release_rx.recv();
+                Ok::<_, VmError>(())
+            },
+            Duration::from_millis(10),
+        )
+        .await;
+        drop(release_tx);
+        result
+    }
+
     #[test]
     fn test_vm_state_serialization() {
         let state = VmState::Running;
@@ -891,15 +910,7 @@ mod tests {
         let _guard = libvirt_test_lock().lock().await;
         let _env = LibvirtBlockingTestGuard::enable();
         libvirt_circuit().reset_for_tests();
-        let result = libvirt_blocking_with_timeout(
-            "test.timeout",
-            || {
-                std::thread::sleep(Duration::from_millis(100));
-                Ok::<_, VmError>(())
-            },
-            Duration::from_millis(10),
-        )
-        .await;
+        let result = force_libvirt_timeout("test.timeout").await;
 
         assert!(matches!(result, Err(VmError::LibvirtUnresponsive { .. })));
         let response = result.unwrap_err().into_response();
@@ -913,16 +924,12 @@ mod tests {
         let _guard = libvirt_test_lock().lock().await;
         let _env = LibvirtBlockingTestGuard::enable();
         libvirt_circuit().reset_for_tests();
-        for _ in 0..LIBVIRT_CIRCUIT_FAILURE_THRESHOLD {
-            let _ = libvirt_blocking_with_timeout(
-                "test.circuit_timeout",
-                || {
-                    std::thread::sleep(Duration::from_millis(100));
-                    Ok::<_, VmError>(())
-                },
-                Duration::from_millis(10),
-            )
-            .await;
+        for attempt in 1..=LIBVIRT_CIRCUIT_FAILURE_THRESHOLD {
+            let result = force_libvirt_timeout("test.circuit_timeout").await;
+            assert!(
+                matches!(result, Err(VmError::LibvirtUnresponsive { .. })),
+                "timeout attempt {attempt} did not return LibvirtUnresponsive"
+            );
         }
 
         let result = libvirt_blocking_with_timeout(
