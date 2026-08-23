@@ -416,10 +416,7 @@ fn managed_network_create_args_with_run_owner(
         "agentic-sandbox=true".into(),
     ];
     if let Some(run_owner) = run_owner {
-        args.extend([
-            "--label".into(),
-            format!("agentic-run-id={run_owner}"),
-        ]);
+        args.extend(["--label".into(), format!("agentic-run-id={run_owner}")]);
     }
     if platform == DockerHostPlatform::Macos {
         args.extend([
