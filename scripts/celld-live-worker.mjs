@@ -9,11 +9,14 @@ import { fileURLToPath } from "node:url";
 
 import {
   cleanupFleet,
+  deployFleetQualificationWorker,
   deployFleetWorker,
   diagnoseFleet,
   prepareFleet,
   probeFleetWorker,
   startFleet,
+  stopFleetForWorkerDeployment,
+  workerDeploymentProjectDigest,
 } from "./celld-fleet-fixture.mjs";
 import { cleanupFixture, prepareFixture, startFixture } from "./celld-seaweedfs-fixture.mjs";
 import { getWorkerCell } from "./celld-worker-client.mjs";
@@ -138,41 +141,12 @@ export function prepareWorkerConformanceProject(root) {
   writeFileSync(join(project, "wrangler.json"), `${JSON.stringify(config)}\n`, { mode: 0o600, flag: "wx" });
   writeFileSync(join(project, "add.wasm"), Buffer.from(WASM_ADD_HEX, "hex"), { mode: 0o600, flag: "wx" });
   writeFileSync(join(assets, "capability-asset.txt"), "agentic-celld-asset-v1\n", { mode: 0o600, flag: "wx" });
-  return { path: project, sha256: sha256(`${CONFORMANCE_WORKER}\n${JSON.stringify(config)}\n${WASM_ADD_HEX}\nagentic-celld-asset-v1\n`) };
+  return { path: project, sha256: workerDeploymentProjectDigest(project) };
 }
 
-function deploymentArgs(runtime, projectPath) {
-  const storage = runtime.storage, fleet = runtime.fleet, deployer = exactDeployer(runtime.runId);
-  const esbuild = join(REPO_ROOT, "runtimes/celld/instance-cell/node_modules/@esbuild/linux-x64/bin/esbuild");
-  const uid = typeof process.getuid === "function" ? process.getuid() : 1000;
-  const gid = typeof process.getgid === "function" ? process.getgid() : 1000;
-  return [
-    "run", "--rm", "--name", deployer.name,
-    "--label", `dev.agentic-sandbox.run=${runtime.runId}`, "--label", "dev.agentic-sandbox.scope=celld-qualification",
-    "--network", fleet.network.name, "--user", `${uid}:${gid}`, "--read-only", "--security-opt", "no-new-privileges:true", "--cap-drop", "ALL",
-    "--pids-limit", "128", "--cpus", "1", "--memory", "1024m", "--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=128m,mode=1777", "--workdir", "/workspace",
-    "--mount", `type=bind,src=${projectPath},dst=/workspace,readonly`, "--mount", `type=bind,src=${esbuild},dst=/usr/local/bin/esbuild,readonly`,
-    "--mount", `type=bind,src=${storage.identity_file_ref},dst=/run/identity/credentials,readonly`, "--mount", `type=bind,src=${storage.ca_file_ref},dst=/run/tls/ca.crt,readonly`,
-    "--env", "AWS_SHARED_CREDENTIALS_FILE=/run/identity/credentials", "--env", "AWS_CA_BUNDLE=/run/tls/ca.crt", "--env", "SSL_CERT_FILE=/run/tls/ca.crt", "--env", `AWS_REGION=${storage.region}`, "--env", "CELLD_ESBUILD=/usr/local/bin/esbuild",
-    fleet.pins.celld.image_ref, "deploy", "/workspace", "--bucket", `s3://${storage.bucket}/${storage.run_prefix}/fleet`, "--endpoint", "https://s3gateway1:8334", "--region", storage.region,
-  ];
-}
-
-function deployProject(runtime, projectPath) {
+function deployProject(runtime, projectPath, projectDigest, deploymentKind) {
   cleanupWorkerResources(runtime.runId);
-  const output = run("docker", deploymentArgs(runtime, projectPath), { timeout: 300_000 });
-  const version = /Current Version ID: ([0-9a-f]{16})/.exec(output)?.[1];
-  if (!version) throw new Error("Celld deployment did not return an immutable version ID");
-  return { version, output_sha256: sha256(output) };
-}
-
-function stopFleet(runtime) {
-  for (const node of runtime.fleet.nodes) {
-    const document = JSON.parse(run("docker", ["inspect", node.name]));
-    const labels = document?.[0]?.Config?.Labels ?? {};
-    if (labels["dev.agentic-sandbox.run"] !== runtime.runId || labels["dev.agentic-sandbox.scope"] !== "celld-qualification") throw new Error(`refusing to stop unowned fleet node ${node.name}`);
-    if (document[0]?.State?.Running === true) run("docker", ["stop", "--time", "20", node.name], { timeout: 60_000 });
-  }
+  return deployFleetQualificationWorker(runtime.fleetPath, { projectPath, projectDigest, deploymentKind });
 }
 
 function workerEndpoint(fleet) {
@@ -225,33 +199,79 @@ async function runCapabilities(runtime, timeline) {
   const instanceId = `rollback-${sha256(runtime.runId).slice(0, 20)}`, operationId = `rollback-${randomBytes(8).toString("hex")}`, nonce = randomBytes(16).toString("hex");
   const seed = await getWorkerCell({ endpoint, varsFile: runtime.fleet.worker_vars_file_ref, instanceId, operationId, generation: 1, nonce });
   if (seed.status !== 404 || seed.body?.error?.code !== "cell.missing") throw new Error("reference Worker durable rollback marker was not accepted");
-  const proofHash = `sha256:${sha256(`${instanceId}:${operationId}:${nonce}:accepted`)}`;
-  stopFleet(runtime);
+  const markerBefore = await getWorkerCell({ endpoint, varsFile: runtime.fleet.worker_vars_file_ref, instanceId, operationId, generation: 1, nonce });
+  if (markerBefore.status !== 409 || markerBefore.body?.error?.code !== "cell.signature_replayed") throw new Error("reference Worker did not persist the rollback marker before deployment");
+  const markerIdentity = `sha256:${sha256(`${instanceId}:${operationId}:${nonce}`)}`;
+  const stateBefore = `sha256:${sha256(JSON.stringify({ marker_identity: markerIdentity, status: markerBefore.status, code: markerBefore.body.error.code }))}`;
+  stopFleetForWorkerDeployment(runtime.fleetPath);
   const conformance = prepareWorkerConformanceProject(runtime.root);
-  const candidate = deployProject(runtime, conformance.path);
+  const candidate = deployProject(runtime, conformance.path, conformance.sha256, "qualification-candidate");
   if (startFleet(runtime.fleetPath).status !== "READY") throw new Error("conformance deployment fleet did not become ready");
   const cases = await capabilityCases(workerEndpoint(runtime.fleet));
-  stopFleet(runtime);
-  const restored = deployProject(runtime, join(REPO_ROOT, "runtimes/celld/instance-cell"));
+  stopFleetForWorkerDeployment(runtime.fleetPath);
+  const approvedProject = join(REPO_ROOT, "runtimes/celld/instance-cell");
+  const approvedProjectDigest = workerDeploymentProjectDigest(approvedProject, { deploymentKind: "approved-reference" });
+  const restored = deployProject(runtime, approvedProject, approvedProjectDigest, "approved-reference");
   if (startFleet(runtime.fleetPath).status !== "READY") throw new Error("reference deployment rollback did not become ready");
   const replay = await getWorkerCell({ endpoint: workerEndpoint(runtime.fleet), varsFile: runtime.fleet.worker_vars_file_ref, instanceId, operationId, generation: 1, nonce });
   const probe = await probeFleetWorker(runtime.fleetPath);
-  const rollbackPreserved = replay.status === 409 && replay.body?.error?.code === "cell.signature_replayed" && probe.status === "READY";
+  const stateAfter = `sha256:${sha256(JSON.stringify({ marker_identity: markerIdentity, status: replay.status, code: replay.body?.error?.code }))}`;
+  const rollbackPreserved = replay.status === 409 && replay.body?.error?.code === "cell.signature_replayed"
+    && stateAfter === stateBefore && probe.status === "READY"
+    && restored.deployment_kind === "approved-reference" && restored.worker_digest === runtime.fleet.pins.worker_digest;
   const passed = Object.values(cases).filter(Boolean).length;
-  timeline.push({ scenario: "UAT-CELLD-007", cases, candidate_version: candidate.version, restored_version: restored.version, conformance_sha256: conformance.sha256, rollback_marker_preserved: rollbackPreserved });
+  timeline.push({ scenario: "UAT-CELLD-007", cases, previous_version: runtime.initialDeployment.version_id, candidate_version: candidate.version_id, restored_version: restored.version_id, candidate_project_sha256: candidate.project_sha256, restored_project_sha256: restored.project_sha256, conformance_sha256: conformance.sha256, marker_identity: markerIdentity, marker_before: markerBefore, marker_after: replay, rollback_marker_preserved: rollbackPreserved });
   return { assertions: [
     { id: "CELLD.007.CLAIMS", measurements: { capabilities: ADVERTISED, advertised_cases: 8, passed_cases: passed, failed_cases: 8 - passed, not_run_cases: 0 } },
-    { id: "CELLD.007.ROLLBACK", measurements: { previous_digest: runtime.fleet.pins.worker_digest, restored_digest: runtime.fleet.pins.worker_digest, state_sha256_before: proofHash, state_sha256_after: rollbackPreserved ? proofHash : `sha256:${"0".repeat(64)}`, approved_digest_active: rollbackPreserved } },
+    { id: "CELLD.007.ROLLBACK", measurements: { previous_digest: runtime.initialDeployment.worker_digest, restored_digest: restored.worker_digest, previous_version_id: runtime.initialDeployment.version_id, candidate_version_id: candidate.version_id, restored_version_id: restored.version_id, state_sha256_before: stateBefore, state_sha256_after: stateAfter, approved_digest_active: rollbackPreserved } },
   ], metrics: [{ name: "worker_capability_cases_passed", value: passed, unit: "cases" }], faults: [{ kind: "worker_deployment_rollback", healed: rollbackPreserved }] };
 }
 
 function inventorySnapshot(runtime) {
   const containers = run("docker", ["ps", "--all", "--filter", `label=dev.agentic-sandbox.run=${runtime.runId}`, "--format", "{{.Names}}"] ).split(/\r?\n/).filter(Boolean).sort();
   const pids = runtime.fleet.nodes.map((node) => run("docker", ["inspect", "--format", "{{.State.Pid}}", node.name]));
+  const processTrees = runtime.fleet.nodes.map((node) => run("docker", ["top", node.name, "-eo", "pid,ppid,comm"])).sort();
   const ports = runtime.fleet.nodes.map((node) => run("docker", ["port", node.name])).sort();
+  const socketTables = pids.map((pid) => run("sudo", ["-n", "nsenter", "--target", pid, "--net", "cat", "/proc/net/tcp", "/proc/net/tcp6", "/proc/net/udp", "/proc/net/udp6", "/proc/net/unix"])).sort();
   const domains = run("virsh", ["--connect", runtime.config.libvirt_uri, "list", "--all", "--name"]).split(/\r?\n/).filter(Boolean).sort();
-  const reviewedFiles = run("find", [runtime.config.base_images_dir, runtime.config.vm_storage_dir, runtime.config.agentshare_root, "-xdev", "-mindepth", "1", "-maxdepth", "2", "-printf", "%p|%y|%s\n"]).split(/\r?\n/).filter(Boolean).sort();
-  return { containers, pids, ports, domains, reviewed_files_sha256: sha256(reviewedFiles.join("\n")) };
+  const reviewedFiles = run("find", [runtime.config.base_images_dir, runtime.config.vm_storage_dir, runtime.config.agentshare_root, ...runtime.fleet.nodes.map((node) => node.state_dir), "-xdev", "-mindepth", "1", "-maxdepth", "3", "-printf", "%p|%y|%s\n"]).split(/\r?\n/).filter(Boolean).sort();
+  const containerFiles = runtime.fleet.nodes.map((node) => run("docker", ["diff", node.name])).sort();
+  return {
+    containers,
+    processes_sha256: sha256(JSON.stringify({ pids, process_trees: processTrees })),
+    sockets_sha256: sha256(JSON.stringify({ ports, socket_tables: socketTables })),
+    domains,
+    files_sha256: sha256(JSON.stringify({ reviewed_files: reviewedFiles, container_files: containerFiles })),
+  };
+}
+
+export function excludedInventoryEffects(before, after) {
+  return {
+    processes_created: before.processes_sha256 === after.processes_sha256 ? 0 : 1,
+    files_created: before.files_sha256 === after.files_sha256 ? 0 : 1,
+    sockets_created: before.sockets_sha256 === after.sockets_sha256 ? 0 : 1,
+    containers_created: JSON.stringify(before.containers) === JSON.stringify(after.containers) ? 0 : 1,
+    vms_created: JSON.stringify(before.domains) === JSON.stringify(after.domains) ? 0 : 1,
+  };
+}
+
+export function excludedCapabilityRejectionEvidence(result, capability, attempt, startedAt, endedAt) {
+  const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`.trim();
+  if (Buffer.byteLength(output) > 4096) throw new Error("excluded capability rejection exceeds the evidence bound");
+  const typed = result.status !== 0 && output.includes("does not support these config keys") && output.includes(capability);
+  return {
+    capability,
+    attempt,
+    started_at: startedAt,
+    ended_at: endedAt,
+    exit_status: result.status,
+    signal: result.signal,
+    timed_out: result.error?.code === "ETIMEDOUT",
+    rejection_code: typed ? "celld.unsupported_config_key" : null,
+    output,
+    output_sha256: `sha256:${sha256(output)}`,
+    typed_rejection: typed,
+  };
 }
 
 function prepareNegativeProjects(root) {
@@ -273,24 +293,28 @@ async function runExcluded(runtime, timeline) {
   const before = inventorySnapshot(runtime);
   let typedRejections = 0, silentSuccesses = 0;
   const codes = {};
+  const attempts = [];
   for (const capability of EXCLUDED) {
     let rejected = 0;
     for (let attempt = 0; attempt < 100; attempt += 1) {
+      const startedAt = new Date().toISOString();
       const result = spawnSync("docker", ["exec", primary, "/usr/local/bin/celld", "deploy", `/tmp/celld-negative/${capability}`, "--dry-run"], { encoding: "utf8", shell: false, timeout: 30_000 });
-      const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
-      if (result.status !== 0 && output.includes("does not support these config keys") && output.includes(capability)) { typedRejections += 1; rejected += 1; }
+      const record = excludedCapabilityRejectionEvidence(result, capability, attempt, startedAt, new Date().toISOString());
+      attempts.push(record);
+      if (record.typed_rejection) { typedRejections += 1; rejected += 1; }
       else silentSuccesses += 1;
     }
     codes[capability] = rejected;
   }
   const after = inventorySnapshot(runtime);
-  const unchanged = JSON.stringify(before) === JSON.stringify(after);
+  const effects = excludedInventoryEffects(before, after);
+  const unchanged = Object.values(effects).every((value) => value === 0);
   const diagnosis = diagnoseFleet(runtime.fleetPath);
   const probe = await probeFleetWorker(runtime.fleetPath);
-  timeline.push({ scenario: "UAT-CELLD-008", attempts: 800, typed_rejections: typedRejections, codes, inventory_before_sha256: sha256(JSON.stringify(before)), inventory_after_sha256: sha256(JSON.stringify(after)), fleet_status: diagnosis.status, worker_status: probe.status });
+  timeline.push({ scenario: "UAT-CELLD-008", attempts: attempts.length, typed_rejections: typedRejections, codes, attempt_records: attempts, inventory_before: before, inventory_after: after, inventory_before_sha256: `sha256:${sha256(JSON.stringify(before))}`, inventory_after_sha256: `sha256:${sha256(JSON.stringify(after))}`, effects, fleet_status: diagnosis.status, worker_status: probe.status });
   return { assertions: [
     { id: "CELLD.008.LOUD_REJECTION", measurements: { capabilities: EXCLUDED, attempts_per_capability: 100, attempts: 800, typed_rejections: typedRejections, silent_successes: silentSuccesses } },
-    { id: "CELLD.008.NO_SIDE_EFFECT", measurements: { attempts: 800, processes_created: unchanged ? 0 : 1, files_created: unchanged ? 0 : 1, sockets_created: unchanged ? 0 : 1, containers_created: unchanged ? 0 : 1, vms_created: unchanged ? 0 : 1, host_inventory_restored: unchanged && diagnosis.status === "READY" && probe.status === "READY" } },
+    { id: "CELLD.008.NO_SIDE_EFFECT", measurements: { attempts: 800, ...effects, host_inventory_restored: unchanged && diagnosis.status === "READY" && probe.status === "READY" } },
   ], metrics: [{ name: "excluded_capability_rejections", value: typedRejections, unit: "requests" }], faults: [{ kind: "excluded_worker_capability_matrix", classes: EXCLUDED.length }] };
 }
 
@@ -330,9 +354,9 @@ export async function executeWorkerDriver({ scenarioId, runId, liveProfilePath, 
     startFixture(storage);
     fleet = prepareFleet({ storageConfigPath: join(root, "fixture.json") });
     fleetPath = join(root, "fleet.json");
-    await deployFleetWorker(fleetPath);
+    const initialDeployment = await deployFleetWorker(fleetPath);
     if (startFleet(fleetPath).status !== "READY") throw new Error("Worker qualification fleet is not ready");
-    const runtime = { config, storage, fleet, fleetPath, runId, root };
+    const runtime = { config, storage, fleet, fleetPath, runId, root, initialDeployment };
     campaign = await (dependencies.runScenario ?? (scenarioId === "UAT-CELLD-007" ? runCapabilities : runExcluded))(runtime, timeline);
   } finally {
     try { cleanupWorkerResources(runId); cleanupAssertions.push("exact Worker deployer removed"); } catch (error) { cleanupAssertions.push(`Worker deployer cleanup digest ${sha256(error.message)}`); }

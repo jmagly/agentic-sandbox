@@ -14,7 +14,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { hostname } from "node:os";
-import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 
@@ -164,6 +164,61 @@ function credentialLauncherArgs(launcher) {
   ];
 }
 
+function qualificationProjectRoot(config, projectPath, deploymentKind) {
+  const project = resolve(projectPath ?? "");
+  const reference = join(REPO_ROOT, "runtimes/celld/instance-cell");
+  if (deploymentKind === "approved-reference") {
+    if (project !== reference) throw new Error("approved Worker deployment must use the exact reviewed project root");
+  } else if (deploymentKind === "qualification-candidate") {
+    const relativeProject = relative(config.run_root, project);
+    if (!relativeProject || relativeProject.startsWith(`..${sep}`) || relativeProject === ".." || isAbsolute(relativeProject)) {
+      throw new Error("qualification Worker project must remain inside the exact run root");
+    }
+  } else {
+    throw new Error("qualification Worker deployment kind is invalid");
+  }
+  const metadata = lstatSync(project);
+  if (!metadata.isDirectory() || metadata.isSymbolicLink()) throw new Error("qualification Worker project root is unsafe");
+  return project;
+}
+
+function projectFiles(root, deploymentKind) {
+  if (deploymentKind === "approved-reference") return ["worker.mjs", "wrangler.json"];
+  const files = [];
+  const visit = (directory, prefix = "") => {
+    for (const entry of readdirSync(directory, { withFileTypes: true }).sort((left, right) => left.name.localeCompare(right.name))) {
+      const relativePath = prefix ? `${prefix}/${entry.name}` : entry.name;
+      const path = join(directory, entry.name);
+      if (entry.isSymbolicLink()) throw new Error("qualification Worker project cannot contain symlinks");
+      if (entry.isDirectory()) visit(path, relativePath);
+      else if (entry.isFile()) files.push(relativePath);
+      else throw new Error("qualification Worker project contains an unsupported filesystem entry");
+      if (files.length > 128) throw new Error("qualification Worker project exceeds the evidence file bound");
+    }
+  };
+  visit(root);
+  return files;
+}
+
+export function workerDeploymentProjectDigest(projectPath, { deploymentKind = "qualification-candidate" } = {}) {
+  const root = resolve(projectPath ?? "");
+  const hash = createHash("sha256");
+  let totalBytes = 0;
+  const files = projectFiles(root, deploymentKind);
+  if (!files.includes("worker.mjs") || !files.includes("wrangler.json")) throw new Error("qualification Worker project is incomplete");
+  for (const relativePath of files) {
+    const path = join(root, relativePath);
+    const metadata = lstatSync(path);
+    if (!metadata.isFile() || metadata.isSymbolicLink()) throw new Error("qualification Worker source file is unsafe");
+    totalBytes += metadata.size;
+    if (totalBytes > 16 * 1024 * 1024) throw new Error("qualification Worker project exceeds the evidence byte bound");
+    const bytes = readFileSync(path);
+    hash.update(`${relativePath}\0${bytes.length}\0`);
+    hash.update(bytes);
+  }
+  return `sha256:${hash.digest("hex")}`;
+}
+
 function assertProtectedCredentialFile(path) {
   const metadata = lstatSync(path);
   if (!metadata.isFile() || metadata.isSymbolicLink() || (metadata.mode & 0o077) !== 0 || metadata.size === 0 || metadata.size > 16 * 1024) {
@@ -253,6 +308,18 @@ export function validateFleetInventory(inventory, config) {
   if (inventory?.run_id !== config.run_id || inventory?.owner?.repository !== FLEET_OWNER.repository || inventory?.owner?.workflow !== FLEET_OWNER.workflow || inventory?.owner?.run_id !== config.run_id) errors.push("inventory owner does not match config");
   if (!Array.isArray(inventory?.resources) || !Array.isArray(inventory?.actions)) errors.push("inventory resources/actions must be arrays");
   if (inventory?.credential_launcher_sha256 !== undefined && !HEX_SHA256.test(inventory.credential_launcher_sha256)) errors.push("inventory credential launcher digest is invalid");
+  if (inventory?.deployment_version_id !== undefined && !/^[0-9a-f]{16}$/.test(inventory.deployment_version_id)) errors.push("inventory deployment version ID is invalid");
+  if (inventory?.active_worker_deployment !== undefined) {
+    const deployment = inventory.active_worker_deployment;
+    const allowed = new Set(["deployment_kind", "project_sha256", "worker_digest", "version_id", "output_sha256"]);
+    if (!deployment || typeof deployment !== "object" || Array.isArray(deployment)
+        || Object.keys(deployment).some((key) => !allowed.has(key))
+        || !["approved-reference", "qualification-candidate"].includes(deployment.deployment_kind)
+        || !SHA256.test(deployment.project_sha256 ?? "")
+        || !SHA256.test(deployment.worker_digest ?? "")
+        || !/^[0-9a-f]{16}$/.test(deployment.version_id ?? "")
+        || !HEX_SHA256.test(deployment.output_sha256 ?? "")) errors.push("inventory active Worker deployment is invalid");
+  }
   const keys = new Set();
   for (const resource of inventory?.resources ?? []) {
     const key = `${resource.type}:${resource.id}`;
@@ -611,7 +678,7 @@ export async function deployFleetWorker(configPath, {
   }
   if (priorDeploy?.status === "completed") {
     if (existing) throw new Error("completed Worker deployment left an owned deployer; exact cleanup is required");
-    if (inventory.worker_digest !== workerDigest || !/^[0-9a-f]{64}$/.test(inventory.deployment_sha256 ?? "")) {
+    if (inventory.worker_digest !== workerDigest || !/^[0-9a-f]{64}$/.test(inventory.deployment_sha256 ?? "") || !/^[0-9a-f]{16}$/.test(inventory.deployment_version_id ?? "")) {
       throw new Error("completed Worker deployment inventory is inconsistent");
     }
     return {
@@ -622,6 +689,7 @@ export async function deployFleetWorker(configPath, {
       celld_manifest_digest: config.pins.celld.manifest_digest,
       credential_launcher_sha256: launcher.sha256,
       deployment_sha256: inventory.deployment_sha256,
+      version_id: inventory.deployment_version_id,
       status: "DEPLOYED",
     };
   }
@@ -666,9 +734,12 @@ export async function deployFleetWorker(configPath, {
     "--endpoint", "https://s3gateway1:8334",
     "--region", storage.region,
   ], { timeout: 300_000 });
+  const versionId = /Current Version ID: ([0-9a-f]{16})/.exec(output)?.[1];
+  if (!versionId) throw new Error("Celld deployment did not return an immutable version ID");
   completeAction(config, inventory, action, now());
   markResource(config, inventory, "docker_container", deployer, "removed", now());
   inventory.deployment_sha256 = sha256(output);
+  inventory.deployment_version_id = versionId;
   inventory.worker_digest = workerDigest;
   inventory.credential_launcher_sha256 = launcher.sha256;
   persistInventory(config, inventory, now());
@@ -680,6 +751,110 @@ export async function deployFleetWorker(configPath, {
     celld_manifest_digest: config.pins.celld.manifest_digest,
     credential_launcher_sha256: launcher.sha256,
     deployment_sha256: inventory.deployment_sha256,
+    version_id: versionId,
+    status: "DEPLOYED",
+  };
+}
+
+export function deployFleetQualificationWorker(configPath, {
+  projectPath,
+  projectDigest,
+  deploymentKind,
+  runner = defaultRunner,
+  now = () => new Date(),
+  esbuildPath = join(REPO_ROOT, "runtimes/celld/instance-cell/node_modules/@esbuild/linux-x64/bin/esbuild"),
+  credentialLauncherPath = DEFAULT_CREDENTIAL_LAUNCHER_PATH,
+} = {}) {
+  const { config, storage, inventory } = loadFixture(configPath);
+  assertWorkerVarsReady(config, inventory);
+  assertProtectedCredentialFile(storage.identity_file_ref);
+  assertStorageNetwork(runner, config, storage);
+  const project = qualificationProjectRoot(config, projectPath, deploymentKind);
+  const observedProjectDigest = workerDeploymentProjectDigest(project, { deploymentKind });
+  if (!SHA256.test(projectDigest ?? "") || projectDigest !== observedProjectDigest) {
+    throw new Error("qualification Worker project digest does not match its exact source tree");
+  }
+  const workerDigest = `sha256:${sha256(readFileSync(join(project, "worker.mjs")))}`;
+  if (deploymentKind === "approved-reference" && workerDigest !== config.pins.worker_digest) {
+    throw new Error("approved Worker bytes do not match the reviewed fleet pin");
+  }
+  const esbuild = resolve(esbuildPath);
+  const esbuildMetadata = lstatSync(esbuild);
+  if (!esbuildMetadata.isFile() || esbuildMetadata.isSymbolicLink() || (esbuildMetadata.mode & 0o111) === 0) {
+    throw new Error("the fixed esbuild executable is missing or unsafe");
+  }
+  const launcher = credentialLauncher(credentialLauncherPath);
+  if (inventory.credential_launcher_sha256 && inventory.credential_launcher_sha256 !== launcher.sha256) {
+    throw new Error("credential launcher digest changed within the fleet run");
+  }
+  const deployer = `${storage.project}-celld-worker-qualify`;
+  if (!SAFE_NAME.test(deployer)) throw new Error("qualification Worker deployer name is invalid");
+  const existing = inspectContainer(runner, deployer);
+  if (existing) {
+    assertOwnedContainer(existing, config, deployer);
+    throw new Error("qualification Worker deployer residue requires exact fleet cleanup");
+  }
+  const priorDeploy = [...inventory.actions].reverse().find((candidate) => candidate.kind === "celld_qualification_deploy");
+  if (priorDeploy?.status === "planned") throw new Error("qualification Worker deployment outcome is unknown; exact fleet cleanup is required");
+  const priorResource = inventory.resources.find((resource) => resource.type === "docker_container" && resource.id === deployer);
+  if (priorResource) markResource(config, inventory, "docker_container", deployer, "planned", now());
+  else planResource(config, inventory, { type: "docker_container", id: deployer, status: "planned" }, now());
+  const action = planAction(config, inventory, {
+    kind: "celld_qualification_deploy",
+    target: deployer,
+    deployment_kind: deploymentKind,
+    project_sha256: observedProjectDigest,
+    worker_digest: workerDigest,
+    credential_launcher_sha256: launcher.sha256,
+  }, now());
+  const uid = typeof process.getuid === "function" ? process.getuid() : 1000;
+  const gid = typeof process.getgid === "function" ? process.getgid() : 1000;
+  const output = runner("docker", [
+    "run", "--rm", "--name", deployer,
+    ...labelsToArgs(exactLabels(config.run_id)),
+    "--network", config.network.name,
+    "--user", `${uid}:${gid}`,
+    "--read-only", "--security-opt", "no-new-privileges:true", "--cap-drop", "ALL",
+    "--pids-limit", "128", "--cpus", "1", "--memory", "1024m",
+    "--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=128m,mode=1777",
+    "--workdir", "/workspace",
+    "--mount", `type=bind,src=${project},dst=/workspace,readonly`,
+    "--mount", `type=bind,src=${esbuild},dst=/usr/local/bin/esbuild,readonly`,
+    "--mount", `type=bind,src=${storage.identity_file_ref},dst=/run/identity/credentials,readonly`,
+    "--mount", `type=bind,src=${storage.ca_file_ref},dst=/run/tls/ca.crt,readonly`,
+    "--env", "AWS_CA_BUNDLE=/run/tls/ca.crt",
+    "--env", "SSL_CERT_FILE=/run/tls/ca.crt",
+    "--env", `AWS_REGION=${storage.region}`,
+    "--env", "CELLD_ESBUILD=/usr/local/bin/esbuild",
+    ...credentialLauncherArgs(launcher),
+    config.pins.celld.image_ref,
+    "deploy", "/workspace",
+    "--bucket", `s3://${storage.bucket}/${storage.run_prefix}/fleet`,
+    "--endpoint", "https://s3gateway1:8334",
+    "--region", storage.region,
+  ], { timeout: 300_000 });
+  const versionId = /Current Version ID: ([0-9a-f]{16})/.exec(output)?.[1];
+  if (!versionId) throw new Error("Celld qualification deployment did not return an immutable version ID");
+  completeAction(config, inventory, action, now());
+  markResource(config, inventory, "docker_container", deployer, "removed", now());
+  inventory.credential_launcher_sha256 = launcher.sha256;
+  inventory.active_worker_deployment = {
+    deployment_kind: deploymentKind,
+    project_sha256: observedProjectDigest,
+    worker_digest: workerDigest,
+    version_id: versionId,
+    output_sha256: sha256(output),
+  };
+  persistInventory(config, inventory, now());
+  return {
+    schema_version: "agentic-sandbox.celld-worker-qualification-deployment/v1",
+    run_id: config.run_id,
+    deployment_kind: deploymentKind,
+    project_sha256: observedProjectDigest,
+    worker_digest: workerDigest,
+    version_id: versionId,
+    output_sha256: inventory.active_worker_deployment.output_sha256,
+    credential_launcher_sha256: launcher.sha256,
     status: "DEPLOYED",
   };
 }
@@ -722,6 +897,29 @@ export function startFleet(configPath, {
   inventory.state = "started";
   persistInventory(config, inventory, now());
   return diagnoseFleet(configPath, { runner, mutateInventory: true, now });
+}
+
+export function stopFleetForWorkerDeployment(configPath, { runner = defaultRunner, now = () => new Date() } = {}) {
+  const { config, inventory } = loadFixture(configPath);
+  for (const node of config.nodes) {
+    const document = inspectContainer(runner, node.name);
+    if (!document) throw new Error(`Worker deployment stop requires exact node ${node.name}`);
+    assertOwnedContainer(document, config, node.name);
+    if (document[0]?.State?.Running === true) {
+      const action = planAction(config, inventory, { kind: "docker_stop_for_worker_deployment", target: node.name }, now());
+      runner("docker", ["stop", "--time", "20", node.name], { timeout: 60_000 });
+      completeAction(config, inventory, action, now());
+    }
+    markResource(config, inventory, "docker_container", node.name, "created", now());
+  }
+  inventory.state = "stopped_for_worker_deployment";
+  persistInventory(config, inventory, now());
+  return {
+    schema_version: "agentic-sandbox.celld-fleet-worker-stop/v1",
+    run_id: config.run_id,
+    nodes: config.nodes.map((node) => node.name),
+    status: "STOPPED",
+  };
 }
 
 export function startCallbackRelays(configPath, {

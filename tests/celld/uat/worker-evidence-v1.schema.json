@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentic-sandbox.dev/schemas/celld-worker-evidence/v1",
+  "title": "Celld live Worker qualification evidence v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "run_id", "scenario_id", "measurements", "timeline_sha256"],
+  "properties": {
+    "schema_version": { "const": "agentic-sandbox.celld-worker-evidence/v1" },
+    "run_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
+    "scenario_id": { "enum": ["UAT-CELLD-007", "UAT-CELLD-008"] },
+    "measurements": {
+      "type": "object",
+      "minProperties": 2,
+      "propertyNames": { "pattern": "^CELLD\\.00[78]\\.[A-Z_]+$" },
+      "additionalProperties": { "type": "object" }
+    },
+    "timeline_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+  }
+}

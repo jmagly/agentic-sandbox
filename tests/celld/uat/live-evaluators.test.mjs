@@ -351,7 +351,7 @@ const passing = {
   "CELLD.006.PRE_PROVIDER": { cases: staleCases },
   "CELLD.006.ACTIVE_SAFE": { cases: activeGenerationCases },
   "CELLD.007.CLAIMS": { capabilities: advertised, advertised_cases: 8, passed_cases: 8, failed_cases: 0, not_run_cases: 0 },
-  "CELLD.007.ROLLBACK": { previous_digest: hash("a"), restored_digest: hash("a"), state_sha256_before: hash("b"), state_sha256_after: hash("b"), approved_digest_active: true },
+  "CELLD.007.ROLLBACK": { previous_digest: hash("a"), restored_digest: hash("a"), previous_version_id: "1".repeat(16), candidate_version_id: "2".repeat(16), restored_version_id: "3".repeat(16), state_sha256_before: hash("b"), state_sha256_after: hash("b"), approved_digest_active: true },
   "CELLD.008.LOUD_REJECTION": { capabilities: excluded, attempts_per_capability: 100, attempts: 800, typed_rejections: 800, silent_successes: 0 },
   "CELLD.008.NO_SIDE_EFFECT": { attempts: 800, processes_created: 0, files_created: 0, sockets_created: 0, containers_created: 0, vms_created: 0, host_inventory_restored: true },
   "CELLD.009.CONTAINMENT": { limit_families: limits, families_enforced: 6, max_enforcement_ms: 5_000, node_crashes: 0, offender_removed: true },

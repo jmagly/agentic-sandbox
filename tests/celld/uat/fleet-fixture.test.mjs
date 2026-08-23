@@ -7,6 +7,7 @@ import test from "node:test";
 import {
   CleanupResidueError,
   cleanupFleet,
+  deployFleetQualificationWorker,
   deployFleetWorker,
   diagnoseFleet,
   ensureFleetBucket,
@@ -15,8 +16,10 @@ import {
   probeFleetWorker,
   startCallbackRelays,
   startFleet,
+  stopFleetForWorkerDeployment,
   validateFleetConfig,
   validateFleetInventory,
+  workerDeploymentProjectDigest,
 } from "../../../scripts/celld-fleet-fixture.mjs";
 import { prepareFixture } from "../../../scripts/celld-seaweedfs-fixture.mjs";
 
@@ -58,6 +61,7 @@ class FakeDocker {
     this.forceResidue = false;
     this.onCreate = null;
     this.onRun = null;
+    this.runOutput = "Current Version ID: 1111111111111111\ndeployment committed";
     this.failRunLeavesContainer = false;
     this.expectedFaultSignal = "disabled";
   }
@@ -106,7 +110,7 @@ class FakeDocker {
         this.containers.set(name, { labels: this.labels(), image: this.config.pins.celld.image_ref, running: false });
         throw new Error("injected deploy interruption");
       }
-      return "deployment committed";
+      return this.runOutput;
     }
     if (args[0] === "create") {
       this.createCount += 1;
@@ -145,6 +149,10 @@ class FakeDocker {
     if (args[0] === "start") {
       this.containers.get(args[1]).running = true;
       return args[1];
+    }
+    if (args[0] === "stop") {
+      this.containers.get(args.at(-1)).running = false;
+      return args.at(-1);
     }
     if (args[0] === "port") {
       const index = this.config.nodes.findIndex((node) => node.name === args[1]);
@@ -329,6 +337,67 @@ test("Worker deployment is exact-pinned, least-mounted, and inventoried before m
   assert.equal(JSON.parse(readFileSync(inventoryPath, "utf8")).actions.length, inventory.actions.length);
 });
 
+test("qualification Worker deployments reuse the protected launcher and retain immutable versions", async () => {
+  const { root, config, storage, configPath, inventoryPath } = fixture();
+  const docker = new FakeDocker(config, storage);
+  await deployFleetWorker(configPath, {
+    runner: docker.run,
+    esbuildPath: process.execPath,
+    credentialLauncherPath: process.execPath,
+    ensureBucket: async () => ({ created: true }),
+  });
+  const project = join(root, "qualification-candidate");
+  mkdirSync(project, { mode: 0o700 });
+  writeFileSync(join(project, "worker.mjs"), "export default { fetch() { return new Response('candidate'); } };\n", { mode: 0o600 });
+  writeFileSync(join(project, "wrangler.json"), `${JSON.stringify({ name: "qualification-candidate", main: "worker.mjs", compatibility_date: "2026-08-14" })}\n`, { mode: 0o600 });
+  const projectDigest = workerDeploymentProjectDigest(project);
+  const invocations = [];
+  let expectedProjectDigest = projectDigest;
+  docker.onRun = (args) => {
+    invocations.push(args);
+    const inventory = JSON.parse(readFileSync(inventoryPath, "utf8"));
+    assert.equal(inventory.actions.at(-1).kind, "celld_qualification_deploy");
+    assert.equal(inventory.actions.at(-1).status, "planned");
+    assert.equal(inventory.actions.at(-1).project_sha256, expectedProjectDigest);
+  };
+  docker.runOutput = "Current Version ID: 2222222222222222\ncandidate committed";
+  const candidate = deployFleetQualificationWorker(configPath, {
+    projectPath: project,
+    projectDigest,
+    deploymentKind: "qualification-candidate",
+    runner: docker.run,
+    esbuildPath: process.execPath,
+    credentialLauncherPath: process.execPath,
+  });
+  assert.equal(candidate.version_id, "2222222222222222");
+  assert.equal(candidate.project_sha256, projectDigest);
+  const candidateArgs = invocations.at(-1);
+  assert.ok(candidateArgs.includes(`type=bind,src=${storage.identity_file_ref},dst=/run/identity/credentials,readonly`));
+  assert.ok(candidateArgs.includes(`type=bind,src=${process.execPath},dst=/usr/local/bin/agentic-celld-credential-launcher,readonly`));
+  assert.equal(candidateArgs[candidateArgs.indexOf("--entrypoint") + 1], "/usr/local/bin/agentic-celld-credential-launcher");
+  assert.ok(!candidateArgs.some((value) => value.startsWith("AWS_SHARED_CREDENTIALS_FILE=")));
+  assert.ok(!candidateArgs.join(" ").includes(readFileSync(join(storage.run_root, "secret-key"), "utf8").trim()));
+
+  const approvedRoot = join(new URL("../../../", import.meta.url).pathname, "runtimes/celld/instance-cell");
+  const approvedDigest = workerDeploymentProjectDigest(approvedRoot, { deploymentKind: "approved-reference" });
+  expectedProjectDigest = approvedDigest;
+  docker.runOutput = "Current Version ID: 3333333333333333\napproved restored";
+  const restored = deployFleetQualificationWorker(configPath, {
+    projectPath: approvedRoot,
+    projectDigest: approvedDigest,
+    deploymentKind: "approved-reference",
+    runner: docker.run,
+    esbuildPath: process.execPath,
+    credentialLauncherPath: process.execPath,
+  });
+  assert.equal(restored.version_id, "3333333333333333");
+  assert.equal(restored.worker_digest, config.pins.worker_digest);
+  const inventory = JSON.parse(readFileSync(inventoryPath, "utf8"));
+  assert.equal(inventory.active_worker_deployment.version_id, restored.version_id);
+  assert.equal(inventory.active_worker_deployment.deployment_kind, "approved-reference");
+  assert.equal(inventory.resources.find((resource) => resource.id.endsWith("-worker-qualify")).status, "removed");
+});
+
 test("interrupted Worker deployment is recoverable by exact-owned cleanup", async () => {
   const { config, storage, configPath, inventoryPath } = fixture();
   const docker = new FakeDocker(config, storage);
@@ -377,6 +446,12 @@ test("fleet persists every container target before creation and reports real rea
   assert.match(diagnosis.membership.probe_sha256, /^[0-9a-f]{64}$/);
   assert.ok(diagnosis.nodes.every((node) => node.public_endpoint.startsWith("http://127.0.0.1:")));
   assert.equal(diagnoseFleet(configPath, { runner: docker.run }).status, "READY");
+  const stopped = stopFleetForWorkerDeployment(configPath, { runner: docker.run });
+  assert.equal(stopped.status, "STOPPED");
+  assert.ok(config.nodes.every((node) => docker.containers.get(node.name).running === false));
+  const inventory = JSON.parse(readFileSync(inventoryPath, "utf8"));
+  assert.equal(inventory.state, "stopped_for_worker_deployment");
+  assert.equal(inventory.actions.filter((action) => action.kind === "docker_stop_for_worker_deployment" && action.status === "completed").length, 3);
 });
 
 test("callback relays share only node loopback and authenticate management with protected mTLS material", () => {

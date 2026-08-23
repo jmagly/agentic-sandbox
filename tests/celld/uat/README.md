@@ -225,7 +225,12 @@ UAT 003-008, UAT 010 storage and network isolation, and UAT 012 signed
 authentication have installed live drivers. UAT 009 intentionally returns a
 typed pre-mutation `NOT_RUN` because pinned Celld v0.2.1 does not expose the
 required per-isolate CPU, memory, request-rate, storage, resident-cell, and
-outbound enforcement controls. A
+outbound enforcement controls. Bundle `limits` remain requested admission
+policy, not evidence that those ceilings are enforced; runtime discovery
+advertises none of those six enforcement families. UAT 007/008 retain the
+exact candidate/approved deployment versions, observed durable nonce marker,
+800 bounded typed rejection records, and independent process/file/socket/
+container/VM inventories. A
 registered-but-missing or disabled driver for the remaining live scenarios is
 still a typed pre-mutation `NOT_RUN`; a profile cannot substitute a different
 executable or self-declare an assertion verdict. UAT 013 remains intentionally

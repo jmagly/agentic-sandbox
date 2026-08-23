@@ -208,7 +208,7 @@
       "prerequisites": ["Live Worker resource enforcement", "node and isolate telemetry"],
       "execution": { "mode": "live", "supporting_executor_id": "celld-qualification-deterministic", "supporting_covers_assertions": ["CELLD.009.DETERMINISTIC_LIMIT_CONTRACT"], "live_drivers": [{ "id": "celld-live-worker", "covers_assertions": ["CELLD.009.CONTAINMENT", "CELLD.009.NEIGHBOR"] }], "live_prerequisites": ["Resource exhaustion fixtures", "adjacent workload probes"] },
       "assertions": [
-        { "id": "CELLD.009.DETERMINISTIC_LIMIT_CONTRACT", "expected": "Bundle and manifest validation tests require explicit positive CPU, memory, request-rate, storage, and resident-cell limits.", "hard_gate": false },
+        { "id": "CELLD.009.DETERMINISTIC_LIMIT_CONTRACT", "expected": "Bundle validation requires explicit positive requested policy limits without advertising them as enforced.", "hard_gate": false },
         { "id": "CELLD.009.CONTAINMENT", "expected": "The offender is enforced within 5 seconds or one request interval and no node crashes.", "hard_gate": true },
         { "id": "CELLD.009.NEIGHBOR", "expected": "Adjacent workload success remains at least 99 percent.", "hard_gate": true }
       ],

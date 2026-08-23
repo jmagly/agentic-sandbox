@@ -8,6 +8,8 @@ import test from "node:test";
 
 import {
   cleanupWorkerResources,
+  excludedCapabilityRejectionEvidence,
+  excludedInventoryEffects,
   executeWorkerDriver,
   prepareWorkerConformanceProject,
 } from "../../../scripts/celld-live-worker.mjs";
@@ -85,7 +87,7 @@ test("fixed Worker conformance project has valid JavaScript and a working Wasm m
   const directory = mkdtempSync(join(tmpdir(), "celld-worker-conformance-test-"));
   try {
     const project = prepareWorkerConformanceProject(directory);
-    assert.match(project.sha256, /^[0-9a-f]{64}$/);
+    assert.match(project.sha256, /^sha256:[0-9a-f]{64}$/);
     const checked = spawnSync(process.execPath, ["--check", join(project.path, "worker.mjs")], { encoding: "utf8", shell: false });
     assert.equal(checked.status, 0, checked.stderr);
     const module = new WebAssembly.Module(readFileSync(join(project.path, "add.wasm")));
@@ -94,11 +96,52 @@ test("fixed Worker conformance project has valid JavaScript and a working Wasm m
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
+test("excluded capability attempts retain bounded typed raw evidence", () => {
+  const record = excludedCapabilityRejectionEvidence(
+    { status: 2, signal: null, stdout: "", stderr: "error: does not support these config keys: process" },
+    "process",
+    7,
+    "2026-08-23T09:00:00.000Z",
+    "2026-08-23T09:00:00.010Z",
+  );
+  assert.equal(record.rejection_code, "celld.unsupported_config_key");
+  assert.equal(record.typed_rejection, true);
+  assert.equal(record.attempt, 7);
+  assert.match(record.output_sha256, /^sha256:[0-9a-f]{64}$/);
+  assert.throws(
+    () => excludedCapabilityRejectionEvidence({ status: 2, stderr: "x".repeat(4097) }, "process", 0, "before", "after"),
+    /evidence bound/,
+  );
+});
+
+test("excluded capability inventory reports each host effect independently", () => {
+  const before = { containers: ["a"], processes_sha256: "p", sockets_sha256: "s", domains: ["v"], files_sha256: "f" };
+  assert.deepEqual(excludedInventoryEffects(before, structuredClone(before)), {
+    processes_created: 0, files_created: 0, sockets_created: 0, containers_created: 0, vms_created: 0,
+  });
+  assert.deepEqual(excludedInventoryEffects(before, { ...before, sockets_sha256: "changed", domains: ["v", "new"] }), {
+    processes_created: 0, files_created: 0, sockets_created: 1, containers_created: 0, vms_created: 1,
+  });
+});
+
 test("Worker driver fixes the evaluator-owned matrices and does not claim UAT-009", () => {
   const source = readFileSync(new URL("../../../scripts/celld-live-worker.mjs", import.meta.url), "utf8");
   assert.match(source, /const ADVERTISED = \["fetch", "rpc", "storage", "alarm", "websocket", "outbound_https", "wasm", "assets"\]/);
   assert.match(source, /attempt < 100/);
   assert.match(source, /attempts: 800/);
+  assert.match(source, /attempt_records: attempts/);
+  assert.match(source, /markerBefore\.status !== 409/);
+  assert.doesNotMatch(source, /proofHash/);
+  assert.doesNotMatch(source, /AWS_SHARED_CREDENTIALS_FILE/);
   assert.match(source, /CELLD_PER_ISOLATE_RESOURCE_ENFORCEMENT_UNAVAILABLE/);
   assert.doesNotMatch(source, /CELLD\.009\.CONTAINMENT.*measurements/s);
+});
+
+test("unavailable per-isolate controls are absent from the advertised capability surface", () => {
+  const root = new URL("../../../", import.meta.url);
+  const bundle = JSON.parse(readFileSync(new URL("runtimes/celld/instance-cell/bundle.json", root), "utf8"));
+  assert.deepEqual(bundle.capabilities, [
+    "worker.fetch", "worker.rpc", "durable.storage", "durable.alarm", "websocket.inbound", "network.outbound.fetch", "wasm.module", "assets.static",
+  ]);
+  assert.ok(bundle.capabilities.every((capability) => !/cpu|memory|rate|storage_limit|resident|outbound_limit/.test(capability)));
 });

@@ -36,6 +36,7 @@
     },
     "limits": {
       "type": "object",
+      "description": "Requested admission-policy ceilings. These values are not an advertisement that the selected Celld runtime enforces or has qualified them.",
       "additionalProperties": false,
       "required": ["cpu_ms_per_request", "memory_mb", "requests_per_minute", "storage_mb", "resident_cells"],
       "properties": {

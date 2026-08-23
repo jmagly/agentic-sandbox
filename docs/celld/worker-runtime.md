@@ -4,7 +4,7 @@
 
 ## Supported surface
 
-The v1 bundle contract permits fetch handlers, JavaScript RPC/service bindings, durable storage and alarms, inbound WebSockets, outbound HTTP fetch, Wasm modules, and static assets. Every bundle declares only what it uses, has resource ceilings, a trust domain, a content digest, and an optional signature. Unknown fields and unknown capabilities fail validation.
+The v1 bundle contract permits fetch handlers, JavaScript RPC/service bindings, durable storage and alarms, inbound WebSockets, outbound HTTP fetch, Wasm modules, and static assets. Every bundle declares only what it uses, its requested admission-policy limits, a trust domain, a content digest, and an optional signature. Unknown fields and unknown capabilities fail validation. The numeric `limits` object is desired policy input, not an enforcement advertisement: pinned Celld v0.2.1 does not expose the per-isolate enforcement and telemetry needed to qualify those ceilings, so runtime discovery does not advertise CPU, memory, request-rate, storage, resident-cell, or outbound-limit capabilities.
 
 The runtime never promises command execution, PTY sessions, workspace or agentshare mounts, process spawning, raw TCP, SSH, Docker, QEMU, or the normal `agent-rs` lifecycle. Celld's currently inert Node/raw-socket compatibility stubs are treated as unsupported rather than successful features. A workload needing one of these capabilities must select `host`, `docker`, or `qemu` explicitly.
 
@@ -29,4 +29,4 @@ Alarm effects return to management through a `MANAGEMENT` service binding when t
 
 ## Go/no-go
 
-The runtime remains experimental until the #754 qualification report shows all supported APIs pass, every unsupported API fails loudly, resource ceilings terminate or throttle the offending isolate, a pinned rollback succeeds, and a 24-hour soak meets the error and cost thresholds. Hostile mutually untrusted tenants are a no-go on the same Celld fleet.
+The runtime remains experimental until the #754 qualification report shows all supported APIs pass, every unsupported API fails loudly, the requested resource policies terminate or throttle only the offending isolate, a pinned rollback succeeds, and a 24-hour soak meets the error and cost thresholds. Until a newer reviewed Celld pair exposes those controls and passes UAT-009, that scenario remains `NOT_RUN` and no resource-enforcement capability is advertised. Hostile mutually untrusted tenants are a no-go on the same Celld fleet.

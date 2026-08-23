@@ -466,6 +466,10 @@ const ALL_LIVE_EVALUATORS = Object.freeze({
     const m = object(raw);
     const passed = typeof m.previous_digest === "string" && /^sha256:[0-9a-f]{64}$/.test(m.previous_digest)
       && m.restored_digest === m.previous_digest
+      && typeof m.previous_version_id === "string" && /^[0-9a-f]{16}$/.test(m.previous_version_id)
+      && typeof m.candidate_version_id === "string" && /^[0-9a-f]{16}$/.test(m.candidate_version_id)
+      && m.candidate_version_id !== m.previous_version_id
+      && typeof m.restored_version_id === "string" && /^[0-9a-f]{16}$/.test(m.restored_version_id)
       && typeof m.state_sha256_before === "string" && m.state_sha256_after === m.state_sha256_before
       && boolean(m.approved_digest_active, "approved_digest_active");
     return evaluated(m, passed, "rollback restores the retained digest without durable-state loss");
