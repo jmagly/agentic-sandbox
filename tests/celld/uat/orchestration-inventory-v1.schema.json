@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentic-sandbox.dev/schemas/celld-orchestration-inventory/v1",
+  "title": "Celld exact-run orchestration mutation inventory v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "run_id", "working_root", "owner", "host_sha256",
+    "created_at", "updated_at", "state", "resources", "faults"
+  ],
+  "properties": {
+    "schema_version": { "const": "agentic-sandbox.celld-orchestration-inventory/v1" },
+    "run_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
+    "working_root": { "type": "string", "pattern": "^/dev/shm/" },
+    "owner": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "workflow", "run_id"],
+      "properties": {
+        "repository": { "const": "roctinam/agentic-sandbox" },
+        "workflow": { "const": "celld-qualification.yml" },
+        "run_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" }
+      }
+    },
+    "host_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "created_at": { "type": "string", "format": "date-time" },
+    "updated_at": { "type": "string", "format": "date-time" },
+    "state": { "enum": ["prepared", "active", "cleanup_residue", "clean"] },
+    "resources": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["scenario_id", "instance_id", "name", "substrate", "status", "planned_at", "updated_at"],
+        "properties": {
+          "scenario_id": { "enum": ["UAT-CELLD-003", "UAT-CELLD-004", "UAT-CELLD-005", "UAT-CELLD-006"] },
+          "instance_id": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
+          "name": { "type": "string", "pattern": "^celld-[a-z0-9-]{1,62}$" },
+          "substrate": { "enum": ["qemu", "docker"] },
+          "status": { "enum": ["planned", "removed"] },
+          "planned_at": { "type": "string", "format": "date-time" },
+          "updated_at": { "type": "string", "format": "date-time" },
+          "removed_at": { "type": "string", "format": "date-time" }
+        }
+      }
+    },
+    "faults": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "scenario_id", "kind", "target", "status", "planned_at", "updated_at"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+          "scenario_id": { "enum": ["UAT-CELLD-003", "UAT-CELLD-004", "UAT-CELLD-005", "UAT-CELLD-006"] },
+          "kind": { "enum": ["management_process_kill", "fleet_node_stop", "callback_response_loss", "callback_relay_pause"] },
+          "target": { "type": "string", "pattern": "^(management|celld-[a-z0-9-]{1,80})$" },
+          "status": { "enum": ["planned", "applied", "healed"] },
+          "planned_at": { "type": "string", "format": "date-time" },
+          "updated_at": { "type": "string", "format": "date-time" },
+          "applied_at": { "type": "string", "format": "date-time" },
+          "healed_at": { "type": "string", "format": "date-time" }
+        }
+      }
+    }
+  }
+}

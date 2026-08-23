@@ -9,6 +9,7 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  renameSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -39,8 +40,10 @@ const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const REPO_ROOT = resolve(dirname(SCRIPT_PATH), "..");
 const OBSERVATION_SCHEMA = "agentic-sandbox.celld-live-observation/v1";
 const CONFIG_SCHEMA = "agentic-sandbox.celld-live-orchestration/v1";
+const INVENTORY_SCHEMA = "agentic-sandbox.celld-orchestration-inventory/v1";
 const DRIVER_ID = "celld-live-orchestration";
 const DRIVER_VERSION = "celld-live-orchestration/v1";
+const ORCHESTRATION_OWNER = Object.freeze({ repository: "roctinam/agentic-sandbox", workflow: "celld-qualification.yml" });
 const CALLBACK_PATH = "/api/v2/celld/effects";
 const RUN_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const SHA256 = /^[0-9a-f]{64}$/;
@@ -49,6 +52,7 @@ const SCENARIOS = new Set(["UAT-CELLD-003", "UAT-CELLD-004", "UAT-CELLD-005", "U
 const ACTIONS = ["provision", "start", "stop", "destroy"];
 const SUBSTRATES = ["qemu", "docker"];
 const CRASH_POINTS = ["before_dispatch", "during_dispatch", "after_dispatch"];
+const FAULT_KINDS = new Set(["management_process_kill", "fleet_node_stop", "callback_response_loss", "callback_relay_pause"]);
 
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
@@ -88,6 +92,82 @@ function protectedJson(path, description) {
   return JSON.parse(readFileSync(path, "utf8"));
 }
 
+function atomicJson(path, value) {
+  const temporary = `${path}.tmp-${process.pid}-${randomBytes(8).toString("hex")}`;
+  try {
+    writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600, flag: "wx" });
+    chmodSync(temporary, 0o600);
+    renameSync(temporary, path);
+  } finally {
+    if (existsSync(temporary)) rmSync(temporary, { force: true });
+  }
+}
+
+function validTimestamp(value) {
+  return typeof value === "string" && Number.isFinite(Date.parse(value));
+}
+
+export function validateOrchestrationInventory(inventory, config, { expectedHostSha256 } = {}) {
+  const errors = [];
+  if (!inventory || typeof inventory !== "object" || Array.isArray(inventory)) return ["inventory must be an object"];
+  const allowed = new Set(["schema_version", "run_id", "working_root", "owner", "host_sha256", "created_at", "updated_at", "state", "resources", "faults"]);
+  for (const key of Object.keys(inventory)) if (!allowed.has(key)) errors.push(`inventory.${key} is not allowed`);
+  if (inventory.schema_version !== INVENTORY_SCHEMA) errors.push(`inventory.schema_version must be ${INVENTORY_SCHEMA}`);
+  if (inventory.run_id !== config.run_id
+      || inventory.working_root !== config.working_root
+      || inventory.owner?.repository !== ORCHESTRATION_OWNER.repository
+      || inventory.owner?.workflow !== ORCHESTRATION_OWNER.workflow
+      || inventory.owner?.run_id !== config.run_id) errors.push("inventory run/owner does not match orchestration config");
+  if (!SHA256.test(inventory.host_sha256 ?? "") || (expectedHostSha256 && inventory.host_sha256 !== expectedHostSha256)) errors.push("inventory host does not match the authorized host");
+  if (!validTimestamp(inventory.created_at) || !validTimestamp(inventory.updated_at)) errors.push("inventory timestamps are invalid");
+  if (!["prepared", "active", "cleanup_residue", "clean"].includes(inventory.state)) errors.push("inventory state is invalid");
+  if (!Array.isArray(inventory.resources) || !Array.isArray(inventory.faults)) errors.push("inventory resources/faults must be arrays");
+
+  const resourceKeys = new Set();
+  for (const [index, resource] of (inventory.resources ?? []).entries()) {
+    const allowedResource = new Set(["scenario_id", "instance_id", "name", "substrate", "status", "planned_at", "updated_at", "removed_at"]);
+    for (const key of Object.keys(resource ?? {})) if (!allowedResource.has(key)) errors.push(`inventory.resources[${index}].${key} is not allowed`);
+    const key = resource?.instance_id ?? "";
+    if (resourceKeys.has(key)) errors.push(`inventory resource is duplicated: ${key}`);
+    resourceKeys.add(key);
+    if (!SCENARIOS.has(resource?.scenario_id)
+        || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(resource?.instance_id ?? "")
+        || !/^celld-[a-z0-9-]{1,62}$/.test(resource?.name ?? "")
+        || !SUBSTRATES.includes(resource?.substrate)
+        || !["planned", "removed"].includes(resource?.status)
+        || !validTimestamp(resource?.planned_at)
+        || !validTimestamp(resource?.updated_at)
+        || (resource?.status === "removed" && !validTimestamp(resource?.removed_at))) errors.push(`inventory resource is invalid at index ${index}`);
+  }
+
+  const faultIds = new Set();
+  for (const [index, fault] of (inventory.faults ?? []).entries()) {
+    const allowedFault = new Set(["id", "scenario_id", "kind", "target", "status", "planned_at", "updated_at", "applied_at", "healed_at"]);
+    for (const key of Object.keys(fault ?? {})) if (!allowedFault.has(key)) errors.push(`inventory.faults[${index}].${key} is not allowed`);
+    if (faultIds.has(fault?.id)) errors.push(`inventory fault is duplicated: ${fault?.id}`);
+    faultIds.add(fault?.id);
+    if (!/^[0-9a-f]{32}$/.test(fault?.id ?? "")
+        || !SCENARIOS.has(fault?.scenario_id)
+        || !FAULT_KINDS.has(fault?.kind)
+        || !/^(?:management|celld-[a-z0-9-]{1,80})$/.test(fault?.target ?? "")
+        || !["planned", "applied", "healed"].includes(fault?.status)
+        || !validTimestamp(fault?.planned_at)
+        || !validTimestamp(fault?.updated_at)
+        || (["applied", "healed"].includes(fault?.status) && !validTimestamp(fault?.applied_at))
+        || (fault?.status === "healed" && !validTimestamp(fault?.healed_at))) errors.push(`inventory fault is invalid at index ${index}`);
+  }
+  return errors;
+}
+
+export function loadAuthorizedOrchestrationInventory(profile, config, expectedHostSha256) {
+  if (profile.authorization?.destructive_faults !== true || profile.authorization?.exact_run_owner !== profile.run_id) throw new Error("exact-run destructive authorization is required");
+  if (resolve(profile.authorization.inventory_path ?? "") !== resolve(config.inventory_path ?? "")) throw new Error("authorization inventory path is not the fixed orchestration inventory");
+  const inventory = protectedJson(config.inventory_path, "orchestration inventory");
+  const errors = validateOrchestrationInventory(inventory, config, { expectedHostSha256 });
+  if (errors.length) throw new Error(errors.join("; "));
+  return inventory;
+}
+
 function executable(path, description) {
   if (!isAbsolute(path) || !existsSync(path)) return `${description} is missing`;
   const metadata = lstatSync(path);
@@ -99,7 +179,7 @@ export function validateOrchestrationConfig(config, { repoRoot = REPO_ROOT } = {
   const errors = [];
   if (!config || typeof config !== "object" || Array.isArray(config)) return ["config must be an object"];
   const allowed = new Set([
-    "schema_version", "run_id", "working_root", "management_binary_path", "agent_client_binary_path",
+    "schema_version", "run_id", "working_root", "inventory_path", "management_binary_path", "agent_client_binary_path",
     "callback_relay_binary_path", "docker_image_ref", "base_images_dir",
     "vm_storage_dir", "agentshare_root", "libvirt_uri", "management_grpc_port",
   ]);
@@ -108,6 +188,7 @@ export function validateOrchestrationConfig(config, { repoRoot = REPO_ROOT } = {
   if (!RUN_ID.test(config.run_id ?? "")) errors.push("config.run_id is invalid");
   const root = resolve(config.working_root ?? "");
   if (!isAbsolute(config.working_root ?? "") || !root.startsWith("/dev/shm/") || !root.split(sep).includes(config.run_id)) errors.push("config.working_root must be an exact-run directory below /dev/shm");
+  if (resolve(config.inventory_path ?? "") !== join(root, "orchestration-inventory.json")) errors.push("config.inventory_path must be the fixed working-root file");
   const expectedManagementRoots = [resolve(repoRoot, ".celld-target"), resolve(repoRoot, "management/target")];
   const management = resolve(config.management_binary_path ?? "");
   if (!isAbsolute(config.management_binary_path ?? "") || basename(management) !== "agentic-mgmt" || !expectedManagementRoots.some((candidate) => management.startsWith(`${candidate}${sep}`))) errors.push("config.management_binary_path is outside an approved build target");
@@ -125,11 +206,13 @@ export function validateOrchestrationConfig(config, { repoRoot = REPO_ROOT } = {
   return errors;
 }
 
-export function prepareOrchestrationConfig({ runId, workingRoot, managementBinaryPath, agentClientBinaryPath, callbackRelayBinaryPath, dockerImageRef, agentshareRoot, managementGrpcPort = 38120 }) {
+export function prepareOrchestrationConfig({ runId, workingRoot, managementBinaryPath, agentClientBinaryPath, callbackRelayBinaryPath, dockerImageRef, agentshareRoot, managementGrpcPort = 38120, now = new Date(), host = hostname() }) {
+  const resolvedWorkingRoot = resolve(workingRoot);
   const config = {
     schema_version: CONFIG_SCHEMA,
     run_id: runId,
-    working_root: resolve(workingRoot),
+    working_root: resolvedWorkingRoot,
+    inventory_path: join(resolvedWorkingRoot, "orchestration-inventory.json"),
     management_binary_path: resolve(managementBinaryPath),
     agent_client_binary_path: resolve(agentClientBinaryPath),
     callback_relay_binary_path: resolve(callbackRelayBinaryPath),
@@ -143,12 +226,34 @@ export function prepareOrchestrationConfig({ runId, workingRoot, managementBinar
   const errors = validateOrchestrationConfig(config);
   if (errors.length) throw new Error(errors.join("; "));
   if (existsSync(config.working_root)) throw new Error("orchestration working root already exists");
-  mkdirSync(config.working_root, { recursive: true, mode: 0o700 });
-  chmodSync(config.working_root, 0o700);
   const path = join(config.working_root, "orchestration.json");
-  writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600, flag: "wx" });
-  chmodSync(path, 0o600);
-  return { config, path };
+  const timestamp = now.toISOString();
+  const inventory = {
+    schema_version: INVENTORY_SCHEMA,
+    run_id: config.run_id,
+    working_root: config.working_root,
+    owner: { ...ORCHESTRATION_OWNER, run_id: config.run_id },
+    host_sha256: sha256(host),
+    created_at: timestamp,
+    updated_at: timestamp,
+    state: "prepared",
+    resources: [],
+    faults: [],
+  };
+  const inventoryErrors = validateOrchestrationInventory(inventory, config, { expectedHostSha256: inventory.host_sha256 });
+  if (inventoryErrors.length) throw new Error(inventoryErrors.join("; "));
+  try {
+    mkdirSync(config.working_root, { recursive: true, mode: 0o700 });
+    chmodSync(config.working_root, 0o700);
+    writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600, flag: "wx" });
+    chmodSync(path, 0o600);
+    writeFileSync(config.inventory_path, `${JSON.stringify(inventory, null, 2)}\n`, { mode: 0o600, flag: "wx" });
+    chmodSync(config.inventory_path, 0o600);
+  } catch (error) {
+    rmSync(config.working_root, { recursive: true, force: true });
+    throw error;
+  }
+  return { config, path, inventory, inventoryPath: config.inventory_path };
 }
 
 function readWorkerKey(path) {
@@ -379,12 +484,80 @@ function provisionPayload(config, substrate, name) {
     : { name, runtime: "docker", image: config.docker_image_ref, start: false, agentshare: false };
 }
 
-async function issueCommand(runtime, { instanceId, generation, operationId: id, action, payload }) {
+function persistOrchestrationInventory(runtime, now = new Date()) {
+  runtime.orchestrationInventory.updated_at = now.toISOString();
+  runtime.orchestrationInventory.state = runtime.orchestrationInventory.resources.some((entry) => entry.status !== "removed")
+    || runtime.orchestrationInventory.faults.some((entry) => entry.status !== "healed") ? "active" : "prepared";
+  const errors = validateOrchestrationInventory(runtime.orchestrationInventory, runtime.config, { expectedHostSha256: runtime.orchestrationInventory.host_sha256 });
+  if (errors.length) throw new Error(errors.join("; "));
+  (runtime.persistInventory ?? atomicJson)(runtime.config.inventory_path, runtime.orchestrationInventory);
+}
+
+function planProviderResource(runtime, { instanceId, name, substrate }, now = new Date()) {
+  const existing = runtime.orchestrationInventory.resources.find((entry) => entry.instance_id === instanceId);
+  if (existing) {
+    if (existing.name !== name || existing.substrate !== substrate) throw new Error("provider resource identity changed after inventory persistence");
+    runtime.providerResources.set(instanceId, { instanceId, name, substrate });
+    return existing;
+  }
+  const timestamp = now.toISOString();
+  const record = { scenario_id: runtime.scenarioId, instance_id: instanceId, name, substrate, status: "planned", planned_at: timestamp, updated_at: timestamp };
+  runtime.orchestrationInventory.resources.push(record);
+  persistOrchestrationInventory(runtime, now);
+  runtime.providerResources.set(instanceId, { instanceId, name, substrate });
+  return record;
+}
+
+function markProviderResourceRemoved(runtime, instanceId, substrate, now = new Date()) {
+  const record = runtime.orchestrationInventory.resources.find((entry) => entry.instance_id === instanceId && entry.substrate === substrate);
+  if (!record) throw new Error("provider cleanup target is absent from the orchestration inventory");
+  const timestamp = now.toISOString();
+  record.status = "removed";
+  record.removed_at = timestamp;
+  record.updated_at = timestamp;
+  persistOrchestrationInventory(runtime, now);
+}
+
+function planFault(runtime, { kind, target }, now = new Date()) {
+  if (!FAULT_KINDS.has(kind) || !/^(?:management|celld-[a-z0-9-]{1,80})$/.test(target)) throw new Error("fault target is outside the fixed orchestration allowlist");
+  const timestamp = now.toISOString();
+  const record = { id: randomBytes(16).toString("hex"), scenario_id: runtime.scenarioId, kind, target, status: "planned", planned_at: timestamp, updated_at: timestamp };
+  runtime.orchestrationInventory.faults.push(record);
+  persistOrchestrationInventory(runtime, now);
+  return record;
+}
+
+function markFault(runtime, record, status, now = new Date()) {
+  if (!runtime.orchestrationInventory.faults.includes(record) || !["applied", "healed"].includes(status)) throw new Error("fault record is not owned by this run");
+  const timestamp = now.toISOString();
+  record.status = status;
+  record.updated_at = timestamp;
+  if (status === "applied") record.applied_at = timestamp;
+  if (status === "healed") record.healed_at = timestamp;
+  persistOrchestrationInventory(runtime, now);
+}
+
+export async function applyPlannedOrchestrationFault(runtime, fault, apply) {
+  if (typeof apply !== "function") throw new Error("fault apply callback is required");
+  const record = planFault(runtime, fault);
+  await apply();
+  markFault(runtime, record, "applied");
+  return record;
+}
+
+export async function healPlannedOrchestrationFault(runtime, record, heal) {
+  if (typeof heal !== "function") throw new Error("fault heal callback is required");
+  await heal();
+  markFault(runtime, record, "healed");
+}
+
+export async function issueCommand(runtime, { instanceId, generation, operationId: id, action, payload }) {
   if (action === "provision") {
     const substrate = payload.runtime === "qemu" ? "qemu" : payload.runtime === "docker" ? "docker" : null;
-    if (substrate && typeof payload.name === "string") runtime.providerResources.set(instanceId, { instanceId, name: payload.name, substrate });
+    if (substrate && typeof payload.name === "string") planProviderResource(runtime, { instanceId, name: payload.name, substrate });
   }
-  const result = await sendWorkerCommand({ endpoint: runtime.workerEndpoint, varsFile: runtime.fleet.worker_vars_file_ref, instanceId, operationId: id, generation, action, payload });
+  const sender = runtime.sendWorkerCommand ?? sendWorkerCommand;
+  const result = await sender({ endpoint: runtime.workerEndpoint, varsFile: runtime.fleet.worker_vars_file_ref, instanceId, operationId: id, generation, action, payload });
   if (![200, 202].includes(result.status)) throw new Error(`Worker rejected ${action} with ${result.status}:${result.body?.error?.code ?? "unknown"}`);
   const effect = result.body?.effects?.find((candidate) => candidate.operation_id === id);
   if (!effect) throw new Error("Worker acknowledgement omitted the original effect identity");
@@ -505,29 +678,36 @@ async function runUat004(runtime, timeline) {
     const providerChecksumBefore = providerChecksum(runtime, substrate, name, instanceId);
     for (const crashPoint of CRASH_POINTS) {
       const trials = [];
-      if (crashPoint === "before_dispatch") await stopManagementAndWait(runtime.management, "SIGKILL");
+      let managementFault = null;
+      if (crashPoint === "before_dispatch") {
+        managementFault = await applyPlannedOrchestrationFault(runtime, { kind: "management_process_kill", target: "management" }, () => stopManagementAndWait(runtime.management, "SIGKILL"));
+      }
       for (let index = 0; index < 100; index += 1) {
         const id = operationId("uat004", substrate, 1, crashPoint, index);
         const effect = await issueCommand(runtime, { instanceId, generation: 1, operationId: id, action: "observe", payload: { substrate, crash_point: crashPoint } });
         trials.push({ instanceId, id, effect });
       }
       if (crashPoint === "during_dispatch") {
-        runtime.management.processHandle.kill("SIGSTOP");
-        await sleep(1_500);
-        await stopManagementAndWait(runtime.management, "SIGKILL");
+        managementFault = await applyPlannedOrchestrationFault(runtime, { kind: "management_process_kill", target: "management" }, async () => {
+          runtime.management.processHandle.kill("SIGSTOP");
+          await sleep(1_500);
+          await stopManagementAndWait(runtime.management, "SIGKILL");
+        });
       }
       if (crashPoint === "after_dispatch") {
         for (const trial of trials) {
           const dispatched = await terminalCallback(runtime, trial.instanceId, 1, trial.effect);
           if (dispatched.body.status !== "succeeded") throw new Error("pre-crash effect did not reach terminal dispatch state");
         }
-        await stopManagementAndWait(runtime.management, "SIGKILL");
+        managementFault = await applyPlannedOrchestrationFault(runtime, { kind: "management_process_kill", target: "management" }, () => stopManagementAndWait(runtime.management, "SIGKILL"));
       }
-      run("docker", ["stop", "--time", "5", runtime.fleet.nodes[0].name], { timeout: 30_000 });
-      runtime.workerEndpoint = workerEndpoint(runtime.fleet, 1);
-      const started = Date.now();
+      let nodeFault = null;
       try {
+        nodeFault = await applyPlannedOrchestrationFault(runtime, { kind: "fleet_node_stop", target: runtime.fleet.nodes[0].name }, () => run("docker", ["stop", "--time", "5", runtime.fleet.nodes[0].name], { timeout: 30_000 }));
+        runtime.workerEndpoint = workerEndpoint(runtime.fleet, 1);
+        const started = Date.now();
         if (runtime.management.processHandle.exitCode !== null || runtime.management.processHandle.signalCode !== null || runtime.management.processHandle.killed) runtime.management = await restartManagement(runtime.management, runtime.config, runtime.fleet, runtime.managementHost);
+        if (managementFault) await healPlannedOrchestrationFault(runtime, managementFault, async () => {});
         for (const [trialIndex, trial] of trials.entries()) {
           const terminal = await terminalCallback(runtime, trial.instanceId, 1, trial.effect);
           const cell = await waitCellEffect(runtime, trial.instanceId, 1, trial.id, ["succeeded"]);
@@ -546,7 +726,7 @@ async function runUat004(runtime, timeline) {
           timeline.push({ scenario: "UAT-CELLD-004", kind: "recovery_trial", ...record });
         }
       } finally {
-        run("docker", ["start", runtime.fleet.nodes[0].name], { timeout: 30_000 });
+        if (nodeFault) await healPlannedOrchestrationFault(runtime, nodeFault, () => run("docker", ["start", runtime.fleet.nodes[0].name], { timeout: 30_000 }));
         runtime.workerEndpoint = workerEndpoint(runtime.fleet, 0);
       }
     }
@@ -580,7 +760,7 @@ async function runUat005(runtime, timeline) {
     for (let generation = 1; generation <= 100; generation += 1) {
       const payloads = { provision: provisionPayload(runtime.config, substrate, name), start: {}, stop: {}, destroy: {} };
       for (const action of ACTIONS) {
-        run("docker", ["kill", "--signal", "SIGUSR1", relayName(runtime.fleet)]);
+        const responseLossFault = await applyPlannedOrchestrationFault(runtime, { kind: "callback_response_loss", target: relayName(runtime.fleet) }, () => run("docker", ["kill", "--signal", "SIGUSR1", relayName(runtime.fleet)]));
         const id = operationId("uat005", substrate, generation, action);
         const started = Date.now();
         await issueCommand(runtime, { instanceId, generation, operationId: id, action, payload: payloads[action] });
@@ -601,6 +781,7 @@ async function runUat005(runtime, timeline) {
         };
         cases.push(record);
         timeline.push({ scenario: "UAT-CELLD-005", kind: "response_loss_trial", ...record });
+        await healPlannedOrchestrationFault(runtime, responseLossFault, async () => {});
       }
     }
   }
@@ -631,7 +812,8 @@ async function runUat006(runtime, timeline) {
     for (const action of ACTIONS) await runOneEffectCampaign(runtime, { prefix: "uat006-old", substrate, instanceId, generation: 1, action, payload: action === "provision" ? provisionPayload(runtime.config, substrate, name) : {} });
     await runOneEffectCampaign(runtime, { prefix: "uat006-active", substrate, instanceId, generation: 2, action: "provision", payload: provisionPayload(runtime.config, substrate, name) });
     const before = providerChecksum(runtime, substrate, name, instanceId);
-    run("docker", ["pause", relayName(runtime.fleet)]);
+    const partitionFault = await applyPlannedOrchestrationFault(runtime, { kind: "callback_relay_pause", target: relayName(runtime.fleet) }, () => run("docker", ["pause", relayName(runtime.fleet)]));
+    let future;
     try {
       for (const action of ["stop", "destroy"]) {
         for (let index = 0; index < 100; index += 1) {
@@ -650,10 +832,10 @@ async function runUat006(runtime, timeline) {
           });
         }
       }
-      const future = await sendWorkerCommand({ endpoint: runtime.workerEndpoint, varsFile: runtime.fleet.worker_vars_file_ref, instanceId, operationId: operationId("uat006-future", substrate, 4, "destroy"), generation: 4, action: "destroy", payload: {} });
+      future = await sendWorkerCommand({ endpoint: runtime.workerEndpoint, varsFile: runtime.fleet.worker_vars_file_ref, instanceId, operationId: operationId("uat006-future", substrate, 4, "destroy"), generation: 4, action: "destroy", payload: {} });
       if (future.status !== 409 || future.body?.error?.code !== "cell.generation_fenced") throw new Error("future generation was not fenced by the active cell");
     } finally {
-      run("docker", ["unpause", relayName(runtime.fleet)]);
+      await healPlannedOrchestrationFault(runtime, partitionFault, () => run("docker", ["unpause", relayName(runtime.fleet)]));
     }
     const after = providerChecksum(runtime, substrate, name, instanceId);
     await runOneEffectCampaign(runtime, { prefix: "uat006-clean", substrate, instanceId, generation: 2, action: "destroy", payload: {} });
@@ -703,6 +885,10 @@ function cleanupProviderResources(runtime) {
           if (inspect.status === 0) run("docker", ["network", "rm", network]);
         }
       }
+      const remaining = run("docker", ["ps", "--all", "--filter", `label=agentic-instance-id=${resource.instanceId}`, "--format", "{{.ID}}"]).split(/\r?\n/).filter(Boolean);
+      if (remaining.length !== 0) throw new Error("Docker provider cleanup did not reach exact absence");
+      markProviderResourceRemoved(runtime, resource.instanceId, resource.substrate);
+      runtime.providerResources.delete(resource.instanceId);
       assertions.push(`Docker provider identity ${sha256(resource.instanceId)} absent`);
       continue;
     }
@@ -711,6 +897,10 @@ function cleanupProviderResources(runtime) {
     if (domain.status === 0 || existsSync(directory)) {
       run(join(REPO_ROOT, "scripts/destroy-vm.sh"), [resource.name, "--force"], { env: { ...process.env, AGENTIC_BACKEND: "libvirt", LIBVIRT_DEFAULT_URI: runtime.config.libvirt_uri, VM_STORAGE_DIR: runtime.config.vm_storage_dir }, timeout: 180_000 });
     }
+    const remainingDomain = spawnSync("virsh", ["-c", runtime.config.libvirt_uri, "dominfo", resource.name], { encoding: "utf8", shell: false });
+    if (remainingDomain.status === 0 || existsSync(directory)) throw new Error("QEMU provider cleanup did not reach exact absence");
+    markProviderResourceRemoved(runtime, resource.instanceId, resource.substrate);
+    runtime.providerResources.delete(resource.instanceId);
     assertions.push(`QEMU provider identity ${sha256(resource.instanceId)} absent`);
   }
   return assertions;
@@ -726,9 +916,8 @@ function unavailable({ scenarioId, runId, profile, startedAt, reasonCode }) {
   };
 }
 
-function prerequisiteReason(config, scenarioId, profile) {
+function prerequisiteReason(config) {
   if (process.platform !== "linux") return "CELLD_ORCHESTRATION_LINUX_REQUIRED";
-  if (["UAT-CELLD-004", "UAT-CELLD-005", "UAT-CELLD-006"].includes(scenarioId) && (!profile.authorization.destructive_faults || profile.authorization.exact_run_owner !== profile.run_id)) return "CELLD_DESTRUCTIVE_AUTHORIZATION_REQUIRED";
   for (const [program, args, code] of [["docker", ["compose", "version"], "CELLD_DOCKER_UNAVAILABLE"], ["virsh", ["-c", config.libvirt_uri, "version"], "CELLD_LIBVIRT_UNAVAILABLE"], ["openssl", ["version"], "CELLD_OPENSSL_UNAVAILABLE"]]) if (!available(program, args)) return code;
   if (executable(config.management_binary_path, "management binary")) return "CELLD_MANAGEMENT_BINARY_UNAVAILABLE";
   if (executable(config.agent_client_binary_path, "agent client binary")) return "CELLD_AGENT_CLIENT_BINARY_UNAVAILABLE";
@@ -745,12 +934,15 @@ export async function executeOrchestrationDriver({ scenarioId, runId, liveProfil
   const entry = profile.drivers?.[DRIVER_ID];
   if (!entry?.enabled) return unavailable({ scenarioId, runId, profile, startedAt, reasonCode: "CELLD_ORCHESTRATION_DRIVER_DISABLED" });
   if (!SCENARIOS.has(scenarioId) || profile.run_id !== runId || profile.expected_sandbox_git !== (dependencies.gitCommit?.() ?? run("git", ["rev-parse", "HEAD"]))) throw new Error("live orchestration identity does not match the requested run");
-  if (profile.environment.host_sha256 !== sha256(dependencies.hostname?.() ?? hostname())) throw new Error("live orchestration host identity does not match the protected profile");
+  const observedHostSha256 = sha256(dependencies.hostname?.() ?? hostname());
+  if (profile.environment.host_sha256 !== observedHostSha256) throw new Error("live orchestration host identity does not match the protected profile");
   const config = protectedJson(entry.config_path, "orchestration config");
   const configErrors = validateOrchestrationConfig(config);
   if (configErrors.length) throw new Error(configErrors.join("; "));
   if (config.run_id !== runId) throw new Error("orchestration config run identity does not match the live profile");
-  const reason = dependencies.prerequisiteReason ? dependencies.prerequisiteReason(config, scenarioId, profile) : prerequisiteReason(config, scenarioId, profile);
+  if (!profile.authorization.destructive_faults || profile.authorization.exact_run_owner !== profile.run_id) return unavailable({ scenarioId, runId, profile, startedAt, reasonCode: "CELLD_DESTRUCTIVE_AUTHORIZATION_REQUIRED" });
+  const orchestrationInventory = loadAuthorizedOrchestrationInventory(profile, config, observedHostSha256);
+  const reason = dependencies.prerequisiteReason ? dependencies.prerequisiteReason(config, scenarioId, profile) : prerequisiteReason(config);
   if (reason) return unavailable({ scenarioId, runId, profile, startedAt, reasonCode: reason });
 
   mkdirSync(artifactDir, { recursive: true, mode: 0o700 });
@@ -779,7 +971,13 @@ export async function executeOrchestrationDriver({ scenarioId, runId, liveProfil
     management = launchManagement(config, fleet, managementHost);
     await waitManagement(management, fleet);
     startCallbackRelays(fleetPath, { relayBinaryPath: config.callback_relay_binary_path, enableFaultSignal: ["UAT-CELLD-005"].includes(scenarioId) });
-    runtime = { config, fleet, fleetPath, management, managementHost, workerEndpoint: workerEndpoint(fleet), runId, providerResources: new Map() };
+    const activeResources = orchestrationInventory.resources.filter((resource) => resource.status !== "removed").map((resource) => [resource.instance_id, { instanceId: resource.instance_id, name: resource.name, substrate: resource.substrate }]);
+    runtime = {
+      config, fleet, fleetPath, management, managementHost, workerEndpoint: workerEndpoint(fleet), runId, scenarioId,
+      orchestrationInventory, providerResources: new Map(activeResources),
+      persistInventory: dependencies.persistInventory,
+      sendWorkerCommand: dependencies.sendWorkerCommand,
+    };
     const runner = dependencies.runScenario ?? ({
       "UAT-CELLD-003": runUat003, "UAT-CELLD-004": runUat004,
       "UAT-CELLD-005": runUat005, "UAT-CELLD-006": runUat006,
@@ -825,12 +1023,26 @@ export function cleanupOrchestrationRoot(configPath) {
   const errors = validateOrchestrationConfig(config);
   if (errors.length) throw new Error(errors.join("; "));
   if (resolve(configPath) !== join(config.working_root, "orchestration.json")) throw new Error("orchestration config is not at the fixed run-root path");
+  const inventory = protectedJson(config.inventory_path, "orchestration inventory");
+  const inventoryErrors = validateOrchestrationInventory(inventory, config, { expectedHostSha256: sha256(hostname()) });
+  if (inventoryErrors.length) throw new Error(inventoryErrors.join("; "));
+  const activeResources = inventory.resources.filter((resource) => resource.status !== "removed");
+  const activeFaults = inventory.faults.filter((fault) => fault.status !== "healed");
+  if (activeResources.length || activeFaults.length) {
+    inventory.state = "cleanup_residue";
+    inventory.updated_at = new Date().toISOString();
+    atomicJson(config.inventory_path, inventory);
+    throw new Error(`orchestration cleanup inventory retains ${activeResources.length} resources and ${activeFaults.length} faults`);
+  }
   for (const entry of readdirSync(config.working_root, { withFileTypes: true })) {
-    if (entry.name === "orchestration.json") continue;
+    if (entry.name === "orchestration.json" || entry.name === "orchestration-inventory.json") continue;
     if (!entry.isDirectory() || entry.isSymbolicLink()) throw new Error("orchestration cleanup found ambiguous residue");
     const scenarioRoot = join(config.working_root, entry.name);
     if (readdirSync(scenarioRoot).length !== 0) throw new Error(`orchestration scenario residue remains: ${entry.name}`);
   }
+  inventory.state = "clean";
+  inventory.updated_at = new Date().toISOString();
+  atomicJson(config.inventory_path, inventory);
   rmSync(config.working_root, { recursive: true, force: false });
   return { status: "PASS", run_id: config.run_id, residue: [] };
 }
@@ -848,7 +1060,7 @@ async function main(args) {
       dockerImageRef: argument(args, "--docker-image-ref"), agentshareRoot: argument(args, "--agentshare-root"),
       managementGrpcPort: Number(argument(args, "--management-grpc-port")),
     });
-    process.stdout.write(`${JSON.stringify({ status: "PASS", config_path: result.path, run_id: result.config.run_id })}\n`);
+    process.stdout.write(`${JSON.stringify({ status: "PASS", config_path: result.path, inventory_path: result.inventoryPath, run_id: result.config.run_id })}\n`);
     return;
   }
   const observation = await executeOrchestrationDriver({

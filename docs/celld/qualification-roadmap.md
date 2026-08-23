@@ -44,6 +44,42 @@ Authoritative requirements are the 44-assertion RTM and test strategy in the
 adjacent AIWG corpus. The executable catalog and implementation contract live
 in `tests/celld/uat/scenarios.json` and `tests/celld/uat/README.md`.
 
+## Current delivery checkpoint
+
+The 2026-08-23 implementation audit changed the plan from "run the existing
+drivers" to "close their evidence-integrity gaps, then run them." Static or
+caller-authored values must not be promoted merely because the aggregate
+evaluator accepts their shape.
+
+| Work | State | Next promoting gate |
+|---|---|---|
+| #759–#762 | Closed foundation. | Preserve their exact evidence and optional-S3 boundary. |
+| #763 | Credential-launcher repair is delivered; the one failed live attempt was diagnosed and cleaned. | Exact-head required CI, manual mutsu Docker availability, then one approved-channel fleet retry with Titan idle. |
+| #764 | Not live-ready. The driver lacks durable mutation ownership, observed provider counters, per-trial owner faults, and complete heal evidence; UAT-006 also had a runtime scope defect. | Durable exact-run inventory and authorization first, then instrumented provider/fault evidence and injected campaign tests. |
+| #765 | Not live-ready. The required management-to-Celld mTLS proxy, certificate/bypass matrix, and directional partitions are absent; current aggregate counts can be self-authored. | Versioned evidence contract and run-scoped fault planner before proxy/partition mutation. |
+| #767 | Not live-ready. The alternate Worker deployment bypasses the fixed v0.2.1 credential launcher, rollback evidence is self-derived, and negative coverage is incomplete. | Reuse the protected launcher path, observe deployment/cell state, and preserve truthful UAT-009 `NOT_RUN`. |
+| #771 | Substantial state machine, but not crash-safe or independently runnable. Cutover is memory-only, dual authority is not observed from both write policies, and failure manifests are incomplete. | Durable phase/cutover journal, authority observations, complete metadata contract, and failure evidence. |
+
+The active dual-track iteration is therefore:
+
+1. **Delivery track:** close #763 only after the exact-head CI and operator host
+   prerequisite gates are green. Do not overlap its retry with construction
+   campaigns.
+2. **Construction track:** land #764's exact-run orchestration inventory. Every
+   provider resource and fault target is persisted before mutation, the
+   repository/workflow/run/host identity is bound, and all four scenarios need
+   explicit destructive authorization. This creates the crash-recovery seam;
+   it does not make #764 dispatchable by itself.
+3. Add observed provider-boundary counters, owner/epoch targeting, per-trial
+   fault barriers, timestamped raw timelines, and evaluator-owned FAIL records
+   for #764. Only then add an issue-scoped protected Titan lane.
+4. Follow with #765's pure evidence/fault-plan contract, #767's credential and
+   observation repair, and #771's durable cutover journal. Each receives an
+   independent capacity-one selection so one lane cannot suppress another's
+   evidence.
+5. Wave 4 and later work begins only from the accepted Wave 3 interfaces and
+   evidence contracts, not from the current aggregate placeholders.
+
 ## Procedure
 
 ### Delivery gates
@@ -160,6 +196,13 @@ or evidence from another:
 | #765 | Full listener/certificate/bypass matrix and directional management/store/peer partitions with healed-state cleanup. |
 | #767 | UAT 007/008 live Worker capability, rollback, loud rejection, and zero-host-effect evidence. |
 | #771 | Two-store quiesced migration, destination canary, pre-write rollback, post-write reverse migration, single authority, hashes, and cleanup. |
+
+The current consolidated workflow is not yet an independent-lane executor: it
+runs the offline migration before the complete catalog. Before any Wave 3 live
+dispatch, add a strict protected selection for #764, #765, #767, and #771 while
+retaining full UAT 003–015 as the default #772 release selection. A partial run
+may close only its selected issue and must retain the `partial-selection`
+label; it cannot claim consolidated qualification.
 
 Pinned Celld v0.2.1 cannot pass UAT-009 because it lacks all six required
 per-isolate resource controls. Do not weaken the RTM or advertise unverified
@@ -342,6 +385,10 @@ each Gitea issue.
 - 2026-08-22: Codex with Agentic Sandbox maintainers — dependency/readiness,
   test-plan, and #766 security-gap audits consolidated into this delivery
   roadmap. Applicable live host: Titan only.
-- Last verified: 2026-08-22 against `main` at
-  `f8244b457abc43b938f043f21cd38a95f269f4c8`; live qualification remains
-  pending.
+- 2026-08-23: Wave 3 implementation audit found non-promoting evidence gaps in
+  #764/#765/#767/#771. The first #764 construction slice was started at the
+  destructive-ownership boundary; none of these issues is authorized for live
+  credit yet.
+- Last audited parent baseline: 2026-08-23 against signed `main` at
+  `ac027fb00104c3c1fcf5fc52219ed7c0126741c6`; the resulting construction
+  commit still requires exact-head CI. Live qualification remains pending.

@@ -88,6 +88,8 @@ test("Celld qualification builds and enables the fixed live orchestration driver
   assert.match(workflow, /images\/container\/Dockerfile\.base/);
   assert.match(workflow, /CELLD_ORCHESTRATION_DOCKER_IMAGE_REF/);
   assert.match(workflow, /celld-live-orchestration\.mjs prepare/);
+  assert.match(workflow, /orchestration_inventory="\$\{orchestration_root\}\/orchestration-inventory\.json"/);
+  assert.match(workflow, /--arg inventory "\$\{orchestration_inventory\}"/);
   assert.match(workflow, /"celld-live-orchestration": \{enabled: true, config_path: \$orchestration_config\}/);
   assert.match(workflow, /"celld-live-worker": \{enabled: true, config_path: \$orchestration_config\}/);
   assert.match(workflow, /"celld-live-network-auth": \{enabled: true, config_path: \$orchestration_config\}/);

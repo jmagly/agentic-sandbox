@@ -27,6 +27,10 @@ Live automation uses two strict JSON contracts:
 - `live-orchestration-v1.schema.json` confines UAT 003-006 to the exact Titan
   run, reviewed libvirt and storage roots, job-scoped agentshare, immutable
   local Docker image ID, fixed management binary, and static callback relay.
+- `orchestration-inventory-v1.schema.json` binds every UAT 003-006 provider and
+  fault target to the exact repository, workflow, run, host, and protected
+  working root before mutation. Planned or applied entries survive driver
+  failure and block cleanup from claiming absence until reconciled.
 
 The three-node Titan fixture is managed by
 `scripts/celld-fleet-fixture.mjs`. Its crash-resumable inventory is persisted
@@ -35,18 +39,19 @@ multi-node`, publishes only Worker listeners on host loopback, and keeps the
 unauthenticated Celld internal listener unpublished. It does not change the
 operator-run boundary for UAT 016 and 017.
 
-`scripts/celld-live-orchestration.mjs` supplies the real QEMU/Docker lifecycle
-and provider-fault evidence for UAT 003-006. Each scenario creates its own
+`scripts/celld-live-orchestration.mjs` is the candidate QEMU/Docker lifecycle
+and provider-fault driver for UAT 003-006. It is not yet promoting live evidence:
+provider-boundary counters, per-trial owner/epoch targeting, complete fault
+barriers, and healed-baseline observations remain construction work under
+#764. Each scenario creates its own
 S3-backed three-node fleet, starts management on the private Docker bridge with
 required mTLS, keeps the callback certificate out of the admin allowlist, and
-records only hashed operation identities and sanitized measurements. UAT 003
-replays each lifecycle effect 10,000 times and injects hash collisions. UAT 004
-performs owner/management crash campaigns before, during, and after dispatch.
-UAT 005 arms an explicit one-shot post-effect response loss for every trial.
-UAT 006 pauses the callback relay while stale and future generations are
-fenced, then verifies the active provider checksum after healing. Fault
-scenarios require both workflow opt-in and exact run ownership before any
-fixture mutation.
+records hashed operation identities and sanitized measurements. The exact-run
+orchestration inventory is created with the config and is required by the live
+profile. All four scenarios—including UAT 003—require workflow opt-in, matching
+run ownership, and the matching protected inventory before any fixture
+mutation. Current aggregate fields must not be cited as live PASS evidence
+until the remaining observations and evaluators are complete.
 
 The catalog assigns each live assertion to one hardcoded driver ID. Driver
 programs and timeouts live in `scripts/celld-uat-live-protocol.mjs`; catalog and

@@ -5,7 +5,7 @@
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "schema_version", "run_id", "working_root", "management_binary_path", "agent_client_binary_path",
+    "schema_version", "run_id", "working_root", "inventory_path", "management_binary_path", "agent_client_binary_path",
     "callback_relay_binary_path", "docker_image_ref", "base_images_dir",
     "vm_storage_dir", "agentshare_root", "libvirt_uri", "management_grpc_port"
   ],
@@ -13,6 +13,7 @@
     "schema_version": { "const": "agentic-sandbox.celld-live-orchestration/v1" },
     "run_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
     "working_root": { "type": "string", "pattern": "^/dev/shm/" },
+    "inventory_path": { "type": "string", "pattern": "^/dev/shm/.+/orchestration-inventory\\.json$" },
     "management_binary_path": { "type": "string", "pattern": "^/" },
     "agent_client_binary_path": { "type": "string", "pattern": "^/" },
     "callback_relay_binary_path": { "type": "string", "pattern": "^/" },

@@ -150,12 +150,14 @@ jobs:
           live_profile="${fixture_root}/live-profile.json"
           orchestration_root="/dev/shm/agentic-celld-orchestration/${run_id}"
           orchestration_config="${orchestration_root}/orchestration.json"
+          orchestration_inventory="${orchestration_root}/orchestration-inventory.json"
           migration_destination_run_id="${run_id}-migration-destination"
           migration_destination_root="/dev/shm/agentic-celld-migration/${migration_destination_run_id}"
           {
             echo "CELLD_STORAGE_FIXTURE_CONFIG=${fixture_config}"
             echo "CELLD_STORAGE_LIVE_PROFILE=${live_profile}"
             echo "CELLD_ORCHESTRATION_CONFIG=${orchestration_config}"
+            echo "CELLD_ORCHESTRATION_INVENTORY=${orchestration_inventory}"
             echo "CELLD_MIGRATION_SOURCE_FLEET_CONFIG=${fixture_root}/fleet.json"
             echo "CELLD_MIGRATION_DESTINATION_RUN_ID=${migration_destination_run_id}"
             echo "CELLD_MIGRATION_DESTINATION_ROOT=${migration_destination_root}"
@@ -186,7 +188,7 @@ jobs:
             --arg run_id "${run_id}" \
             --arg git "${GITHUB_SHA}" \
             --arg host_sha256 "${host_sha256}" \
-            --arg inventory "${fixture_config}" \
+            --arg inventory "${orchestration_inventory}" \
             --arg config "${fixture_config}" \
             --arg orchestration_config "${orchestration_config}" \
             --argjson destructive_faults "${destructive_faults}" \

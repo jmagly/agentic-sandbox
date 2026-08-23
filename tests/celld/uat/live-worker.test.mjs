@@ -26,6 +26,7 @@ function orchestrationConfig(repoRoot) {
   return {
     schema_version: "agentic-sandbox.celld-live-orchestration/v1", run_id: "test-run",
     working_root: "/dev/shm/agentic-celld-orchestration/test-run",
+    inventory_path: "/dev/shm/agentic-celld-orchestration/test-run/orchestration-inventory.json",
     management_binary_path: `${repoRoot}/management/target/release/agentic-mgmt`,
     agent_client_binary_path: `${repoRoot}/management/target/release/agent-client`,
     callback_relay_binary_path: `${repoRoot}/tools/celld-callback-relay/target/x86_64-unknown-linux-musl/release/agentic-celld-callback-relay`,
