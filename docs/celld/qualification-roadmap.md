@@ -244,7 +244,10 @@ controls or record the #750 support decision as experimental/deferral.
    evidence sink outside the affected fleet. Execute all five runbooks twice,
    measure RPO <=300 seconds and RTO <=30 minutes, prove generation/tombstone
    equality and second-run idempotency, then read and hash-verify evidence after
-   fleet loss.
+   fleet loss. The persist-before-mutate recovery controller, two-restore/five-
+   runbook/four-evidence contract, corruption probes, and cleanup path are
+   implemented; the versioned snapshot and independent evidence-store adapter
+   remains a typed pre-mutation prerequisite.
 
 ### Wave 6 — consolidated qualification and release
 

@@ -1,0 +1,137 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentic-sandbox.dev/schemas/celld-recovery-evidence/v1",
+  "title": "Celld versioned restore and independent recovery evidence v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "run_id", "restores", "runbooks", "evidence", "baseline", "cleanup"],
+  "properties": {
+    "schema_version": { "const": "agentic-sandbox.celld-recovery-evidence/v1" },
+    "run_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
+    "restores": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["execution", "snapshot_version_id", "source_prefix", "restore_prefix", "isolated_restore", "quarantined", "source_writers_stopped", "restore_authority_exclusive", "latest_acknowledged_at_ms", "snapshot_captured_at_ms", "restore_started_at_ms", "restore_ready_at_ms", "generation_manifest_before_sha256", "generation_manifest_after_sha256", "tombstone_manifest_before_sha256", "tombstone_manifest_after_sha256"],
+        "properties": {
+          "execution": { "enum": [1, 2] },
+          "snapshot_version_id": { "type": "string", "minLength": 1 },
+          "source_prefix": { "type": "string", "minLength": 1 },
+          "restore_prefix": { "type": "string", "minLength": 1 },
+          "isolated_restore": { "const": true },
+          "quarantined": { "const": true },
+          "source_writers_stopped": { "const": true },
+          "restore_authority_exclusive": { "const": true },
+          "latest_acknowledged_at_ms": { "$ref": "#/$defs/timestamp" },
+          "snapshot_captured_at_ms": { "$ref": "#/$defs/timestamp" },
+          "restore_started_at_ms": { "$ref": "#/$defs/timestamp" },
+          "restore_ready_at_ms": { "$ref": "#/$defs/timestamp" },
+          "generation_manifest_before_sha256": { "$ref": "#/$defs/hash" },
+          "generation_manifest_after_sha256": { "$ref": "#/$defs/hash" },
+          "tombstone_manifest_before_sha256": { "$ref": "#/$defs/hash" },
+          "tombstone_manifest_after_sha256": { "$ref": "#/$defs/hash" }
+        }
+      }
+    },
+    "runbooks": {
+      "type": "array",
+      "minItems": 5,
+      "maxItems": 5,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["runbook", "executions", "healed", "cleanup_verified"],
+        "properties": {
+          "runbook": { "enum": ["node_loss", "full_restart", "authorization_loss", "snapshot_restore", "credential_rotation"] },
+          "executions": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 2,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["ordinal", "operation_ids", "lifecycle_effect_ids", "state_sha256_after"],
+              "properties": {
+                "ordinal": { "enum": [1, 2] },
+                "operation_ids": { "$ref": "#/$defs/nonemptyUniqueStrings" },
+                "lifecycle_effect_ids": { "$ref": "#/$defs/nonemptyUniqueStrings" },
+                "state_sha256_after": { "$ref": "#/$defs/hash" }
+              }
+            }
+          },
+          "healed": { "const": true },
+          "cleanup_verified": { "const": true }
+        }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["affected_fleet_store_id", "external_evidence_store_id", "artifacts", "affected_fleet_unavailable", "external_evidence_store_reachable", "manifest_verified", "malicious_runner_tamper_proof_claimed"],
+      "properties": {
+        "affected_fleet_store_id": { "type": "string", "minLength": 1 },
+        "external_evidence_store_id": { "type": "string", "minLength": 1 },
+        "artifacts": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["kind", "storage_authority_id", "bytes", "sha256", "retained", "downloaded_sha256", "corruption_probe", "read_after_fleet_loss"],
+            "properties": {
+              "kind": { "enum": ["snapshot_identity", "restore_timeline", "generation_comparison", "evidence_manifest"] },
+              "storage_authority_id": { "type": "string", "minLength": 1 },
+              "bytes": { "type": "integer", "minimum": 1 },
+              "sha256": { "$ref": "#/$defs/hash" },
+              "retained": { "const": true },
+              "downloaded_sha256": { "$ref": "#/$defs/hash" },
+              "corruption_probe": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["tampered_sha256", "detected"],
+                "properties": {
+                  "tampered_sha256": { "$ref": "#/$defs/hash" },
+                  "detected": { "const": true }
+                }
+              },
+              "read_after_fleet_loss": { "const": true }
+            }
+          }
+        },
+        "affected_fleet_unavailable": { "const": true },
+        "external_evidence_store_reachable": { "const": true },
+        "manifest_verified": { "const": true },
+        "malicious_runner_tamper_proof_claimed": { "const": false }
+      }
+    },
+    "baseline": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["baseline_sha256", "restored"],
+      "properties": { "baseline_sha256": { "$ref": "#/$defs/hash" }, "restored": { "const": true } }
+    },
+    "cleanup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "active_restore_authority", "source_writers_stopped", "affected_fleet_unavailable", "restore_fixtures_removed", "snapshot_resources_removed", "external_evidence_retained"],
+      "properties": {
+        "status": { "const": "passed" },
+        "active_restore_authority": { "const": false },
+        "source_writers_stopped": { "const": false },
+        "affected_fleet_unavailable": { "const": false },
+        "restore_fixtures_removed": { "const": true },
+        "snapshot_resources_removed": { "const": true },
+        "external_evidence_retained": { "const": true }
+      }
+    }
+  },
+  "$defs": {
+    "hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "timestamp": { "type": "integer", "minimum": 0 },
+    "nonemptyUniqueStrings": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "minLength": 1 } }
+  }
+}
