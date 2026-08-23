@@ -55,7 +55,7 @@ evaluator accepts their shape.
 |---|---|---|
 | #759–#762 | Closed foundation. | Preserve their exact evidence and optional-S3 boundary. |
 | #763 | Credential-launcher repair is delivered; the one failed live attempt was diagnosed and cleaned. | Exact-head required CI, manual mutsu Docker availability, then one approved-channel fleet retry with Titan idle. |
-| #764 | Not live-ready. Exact-run mutation ownership and the UAT-006 runtime scope repair are delivered. A durable management-side dispatch count replaces literal UAT-003/UAT-005 provider counts and remains stable across replay/restart; UAT-003 joins it to exact-owned, timestamped Docker/libvirt identity, configuration, and lifecycle-state observations. UAT-004 now targets the owner reported by the pinned private Celld route, requires an agreed epoch advance plus three-node heal, and joins unchanged external provider state, but still groups 100 intents behind one fault. | Extend external provider-state joins to UAT-005/006, then replace grouped fault batches with independently timed per-trial crash barriers and timelines. |
+| #764 | Not live-ready. Exact-run mutation ownership and the UAT-006 runtime scope repair are delivered. A durable management-side dispatch count replaces literal provider counts and remains stable across replay/restart; UAT-003/004/005/006 now join their assertions to exact-owned, timestamped Docker/libvirt identity, configuration, and lifecycle state. UAT-004 targets the owner reported by the pinned private Celld route and requires an agreed epoch advance plus three-node heal, but still groups 100 intents behind one fault. UAT-006 consumes management's product-generated zero dispatch delta for generation-fenced callbacks. | Replace grouped UAT-004 fault batches with independently timed per-trial crash barriers/timelines and prove each crash-point timing seam before live dispatch. |
 | #765 | Not live-ready. The required management-to-Celld mTLS proxy, certificate/bypass matrix, and directional partitions are absent; current aggregate counts can be self-authored. | Versioned evidence contract and run-scoped fault planner before proxy/partition mutation. |
 | #767 | Not live-ready. The alternate Worker deployment bypasses the fixed v0.2.1 credential launcher, rollback evidence is self-derived, and negative coverage is incomplete. | Reuse the protected launcher path, observe deployment/cell state, and preserve truthful UAT-009 `NOT_RUN`. |
 | #771 | Substantial state machine, but not crash-safe or qualification-ready. Cutover is memory-only, dual authority is not observed from both write policies, and failure manifests are incomplete. | Durable phase/cutover journal, authority observations, complete metadata contract, and failure evidence. |
@@ -70,10 +70,10 @@ The active dual-track iteration is therefore:
    repository/workflow/run/host identity is bound, and all four scenarios need
    explicit destructive authorization. This creates the crash-recovery seam;
    it does not make #764 dispatchable by itself.
-3. Extend the delivered durable provider-dispatch count and UAT-003/UAT-004
-   external provider-state joins across response-loss/fencing cases; retain
-   the delivered owner/epoch targeting while replacing grouped batches with
-   independently timed per-trial fault barriers and raw timelines, and add
+3. Retain the delivered provider-dispatch and external provider-state joins,
+   and the owner/epoch targeting, while replacing grouped UAT-004 batches with
+   independently timed per-trial fault barriers and raw timelines. Prove the
+   accept-before/during/after timing seams and add
    evaluator-owned FAIL records for #764. Only then run its existing
    issue-scoped protected Titan lane.
 4. Follow with #765's pure evidence/fault-plan contract, #767's credential and

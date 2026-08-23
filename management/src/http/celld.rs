@@ -451,24 +451,28 @@ fn auth_error_response(auth_error: AuthError) -> Response {
 }
 
 fn ledger_error_response(ledger_error: EffectLedgerError) -> Response {
-    let (status, code) = match ledger_error {
-        EffectLedgerError::Collision => (StatusCode::CONFLICT, "celld.operation_collision"),
+    let (status, code, pre_provider_rejection) = match ledger_error {
+        EffectLedgerError::Collision => (StatusCode::CONFLICT, "celld.operation_collision", false),
         EffectLedgerError::StaleGeneration { .. } => {
-            (StatusCode::CONFLICT, "celld.stale_generation_fenced")
+            (StatusCode::CONFLICT, "celld.stale_generation_fenced", true)
         }
         EffectLedgerError::FutureGeneration { .. }
         | EffectLedgerError::GenerationAdvanceNotAllowed => {
-            (StatusCode::CONFLICT, "celld.future_generation_fenced")
+            (StatusCode::CONFLICT, "celld.future_generation_fenced", true)
         }
-        EffectLedgerError::UnknownInstance(_) => {
-            (StatusCode::CONFLICT, "celld.instance_generation_unknown")
-        }
+        EffectLedgerError::UnknownInstance(_) => (
+            StatusCode::CONFLICT,
+            "celld.instance_generation_unknown",
+            true,
+        ),
         EffectLedgerError::TerminalConflict { .. } => {
-            (StatusCode::CONFLICT, "celld.terminal_conflict")
+            (StatusCode::CONFLICT, "celld.terminal_conflict", false)
         }
-        EffectLedgerError::ManagementOperationConflict => {
-            (StatusCode::CONFLICT, "celld.management_operation_collision")
-        }
+        EffectLedgerError::ManagementOperationConflict => (
+            StatusCode::CONFLICT,
+            "celld.management_operation_collision",
+            false,
+        ),
         EffectLedgerError::Database(_)
         | EffectLedgerError::Io(_)
         | EffectLedgerError::InsecurePermissions
@@ -476,12 +480,26 @@ fn ledger_error_response(ledger_error: EffectLedgerError) -> Response {
         | EffectLedgerError::CorruptRecord(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             "celld.effect_ledger_failed",
+            false,
         ),
     };
+    if pre_provider_rejection {
+        return (
+            status,
+            Json(json!({
+                "error": {
+                    "code": code,
+                    "detail": "effect callback was rejected before a new provider effect",
+                },
+                "provider_dispatch_count_delta": 0,
+            })),
+        )
+            .into_response();
+    }
     error(
         status,
         code,
-        "effect callback was rejected before a new provider effect",
+        "effect callback did not create a new provider effect",
     )
 }
 
@@ -1035,6 +1053,16 @@ mod tests {
             CellCommand::new("op-stale", "instance-a", 1, CellAction::Stop, json!({})).unwrap();
         let (_, stale_body) = callback_json(&app, &stale).await;
         assert_eq!(stale_body["error"]["code"], "celld.stale_generation_fenced");
+        assert_eq!(stale_body["provider_dispatch_count_delta"], 0);
+
+        let future =
+            CellCommand::new("op-future", "instance-a", 4, CellAction::Stop, json!({})).unwrap();
+        let (_, future_body) = callback_json(&app, &future).await;
+        assert_eq!(
+            future_body["error"]["code"],
+            "celld.future_generation_fenced"
+        );
+        assert_eq!(future_body["provider_dispatch_count_delta"], 0);
         assert_eq!(dispatcher.calls.load(Ordering::SeqCst), 3);
     }
 

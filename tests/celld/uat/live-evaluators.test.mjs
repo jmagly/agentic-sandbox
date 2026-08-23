@@ -146,23 +146,29 @@ const responseLossCases = matrixCases({ substrate: substrates, action: lifecycle
   attempts: 3,
   unknown_observed: true,
   convergence_ms: 30_000,
+  provider_before: providerFixture(entry.substrate, providerStates[entry.substrate][entry.action][0], index * 2),
+  provider_after: providerFixture(entry.substrate, providerStates[entry.substrate][entry.action][1], index * 2 + 1),
 }));
 const staleCases = matrixCases({ substrate: substrates, action: ["stop", "destroy"], trial: Array.from({ length: 100 }, (_, index) => index + 1) }, (entry, index) => ({
   ...entry,
   operation_id_sha256: uniqueDigest(index),
   response_status: 409,
   response_code: "celld.stale_generation_fenced",
-  provider_effects: 0,
+  provider_dispatch_count_delta_observed: true,
+  provider_dispatch_count_delta: 0,
+  provider_before: providerFixture(entry.substrate, providerStates[entry.substrate].provision[1], index * 2),
+  provider_after: providerFixture(entry.substrate, providerStates[entry.substrate].provision[1], index * 2 + 1),
 }));
 const activeGenerationCases = substrates.map((substrate, index) => ({
   substrate,
   future_response_status: 409,
   future_response_code: "cell.generation_fenced",
-  active_checksum_before: uniqueDigest(index),
-  active_checksum_after: uniqueDigest(index),
+  provider_before: providerFixture(substrate, providerStates[substrate].provision[1], index * 2),
+  provider_after: providerFixture(substrate, providerStates[substrate].provision[1], index * 2 + 1),
   partition_applied: true,
   partition_healed: true,
   baseline_after_heal_succeeded: true,
+  baseline_provider_dispatch_count: 1,
 }));
 
 const protectedCredentials = credentialKinds.map((secretKind, index) => ({
@@ -382,7 +388,7 @@ test("trusted formulas reject threshold, uniqueness, isolation, and recovery vio
   const cases = [
     ["CELLD.003.ONE_EFFECT", { cases: replayCases.map((entry, index) => index === 0 ? { ...entry, provider_dispatch_count: 2 } : entry) }],
     ["CELLD.004.RECOVERY", { cases: restartCases.map((entry) => ({ ...entry, recovery_ms: 30_001 })) }],
-    ["CELLD.006.PRE_PROVIDER", { cases: staleCases.map((entry, index) => index === 0 ? { ...entry, provider_effects: 1 } : entry) }],
+    ["CELLD.006.PRE_PROVIDER", { cases: staleCases.map((entry, index) => index === 0 ? { ...entry, provider_dispatch_count_delta: 1 } : entry) }],
     ["CELLD.007.CLAIMS", { not_run_cases: 1, passed_cases: 7 }],
     ["CELLD.008.NO_SIDE_EFFECT", { sockets_created: 1 }],
     ["CELLD.009.NEIGHBOR", { adjacent_successes: 9_899 }],
@@ -434,6 +440,18 @@ test("orchestration formulas reject aggregate-only, incomplete, duplicate, and a
   const amplifiedResponseLoss = structuredClone(passing["CELLD.005.NO_SECOND_EFFECT"]);
   amplifiedResponseLoss.cases[0].attempts = 4;
   assert.equal(TEST_LIVE_EVALUATORS["CELLD.005.NO_SECOND_EFFECT"](amplifiedResponseLoss).passed, false);
+
+  const responseLossProviderDrift = structuredClone(passing["CELLD.005.NO_SECOND_EFFECT"]);
+  responseLossProviderDrift.cases[0].provider_after.state = "running";
+  assert.equal(TEST_LIVE_EVALUATORS["CELLD.005.NO_SECOND_EFFECT"](responseLossProviderDrift).passed, false);
+
+  const staleProviderDrift = structuredClone(passing["CELLD.006.PRE_PROVIDER"]);
+  staleProviderDrift.cases[0].provider_after.configuration_sha256 = uniqueDigest(9_200);
+  assert.equal(TEST_LIVE_EVALUATORS["CELLD.006.PRE_PROVIDER"](staleProviderDrift).passed, false);
+
+  const futureProviderDrift = structuredClone(passing["CELLD.006.ACTIVE_SAFE"]);
+  futureProviderDrift.cases[0].provider_after.provider_identity_sha256 = uniqueDigest(9_201);
+  assert.equal(TEST_LIVE_EVALUATORS["CELLD.006.ACTIVE_SAFE"](futureProviderDrift).passed, false);
 
   const unstableTerminalResult = structuredClone(passing["CELLD.003.ONE_EFFECT"]);
   unstableTerminalResult.cases[0].replay_result_matches = 9_999;

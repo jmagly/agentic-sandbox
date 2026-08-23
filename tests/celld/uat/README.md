@@ -162,8 +162,12 @@ It also requires the three-node route view, unchanged exact-owned provider
 identity/configuration/running state, and a one-dispatch healed control after
 restart. The current driver still groups 100 intents behind each fault;
 that is not independent per-trial crash-point evidence and remains
-non-promoting. Collision, stale-generation, and future-generation cases must
-carry their typed rejection.
+non-promoting. UAT-005 joins every response-loss recovery to the exact external
+lifecycle transition. UAT-006 replaces its literal zero with management's
+generation-fence `provider_dispatch_count_delta`, requires unchanged external
+provider identity/configuration/state across stale and future attempts, and
+runs a one-dispatch control after healing. Collision, stale-generation, and
+future-generation cases must carry their typed rejection.
 Response-loss reconciliation is bounded to three attempts per logical command,
 and fault scenarios pass only after the relay, fleet membership, provider
 inventory, and active-generation checksum gates report the healed baseline.

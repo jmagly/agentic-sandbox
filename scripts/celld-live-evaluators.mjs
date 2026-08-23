@@ -369,13 +369,20 @@ const ALL_LIVE_EVALUATORS = Object.freeze({
     const m = object(raw);
     const matrix = exactCaseMatrix(m.cases, "cases", { substrate: substrates, action: lifecycleActions, trial: Array.from({ length: 100 }, (_, index) => index + 1) });
     const p95 = percentile(matrix.cases.map((entry) => entry.convergence_ms), 0.95, "convergence_ms");
+    const providerTargets = new Map(substrates.map((substrate) => [substrate, new Set()]));
     const passed = matrix.complete
-      && matrix.cases.every((entry, index) => integer(entry.effect_records, `cases[${index}].effect_records`) === 1
-        && integer(entry.management_replay_status, `cases[${index}].management_replay_status`) === 200
-        && boolean(entry.management_replay_terminal_matches, `cases[${index}].management_replay_terminal_matches`)
-        && boolean(entry.provider_dispatch_count_observed, `cases[${index}].provider_dispatch_count_observed`)
-        && integer(entry.provider_dispatch_count, `cases[${index}].provider_dispatch_count`) === 1
-        && integer(entry.attempts, `cases[${index}].attempts`, 1) <= 3)
+      && matrix.cases.every((entry, index) => {
+        const transition = providerTransition(entry, index);
+        providerTargets.get(entry.substrate).add(transition.target);
+        return integer(entry.effect_records, `cases[${index}].effect_records`) === 1
+          && integer(entry.management_replay_status, `cases[${index}].management_replay_status`) === 200
+          && boolean(entry.management_replay_terminal_matches, `cases[${index}].management_replay_terminal_matches`)
+          && boolean(entry.provider_dispatch_count_observed, `cases[${index}].provider_dispatch_count_observed`)
+          && integer(entry.provider_dispatch_count, `cases[${index}].provider_dispatch_count`) === 1
+          && integer(entry.attempts, `cases[${index}].attempts`, 1) <= 3
+          && transition.passed;
+      })
+      && substrates.every((substrate) => providerTargets.get(substrate).size === 1)
       && p95 <= 30_000
       && boolean(m.proxy_healed, "proxy_healed");
     return evaluated({ ...m, derived_p95_ms: p95 }, passed, "unknown outcomes converge without a second provider dispatch");
@@ -386,9 +393,17 @@ const ALL_LIVE_EVALUATORS = Object.freeze({
     const operationIds = new Set();
     const passed = matrix.complete && matrix.cases.every((entry, index) => {
       operationIds.add(sha256Digest(entry.operation_id_sha256, `cases[${index}].operation_id_sha256`));
+      const before = providerObservation(entry.provider_before, `cases[${index}].provider_before`, entry.substrate);
+      const after = providerObservation(entry.provider_after, `cases[${index}].provider_after`, entry.substrate);
       return integer(entry.response_status, `cases[${index}].response_status`) === 409
         && string(entry.response_code, `cases[${index}].response_code`) === "celld.stale_generation_fenced"
-        && integer(entry.provider_effects, `cases[${index}].provider_effects`) === 0;
+        && boolean(entry.provider_dispatch_count_delta_observed, `cases[${index}].provider_dispatch_count_delta_observed`)
+        && integer(entry.provider_dispatch_count_delta, `cases[${index}].provider_dispatch_count_delta`) === 0
+        && before.present
+        && before.state === lifecycleProviderStates[entry.substrate].provision[1]
+        && before.providerStoragePresent === (entry.substrate === "qemu")
+        && before.observedAt <= after.observedAt
+        && sameProviderObservation(before, after);
     }) && operationIds.size === matrix.cases.length;
     return evaluated(m, passed, "stale destructive commands are fenced before provider dispatch");
   },
@@ -396,14 +411,19 @@ const ALL_LIVE_EVALUATORS = Object.freeze({
     const m = object(raw);
     const matrix = exactCaseMatrix(m.cases, "cases", { substrate: substrates });
     const passed = matrix.complete && matrix.cases.every((entry, index) => {
-      const before = sha256Digest(entry.active_checksum_before, `cases[${index}].active_checksum_before`);
-      const after = sha256Digest(entry.active_checksum_after, `cases[${index}].active_checksum_after`);
+      const before = providerObservation(entry.provider_before, `cases[${index}].provider_before`, entry.substrate);
+      const after = providerObservation(entry.provider_after, `cases[${index}].provider_after`, entry.substrate);
       return integer(entry.future_response_status, `cases[${index}].future_response_status`) === 409
         && string(entry.future_response_code, `cases[${index}].future_response_code`) === "cell.generation_fenced"
-        && before === after
+        && before.present
+        && before.state === lifecycleProviderStates[entry.substrate].provision[1]
+        && before.providerStoragePresent === (entry.substrate === "qemu")
+        && before.observedAt <= after.observedAt
+        && sameProviderObservation(before, after)
         && boolean(entry.partition_applied, `cases[${index}].partition_applied`)
         && boolean(entry.partition_healed, `cases[${index}].partition_healed`)
-        && boolean(entry.baseline_after_heal_succeeded, `cases[${index}].baseline_after_heal_succeeded`);
+        && boolean(entry.baseline_after_heal_succeeded, `cases[${index}].baseline_after_heal_succeeded`)
+        && integer(entry.baseline_provider_dispatch_count, `cases[${index}].baseline_provider_dispatch_count`) === 1;
     });
     return evaluated(m, passed, "stale and future actors cannot alter the active generation");
   },

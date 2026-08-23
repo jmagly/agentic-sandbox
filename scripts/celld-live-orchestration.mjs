@@ -1027,6 +1027,8 @@ async function runUat005(runtime, timeline) {
     for (let generation = 1; generation <= 100; generation += 1) {
       const payloads = { provision: provisionPayload(runtime.config, substrate, name), start: {}, stop: {}, destroy: {} };
       for (const action of ACTIONS) {
+        if (action === "provision") planProviderResource(runtime, { instanceId, name, substrate });
+        const providerBefore = observeOrchestrationProvider(runtime, { instanceId, name, substrate });
         const responseLossFault = await applyPlannedOrchestrationFault(runtime, { kind: "callback_response_loss", target: relayName(runtime.fleet) }, () => run("docker", ["kill", "--signal", "SIGUSR1", relayName(runtime.fleet)]));
         const id = operationId("uat005", substrate, generation, action);
         const started = Date.now();
@@ -1035,6 +1037,7 @@ async function runUat005(runtime, timeline) {
         const terminal = await waitCellEffect(runtime, instanceId, generation, id, ["succeeded", "failed", "rejected"]);
         if (terminal.effect.status !== "succeeded") throw new Error(`${substrate} ${action} response-loss recovery failed`);
         const managementReplay = await callbackRequest(callbackContext(runtime.fleet, runtime.managementHost, instanceId, generation), originalEffect);
+        const providerAfter = observeOrchestrationProvider(runtime, { instanceId, name, substrate });
         const record = {
           substrate,
           action,
@@ -1050,6 +1053,8 @@ async function runUat005(runtime, timeline) {
           attempts: terminal.effect.attempts,
           unknown_observed: true,
           convergence_ms: Date.now() - started,
+          provider_before: providerBefore,
+          provider_after: providerAfter,
         };
         cases.push(record);
         timeline.push({ scenario: "UAT-CELLD-005", kind: "response_loss_trial", ...record });
@@ -1068,13 +1073,6 @@ async function runUat005(runtime, timeline) {
   };
 }
 
-function providerChecksum(runtime, substrate, name, instanceId) {
-  if (substrate === "qemu") return sha256(run("virsh", ["-c", runtime.config.libvirt_uri, "dumpxml", name]));
-  const ids = run("docker", ["ps", "--all", "--filter", `label=agentic-instance-id=${instanceId}`, "--format", "{{.ID}}"]);
-  if (!ids || ids.split(/\r?\n/).length !== 1) throw new Error("active Docker inventory is missing or ambiguous");
-  return sha256(run("docker", ["inspect", "--format", "{{.Id}}|{{.State.Status}}|{{.Config.Image}}", ids]));
-}
-
 async function runUat006(runtime, timeline) {
   const staleCases = [];
   const activeCases = [];
@@ -1083,7 +1081,7 @@ async function runUat006(runtime, timeline) {
     const name = `celld-fence-${substrate}-${sha256(`${runtime.runId}:006`).slice(0, 9)}`;
     for (const action of ACTIONS) await runOneEffectCampaign(runtime, { prefix: "uat006-old", substrate, instanceId, generation: 1, action, payload: action === "provision" ? provisionPayload(runtime.config, substrate, name) : {} });
     await runOneEffectCampaign(runtime, { prefix: "uat006-active", substrate, instanceId, generation: 2, action: "provision", payload: provisionPayload(runtime.config, substrate, name) });
-    const before = providerChecksum(runtime, substrate, name, instanceId);
+    const providerBefore = observeOrchestrationProvider(runtime, { instanceId, name, substrate });
     const partitionFault = await applyPlannedOrchestrationFault(runtime, { kind: "callback_relay_pause", target: relayName(runtime.fleet) }, () => run("docker", ["pause", relayName(runtime.fleet)]));
     let future;
     try {
@@ -1100,7 +1098,8 @@ async function runUat006(runtime, timeline) {
             operation_id_sha256: sha256(id),
             response_status: response.status,
             response_code: response.body?.error?.code ?? "missing",
-            provider_effects: 0,
+            provider_dispatch_count_delta_observed: Number.isInteger(response.body?.provider_dispatch_count_delta),
+            provider_dispatch_count_delta: response.body?.provider_dispatch_count_delta ?? -1,
           });
         }
       }
@@ -1109,21 +1108,34 @@ async function runUat006(runtime, timeline) {
     } finally {
       await healPlannedOrchestrationFault(runtime, partitionFault, () => run("docker", ["unpause", relayName(runtime.fleet)]));
     }
-    const after = providerChecksum(runtime, substrate, name, instanceId);
+    const baseline = await runOneEffectCampaign(runtime, {
+      prefix: "uat006-heal",
+      substrate,
+      instanceId,
+      generation: 2,
+      action: "observe",
+      payload: { substrate, healed_control: true },
+    });
+    const providerAfter = observeOrchestrationProvider(runtime, { instanceId, name, substrate });
     await runOneEffectCampaign(runtime, { prefix: "uat006-clean", substrate, instanceId, generation: 2, action: "destroy", payload: {} });
     const partitionHealed = run("docker", ["inspect", "--format", "{{.State.Running}}", relayName(runtime.fleet)]) === "true";
     const activeCase = {
       substrate,
       future_response_status: future.status,
       future_response_code: future.body.error.code,
-      active_checksum_before: before,
-      active_checksum_after: after,
+      provider_before: providerBefore,
+      provider_after: providerAfter,
       partition_applied: true,
       partition_healed: partitionHealed,
-      baseline_after_heal_succeeded: true,
+      baseline_after_heal_succeeded: baseline.terminal.status === "succeeded",
+      baseline_provider_dispatch_count: baseline.terminal.provider_dispatch_count,
     };
     activeCases.push(activeCase);
-    timeline.push(...staleCases.filter((entry) => entry.substrate === substrate).map((entry) => ({ scenario: "UAT-CELLD-006", kind: "stale_trial", ...entry })));
+    for (const entry of staleCases.filter((candidate) => candidate.substrate === substrate)) {
+      entry.provider_before = providerBefore;
+      entry.provider_after = providerAfter;
+      timeline.push({ scenario: "UAT-CELLD-006", kind: "stale_trial", ...entry });
+    }
     timeline.push({ scenario: "UAT-CELLD-006", kind: "active_generation_case", ...activeCase });
   }
   return {
