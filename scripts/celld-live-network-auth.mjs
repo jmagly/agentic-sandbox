@@ -27,7 +27,7 @@ const PROBE_CONCURRENCY = 32;
 const MTLS_PROXY_PORT = 8443;
 const SCENARIOS = new Set(["UAT-CELLD-010", "UAT-CELLD-012"]);
 const NODE_PROBE_IMAGE = "docker.io/library/node:20@sha256:8f693eaa7e0a8e71560c9a82b55fd54c2ae920a2ba5d2cde28bac7d1c01c9ba5";
-const DENIAL_CLASSES = ["forged_body", "forged_mac", "stale_timestamp", "nonce_replay", "wrong_key", "zero_generation", "wrong_generation", "public_or_cross_fleet"];
+const DENIAL_CLASSES = ["forged_body", "forged_mac", "stale_timestamp", "nonce_replay", "wrong_key", "zero_generation", "wrong_generation", "public_route", "cross_fleet_request"];
 const PARTITION_BOUNDARIES = new Map([
   ["management_to_celld", "celld_management"],
   ["celld_to_management", "celld_management"],
@@ -743,7 +743,7 @@ async function negativeRequest(endpoint, keyring, kind, attempt) {
   } else if (kind === "wrong_key") headers = signedHeaders({ method: "POST", path, operationId, generation: 1, body, keyId: keyring.keyId, key: randomBytes(32).toString("hex") });
   else if (kind === "zero_generation") headers = signedHeaders({ method: "POST", path, operationId, generation: 0, body, ...keyring });
   else if (kind === "wrong_generation") headers["x-agentic-generation"] = "2";
-  else if (kind === "public_or_cross_fleet") headers = {};
+  else if (kind === "public_route" || kind === "cross_fleet_request") headers = {};
   if (kind === "nonce_replay") {
     const getPath = `/instance-cells/replay-${attempt}`;
     const getHeaders = signedHeaders({ method: "GET", path: getPath, operationId, generation: 1, body: "", ...keyring });
@@ -887,7 +887,7 @@ async function runAuthentication(runtime, timeline) {
   if (providerEffects < 0) throw new Error("management provider counter regressed during authentication probes");
   timeline.push({ scenario: "UAT-CELLD-012", valid_operation_sha256: sha256(validOperation), status: valid.status, code: valid.code, provider_counter: { source: "management-effect-ledger", before: providerBefore, after: providerAfter, delta: providerEffects } });
   return { assertions: [
-    { id: "CELLD.012.DENIAL", measurements: { classes: DENIAL_CLASSES, attempts_per_class: 1_000, attempts: 8_000, denied, provider_counter_observed: true, provider_counter_before: providerBefore, provider_counter_after: providerAfter, provider_effects: providerEffects, probe_concurrency_limit: PROBE_CONCURRENCY, probe_max_in_flight: probeStatistics.max_in_flight } },
+    { id: "CELLD.012.DENIAL", measurements: { classes: DENIAL_CLASSES, attempts_per_class: 1_000, attempts: 9_000, denied, provider_counter_observed: true, provider_counter_before: providerBefore, provider_counter_after: providerAfter, provider_effects: providerEffects, probe_concurrency_limit: PROBE_CONCURRENCY, probe_max_in_flight: probeStatistics.max_in_flight } },
     { id: "CELLD.012.VALID", measurements: { attempts: 1, successes: 1, correlated: true, signature_value_absent: valid.restricted_absent, identity_removed: false } },
   ], metrics: [{ name: "signed_negative_denials", value: denied, unit: "requests" }], faults: [{ kind: "signed_authentication_negative_matrix", classes: DENIAL_CLASSES.length }] };
 }

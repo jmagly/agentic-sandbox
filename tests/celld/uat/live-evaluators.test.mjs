@@ -14,7 +14,7 @@ const crashPoints = ["before_dispatch", "during_dispatch", "after_dispatch"];
 const excluded = ["process", "pty", "workspace", "filesystem", "raw_network", "vm", "container", "host_api"];
 const advertised = ["fetch", "rpc", "storage", "alarm", "websocket", "outbound_https", "wasm", "assets"];
 const limits = ["cpu", "memory", "request_rate", "storage", "resident_cells", "outbound"];
-const denials = ["forged_body", "forged_mac", "stale_timestamp", "nonce_replay", "wrong_key", "zero_generation", "wrong_generation", "public_or_cross_fleet"];
+const denials = ["forged_body", "forged_mac", "stale_timestamp", "nonce_replay", "wrong_key", "zero_generation", "wrong_generation", "public_route", "cross_fleet_request"];
 const credentialKinds = ["s3_access_identity", "request_hmac", "mtls_identity", "celld_peer_secret", "fixture_administrator"];
 const credentialScanSurfaces = ["argv", "captured_env", "shell_trace", "logs", "crash_artifacts", "persistent_scratch", "support_evidence"];
 const credentialActivationMethods = {
@@ -360,7 +360,7 @@ const passing = {
   "CELLD.011.BUDGET": { nodes_expected: 3, max_unavailable_observed: 1, reserve_consumed: 0, membership_healthy: true },
   "CELLD.011.SAFETY": { lost_intents: 0, duplicate_effects: 0, stale_effects: 0, reconcile_p95_ms: 30_000, approved_digests_restored: true },
   "CELLD.011.REFUSAL": { refused: true, node_mutations: 0, inventory_sha256_before: hash("c"), inventory_sha256_after: hash("c") },
-  "CELLD.012.DENIAL": { classes: denials, attempts_per_class: 1_000, attempts: 8_000, denied: 8_000, provider_counter_observed: true, provider_counter_before: 9, provider_counter_after: 9, provider_effects: 0 },
+  "CELLD.012.DENIAL": { classes: denials, attempts_per_class: 1_000, attempts: 9_000, denied: 9_000, provider_counter_observed: true, provider_counter_before: 9, provider_counter_after: 9, provider_effects: 0 },
   "CELLD.012.VALID": { attempts: 1, successes: 1, correlated: true, signature_value_absent: true, identity_removed: true },
   "CELLD.013.NO_LEAK": { protected_credentials: protectedCredentials, scans: credentialScans, unprotected_secret_files: 0, evidence_secret_findings: 0, all_disposable_secrets_removed: true },
   "CELLD.013.SCOPE": { lifecycles: credentialLifecycles, scope_mode: "per_fleet_bucket", shared_prefix_claimed: false, source_bucket_sha256: sourceBucketSha256, other_fleet_bucket_count: 2, cross_scope_cases: crossScopeCases, hmac_canary_succeeded: true, old_hmac_revoked_after_canary: true, revoked_hmac_denied: true, failed_canary_restored_original: true, original_config_sha256: uniqueDigest(4_100), candidate_config_sha256: uniqueDigest(4_101), restored_config_sha256: uniqueDigest(4_100), active_path_healthy: true },

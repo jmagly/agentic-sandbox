@@ -68,7 +68,7 @@
             "public_internal", "same_fleet", "cross_fleet", "peer", "management", "store", "cross_scope_store",
             "wrong_san", "wrong_cn", "public_root", "environment_proxy", "expired_certificate", "proxy_bypass",
             "forged_body", "forged_mac", "stale_timestamp", "nonce_replay", "wrong_key", "zero_generation",
-            "wrong_generation", "public_route", "cross_fleet_request", "public_or_cross_fleet", "valid_private_control"
+            "wrong_generation", "public_route", "cross_fleet_request", "valid_private_control"
           ]
         },
         "attempt": { "type": "integer", "minimum": 0 },
