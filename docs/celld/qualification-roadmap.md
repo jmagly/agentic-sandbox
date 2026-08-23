@@ -56,7 +56,7 @@ evaluator accepts their shape.
 | #759–#762 | Closed foundation. | Preserve their exact evidence and optional-S3 boundary. |
 | #763 | Credential-launcher repair is delivered; the one failed live attempt was diagnosed and cleaned. | Exact-head required CI, manual mutsu Docker availability, then one approved-channel fleet retry with Titan idle. |
 | #764 | Implemented but not yet live-qualified. Exact-run mutation ownership, provider-state joins, durable dispatch counts, and the UAT-006 runtime scope repair are delivered. UAT-004 now uses an owner-only, operation-bound management dispatch gate and independently kills management plus the observed Celld owner for every trial; evaluator-owned formulas reject reused fault identities, grouped trials, phase/PID mismatch, invalid timestamp order, missing epoch advance, provider drift, or incomplete heal. | Obtain exact-head focused/CI evidence, then run the issue-scoped UAT-003–006 Titan lane only after #763 and the capacity gate are green. |
-| #765 | Not live-ready. The required management-to-Celld mTLS proxy, certificate/bypass matrix, and directional partitions are absent; current aggregate counts can be self-authored. | Versioned evidence contract and run-scoped fault planner before proxy/partition mutation. |
+| #765 | Construction started; not live-ready. Versioned raw evidence and exact-run network inventories now bind a 32-probe ceiling, protected management-ledger counter deltas, container namespace inodes, directional targets, and unique nftables identities. The management-to-Celld mTLS proxy, certificate/bypass matrix, applied partition matrices, and independently verified cleanup are still absent. | Persist the inventory before mutation, deploy the private mTLS proxy and negative certificate matrix, then apply/heal only the typed run-owned partition plans. |
 | #767 | Not live-ready. The alternate Worker deployment bypasses the fixed v0.2.1 credential launcher, rollback evidence is self-derived, and negative coverage is incomplete. | Reuse the protected launcher path, observe deployment/cell state, and preserve truthful UAT-009 `NOT_RUN`. |
 | #771 | Substantial state machine, but not crash-safe or qualification-ready. Cutover is memory-only, dual authority is not observed from both write policies, and failure manifests are incomplete. | Durable phase/cutover journal, authority observations, complete metadata contract, and failure evidence. |
 
@@ -74,8 +74,9 @@ The active dual-track iteration is therefore:
    per-trial management/owner faults, raw phase timelines, provider joins, and
    evaluator-owned negative cases at the exact signed head. Only then run the
    existing issue-scoped protected Titan lane.
-4. Follow with #765's pure evidence/fault-plan contract, #767's credential and
-   observation repair, and #771's durable cutover journal. The protected
+4. Follow the delivered #765 evidence/fault-plan contract with its private
+   proxy and applied partition controller, then #767's credential and
+   observation repair and #771's durable cutover journal. The protected
    workflow has strict issue selections so one lane cannot suppress another's
    evidence; those selections remain non-promoting until their implementation
    gates are complete.

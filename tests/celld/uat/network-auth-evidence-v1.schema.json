@@ -1,0 +1,137 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentic-sandbox.dev/schemas/celld-network-auth-evidence/v1",
+  "title": "Celld network and authentication raw evidence v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "run_id", "scenario_id", "started_at", "ended_at",
+    "probe_pool", "provider_counter", "route_attempts", "partition_trials",
+    "timeline_sha256", "cleanup"
+  ],
+  "properties": {
+    "schema_version": { "const": "agentic-sandbox.celld-network-auth-evidence/v1" },
+    "run_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
+    "scenario_id": { "enum": ["UAT-CELLD-010", "UAT-CELLD-012"] },
+    "started_at": { "type": "string", "format": "date-time" },
+    "ended_at": { "type": "string", "format": "date-time" },
+    "probe_pool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["limit", "max_in_flight"],
+      "properties": {
+        "limit": { "const": 32 },
+        "max_in_flight": { "type": "integer", "minimum": 1, "maximum": 32 }
+      }
+    },
+    "provider_counter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "observed", "before", "after", "delta"],
+      "properties": {
+        "source": { "const": "management-effect-ledger" },
+        "observed": { "const": true },
+        "before": { "type": "integer", "minimum": 0 },
+        "after": { "type": "integer", "minimum": 0 },
+        "delta": { "type": "integer" }
+      }
+    },
+    "route_attempts": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/route_attempt" }
+    },
+    "partition_trials": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/partition_trial" }
+    },
+    "timeline_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "cleanup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["inventory_state", "nft_rules_absent", "namespaces_absent"],
+      "properties": {
+        "inventory_state": { "const": "clean" },
+        "nft_rules_absent": { "const": true },
+        "namespaces_absent": { "const": true }
+      }
+    }
+  },
+  "$defs": {
+    "route_attempt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["class", "attempt", "role", "started_at", "ended_at", "outcome", "status", "code"],
+      "properties": {
+        "class": {
+          "enum": [
+            "public_internal", "same_fleet", "cross_fleet", "peer", "management", "store", "cross_scope_store",
+            "wrong_san", "wrong_cn", "public_root", "environment_proxy", "expired_certificate", "proxy_bypass",
+            "forged_body", "forged_mac", "stale_timestamp", "nonce_replay", "wrong_key", "zero_generation",
+            "wrong_generation", "public_route", "cross_fleet_request", "public_or_cross_fleet", "valid_private_control"
+          ]
+        },
+        "attempt": { "type": "integer", "minimum": 0 },
+        "role": { "enum": ["public", "same_fleet", "cross_fleet", "peer", "management", "store"] },
+        "started_at": { "type": "string", "format": "date-time" },
+        "ended_at": { "type": "string", "format": "date-time" },
+        "outcome": { "enum": ["allowed", "denied"] },
+        "status": { "type": ["integer", "null"], "minimum": 100, "maximum": 599 },
+        "code": { "type": ["string", "null"], "maxLength": 128 },
+        "operation_id_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "correlation_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "route_observation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["route", "reachable", "observed_at"],
+      "properties": {
+        "route": { "enum": ["management_to_celld", "celld_to_management", "celld_to_store", "node_to_peer"] },
+        "reachable": { "type": "boolean" },
+        "observed_at": { "type": "string", "format": "date-time" }
+      }
+    },
+    "partition_trial": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "fault_id", "boundary", "direction", "source_container", "source_namespace_inode",
+        "destination", "nft", "before", "during", "healed", "applied_at", "healed_at", "cleanup_verified"
+      ],
+      "properties": {
+        "fault_id": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+        "boundary": { "enum": ["celld_management", "celld_store", "node_peer"] },
+        "direction": { "enum": ["management_to_celld", "celld_to_management", "celld_to_store", "node_to_peer"] },
+        "source_container": { "type": "string", "pattern": "^celld-[a-z0-9-]{1,80}$" },
+        "source_namespace_inode": { "type": "integer", "minimum": 1 },
+        "destination": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["address", "port"],
+          "properties": {
+            "address": { "type": "string", "pattern": "^[0-9a-fA-F:.]+$" },
+            "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
+          }
+        },
+        "nft": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["family", "table", "chain", "comment"],
+          "properties": {
+            "family": { "const": "inet" },
+            "table": { "type": "string", "pattern": "^as_celld_[0-9a-f]{16}$" },
+            "chain": { "type": "string", "pattern": "^p_[0-9a-f]{16}$" },
+            "comment": { "type": "string", "pattern": "^agentic-sandbox:celld-network:[A-Za-z0-9._-]+:[0-9a-f]{32}$" }
+          }
+        },
+        "before": { "type": "array", "minItems": 4, "items": { "$ref": "#/$defs/route_observation" } },
+        "during": { "type": "array", "minItems": 4, "items": { "$ref": "#/$defs/route_observation" } },
+        "healed": { "type": "array", "minItems": 4, "items": { "$ref": "#/$defs/route_observation" } },
+        "applied_at": { "type": "string", "format": "date-time" },
+        "healed_at": { "type": "string", "format": "date-time" },
+        "cleanup_verified": { "const": true }
+      }
+    }
+  }
+}

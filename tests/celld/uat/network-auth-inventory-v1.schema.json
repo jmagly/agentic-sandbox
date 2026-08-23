@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentic-sandbox.dev/schemas/celld-network-auth-inventory/v1",
+  "title": "Celld exact-run network mutation inventory v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "run_id", "run_root", "owner", "host_sha256",
+    "created_at", "updated_at", "state", "namespaces", "faults"
+  ],
+  "properties": {
+    "schema_version": { "const": "agentic-sandbox.celld-network-auth-inventory/v1" },
+    "run_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
+    "run_root": { "type": "string", "pattern": "^/dev/shm/" },
+    "owner": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "workflow", "run_id"],
+      "properties": {
+        "repository": { "const": "roctinam/agentic-sandbox" },
+        "workflow": { "const": "celld-qualification.yml" },
+        "run_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" }
+      }
+    },
+    "host_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "created_at": { "type": "string", "format": "date-time" },
+    "updated_at": { "type": "string", "format": "date-time" },
+    "state": { "enum": ["prepared", "active", "cleanup_residue", "clean"] },
+    "namespaces": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["container", "pid", "inode", "run_label"],
+        "properties": {
+          "container": { "type": "string", "pattern": "^celld-[a-z0-9-]{1,80}$" },
+          "pid": { "type": "integer", "minimum": 1 },
+          "inode": { "type": "integer", "minimum": 1 },
+          "run_label": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" }
+        }
+      }
+    },
+    "faults": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id", "boundary", "direction", "source_container", "source_namespace_inode",
+          "destination_address", "destination_port", "nft_family", "nft_table", "nft_chain",
+          "nft_comment", "status", "planned_at", "updated_at"
+        ],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+          "boundary": { "enum": ["celld_management", "celld_store", "node_peer"] },
+          "direction": { "enum": ["management_to_celld", "celld_to_management", "celld_to_store", "node_to_peer"] },
+          "source_container": { "type": "string", "pattern": "^celld-[a-z0-9-]{1,80}$" },
+          "source_namespace_inode": { "type": "integer", "minimum": 1 },
+          "destination_address": { "type": "string", "pattern": "^[0-9a-fA-F:.]+$" },
+          "destination_port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+          "nft_family": { "const": "inet" },
+          "nft_table": { "type": "string", "pattern": "^as_celld_[0-9a-f]{16}$" },
+          "nft_chain": { "type": "string", "pattern": "^p_[0-9a-f]{16}$" },
+          "nft_comment": { "type": "string", "pattern": "^agentic-sandbox:celld-network:[A-Za-z0-9._-]+:[0-9a-f]{32}$" },
+          "status": { "enum": ["planned", "applied", "healed"] },
+          "planned_at": { "type": "string", "format": "date-time" },
+          "updated_at": { "type": "string", "format": "date-time" },
+          "applied_at": { "type": "string", "format": "date-time" },
+          "healed_at": { "type": "string", "format": "date-time" }
+        }
+      }
+    }
+  }
+}

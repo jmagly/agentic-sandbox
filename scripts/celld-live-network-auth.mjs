@@ -3,7 +3,8 @@
 import { spawnSync } from "node:child_process";
 import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { connect } from "node:net";
+import { connect, isIP } from "node:net";
+import { hostname } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -19,11 +20,171 @@ const REPO_ROOT = resolve(dirname(SCRIPT_PATH), "..");
 const DRIVER_ID = "celld-live-network-auth";
 const DRIVER_VERSION = "celld-live-network-auth/v1";
 const OBSERVATION_SCHEMA = "agentic-sandbox.celld-live-observation/v1";
+const NETWORK_AUTH_INVENTORY_SCHEMA = "agentic-sandbox.celld-network-auth-inventory/v1";
+const NETWORK_AUTH_OWNER = Object.freeze({ repository: "roctinam/agentic-sandbox", workflow: "celld-qualification.yml" });
+const PROBE_CONCURRENCY = 32;
 const SCENARIOS = new Set(["UAT-CELLD-010", "UAT-CELLD-012"]);
 const NODE_PROBE_IMAGE = "docker.io/library/node:20@sha256:8f693eaa7e0a8e71560c9a82b55fd54c2ae920a2ba5d2cde28bac7d1c01c9ba5";
 const DENIAL_CLASSES = ["forged_body", "forged_mac", "stale_timestamp", "nonce_replay", "wrong_key", "zero_generation", "wrong_generation", "public_or_cross_fleet"];
+const PARTITION_BOUNDARIES = new Map([
+  ["management_to_celld", "celld_management"],
+  ["celld_to_management", "celld_management"],
+  ["celld_to_store", "celld_store"],
+  ["node_to_peer", "node_peer"],
+]);
+const RUN_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+const CONTAINER_NAME = /^celld-[a-z0-9-]{1,80}$/;
+const SHA256 = /^[0-9a-f]{64}$/;
 
 function sha256(value) { return createHash("sha256").update(value).digest("hex"); }
+
+function validTimestamp(value) {
+  return typeof value === "string" && Number.isFinite(Date.parse(value));
+}
+
+function validIpAddress(value) {
+  return typeof value === "string" && value.length <= 45 && isIP(value) !== 0;
+}
+
+export async function mapBounded(items, limit, mapper, statistics = {}) {
+  if (!Array.isArray(items) || !Number.isSafeInteger(limit) || limit < 1 || limit > PROBE_CONCURRENCY || typeof mapper !== "function") {
+    throw new Error(`bounded probe pool requires an array, mapper, and concurrency from 1 through ${PROBE_CONCURRENCY}`);
+  }
+  const results = new Array(items.length);
+  let cursor = 0;
+  let inFlight = 0;
+  let firstError = null;
+  statistics.max_in_flight = Number.isSafeInteger(statistics.max_in_flight) ? statistics.max_in_flight : 0;
+  async function worker() {
+    while (!firstError) {
+      const index = cursor;
+      cursor += 1;
+      if (index >= items.length) return;
+      inFlight += 1;
+      statistics.max_in_flight = Math.max(statistics.max_in_flight, inFlight);
+      try {
+        results[index] = await mapper(items[index], index);
+      } catch (error) {
+        firstError ??= error;
+      } finally {
+        inFlight -= 1;
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, () => worker()));
+  if (firstError) throw firstError;
+  return results;
+}
+
+export function createNetworkAuthInventory({ runId, runRoot, host = hostname(), now = new Date() }) {
+  const root = resolve(runRoot ?? "");
+  if (!RUN_ID.test(runId ?? "") || !isAbsolute(runRoot ?? "") || !root.startsWith("/dev/shm/") || !root.split("/").includes(runId)) {
+    throw new Error("network inventory requires an exact-run /dev/shm root");
+  }
+  const timestamp = now.toISOString();
+  const inventory = {
+    schema_version: NETWORK_AUTH_INVENTORY_SCHEMA,
+    run_id: runId,
+    run_root: root,
+    owner: { ...NETWORK_AUTH_OWNER, run_id: runId },
+    host_sha256: sha256(host),
+    created_at: timestamp,
+    updated_at: timestamp,
+    state: "prepared",
+    namespaces: [],
+    faults: [],
+  };
+  const errors = validateNetworkAuthInventory(inventory, { runId, runRoot: root, hostSha256: inventory.host_sha256 });
+  if (errors.length) throw new Error(errors.join("; "));
+  return inventory;
+}
+
+export function registerNetworkNamespace(inventory, { container, pid, inode, runLabel }, now = new Date()) {
+  if (inventory.state !== "prepared" && inventory.state !== "active") throw new Error("network namespace registration requires a prepared inventory");
+  if (!CONTAINER_NAME.test(container ?? "") || !Number.isSafeInteger(pid) || pid < 1 || !Number.isSafeInteger(inode) || inode < 1 || runLabel !== inventory.run_id) {
+    throw new Error("network namespace identity is not exact-run owned");
+  }
+  if (inventory.namespaces.some((entry) => entry.container === container || entry.inode === inode)) throw new Error("network namespace identity is duplicated");
+  inventory.namespaces.push({ container, pid, inode, run_label: runLabel });
+  inventory.updated_at = now.toISOString();
+  return inventory.namespaces.at(-1);
+}
+
+export function planDirectionalPartition(inventory, { direction, sourceContainer, sourceNamespaceInode, destinationAddress, destinationPort, faultId = randomBytes(16).toString("hex") }, now = new Date()) {
+  const boundary = PARTITION_BOUNDARIES.get(direction);
+  const namespace = inventory.namespaces.find((entry) => entry.container === sourceContainer && entry.inode === sourceNamespaceInode && entry.run_label === inventory.run_id);
+  if (!boundary || !namespace || !validIpAddress(destinationAddress) || !Number.isSafeInteger(destinationPort) || destinationPort < 1 || destinationPort > 65535 || !/^[0-9a-f]{32}$/.test(faultId)) {
+    throw new Error("directional partition target is not exact-run inventory bound");
+  }
+  if (inventory.faults.some((entry) => entry.id === faultId)) throw new Error("directional partition fault identity is duplicated");
+  const timestamp = now.toISOString();
+  const fault = {
+    id: faultId,
+    boundary,
+    direction,
+    source_container: sourceContainer,
+    source_namespace_inode: sourceNamespaceInode,
+    destination_address: destinationAddress,
+    destination_port: destinationPort,
+    nft_family: "inet",
+    nft_table: `as_celld_${sha256(inventory.run_id).slice(0, 16)}`,
+    nft_chain: `p_${faultId.slice(0, 16)}`,
+    nft_comment: `agentic-sandbox:celld-network:${inventory.run_id}:${faultId}`,
+    status: "planned",
+    planned_at: timestamp,
+    updated_at: timestamp,
+  };
+  inventory.faults.push(fault);
+  inventory.state = "active";
+  inventory.updated_at = timestamp;
+  return fault;
+}
+
+export function validateNetworkAuthInventory(inventory, { runId, runRoot, hostSha256 } = {}) {
+  const errors = [];
+  if (!inventory || typeof inventory !== "object" || Array.isArray(inventory)) return ["network inventory must be an object"];
+  const allowed = new Set(["schema_version", "run_id", "run_root", "owner", "host_sha256", "created_at", "updated_at", "state", "namespaces", "faults"]);
+  for (const key of Object.keys(inventory)) if (!allowed.has(key)) errors.push(`inventory.${key} is not allowed`);
+  if (inventory.schema_version !== NETWORK_AUTH_INVENTORY_SCHEMA) errors.push("network inventory schema is invalid");
+  if (!RUN_ID.test(inventory.run_id ?? "") || (runId && inventory.run_id !== runId)) errors.push("network inventory run ID is invalid");
+  if (!isAbsolute(inventory.run_root ?? "") || !resolve(inventory.run_root).startsWith("/dev/shm/") || !resolve(inventory.run_root).split("/").includes(inventory.run_id) || (runRoot && resolve(inventory.run_root) !== resolve(runRoot))) errors.push("network inventory root is invalid");
+  if (inventory.owner?.repository !== NETWORK_AUTH_OWNER.repository || inventory.owner?.workflow !== NETWORK_AUTH_OWNER.workflow || inventory.owner?.run_id !== inventory.run_id) errors.push("network inventory owner is invalid");
+  if (!SHA256.test(inventory.host_sha256 ?? "") || (hostSha256 && inventory.host_sha256 !== hostSha256)) errors.push("network inventory host is invalid");
+  if (!validTimestamp(inventory.created_at) || !validTimestamp(inventory.updated_at)) errors.push("network inventory timestamps are invalid");
+  if (!["prepared", "active", "cleanup_residue", "clean"].includes(inventory.state)) errors.push("network inventory state is invalid");
+  if (!Array.isArray(inventory.namespaces) || !Array.isArray(inventory.faults)) return [...errors, "network inventory namespaces/faults must be arrays"];
+  const containers = new Set(), inodes = new Set();
+  for (const [index, namespace] of inventory.namespaces.entries()) {
+    if (!CONTAINER_NAME.test(namespace?.container ?? "") || !Number.isSafeInteger(namespace?.pid) || namespace.pid < 1 || !Number.isSafeInteger(namespace?.inode) || namespace.inode < 1 || namespace?.run_label !== inventory.run_id || containers.has(namespace.container) || inodes.has(namespace.inode)) errors.push(`network inventory namespace is invalid at index ${index}`);
+    containers.add(namespace?.container); inodes.add(namespace?.inode);
+  }
+  const faultIds = new Set();
+  for (const [index, fault] of inventory.faults.entries()) {
+    const namespace = inventory.namespaces.find((entry) => entry.container === fault?.source_container && entry.inode === fault?.source_namespace_inode);
+    if (!/^[0-9a-f]{32}$/.test(fault?.id ?? "") || faultIds.has(fault?.id) || PARTITION_BOUNDARIES.get(fault?.direction) !== fault?.boundary || !namespace || !validIpAddress(fault?.destination_address) || !Number.isSafeInteger(fault?.destination_port) || fault.destination_port < 1 || fault.destination_port > 65535 || fault?.nft_family !== "inet" || fault?.nft_table !== `as_celld_${sha256(inventory.run_id).slice(0, 16)}` || fault?.nft_chain !== `p_${fault.id.slice(0, 16)}` || fault?.nft_comment !== `agentic-sandbox:celld-network:${inventory.run_id}:${fault.id}` || !["planned", "applied", "healed"].includes(fault?.status) || !validTimestamp(fault?.planned_at) || !validTimestamp(fault?.updated_at) || (["applied", "healed"].includes(fault?.status) && !validTimestamp(fault?.applied_at)) || (fault?.status === "healed" && !validTimestamp(fault?.healed_at))) errors.push(`network inventory fault is invalid at index ${index}`);
+    faultIds.add(fault?.id);
+  }
+  return errors;
+}
+
+export function readManagementProviderCounter(runtime, { runner = run } = {}) {
+  const ledgerPath = runtime?.fleet?.callback?.effect_ledger_file_ref;
+  if (!isAbsolute(ledgerPath ?? "") || !existsSync(ledgerPath)) throw new Error("management provider counter ledger is unavailable");
+  const metadata = lstatSync(ledgerPath);
+  if (!metadata.isFile() || metadata.isSymbolicLink() || (metadata.mode & 0o077) !== 0) throw new Error("management provider counter ledger is not protected");
+  const output = runner("sqlite3", [
+    "-readonly", "-batch", "-noheader", ledgerPath,
+    "PRAGMA query_only=ON; SELECT COALESCE(SUM(provider_dispatch_count),0) FROM celld_effects;",
+  ], { timeout: 30_000 });
+  if (!/^\d+$/.test(output.trim())) throw new Error("management provider counter query returned an invalid value");
+  const value = Number(output.trim());
+  if (!Number.isSafeInteger(value) || value < 0) throw new Error("management provider counter exceeds the safe evidence range");
+  return value;
+}
+
+function providerCounter(runtime) {
+  return runtime.readProviderCounter?.() ?? readManagementProviderCounter(runtime);
+}
 function argument(args, name) {
   const index = args.indexOf(name);
   if (index < 0 || !args[index + 1]) throw new Error(`${name} is required`);
@@ -116,18 +277,16 @@ async function negativeRequest(endpoint, keyring, kind, attempt) {
   return boundedRequest(endpoint, path, { method: "POST", headers: { "content-type": "application/json", ...headers }, body });
 }
 
-async function tcpDenied(host, port, attempts) {
-  let denied = 0;
-  for (let index = 0; index < attempts; index += 1) {
-    const result = await new Promise((resolvePromise) => {
+async function tcpDenied(host, port, attempts, statistics) {
+  const results = await mapBounded(Array.from({ length: attempts }, (_value, index) => index), PROBE_CONCURRENCY, async () => {
+    return new Promise((resolvePromise) => {
       const socket = connect({ host, port });
       const timer = setTimeout(() => { socket.destroy(); resolvePromise(false); }, 500);
       socket.once("connect", () => { clearTimeout(timer); socket.destroy(); resolvePromise(true); });
       socket.once("error", () => { clearTimeout(timer); resolvePromise(false); });
     });
-    if (!result) denied += 1;
-  }
-  return denied;
+  }, statistics);
+  return results.filter((connected) => !connected).length;
 }
 
 function exactProbeIdentity(runId) {
@@ -166,7 +325,9 @@ export function cleanupProbeResources(runId, { runner = run } = {}) {
 
 async function runIsolation(runtime, timeline) {
   const attemptsPerClass = 1_000;
-  const publicDenied = await tcpDenied("127.0.0.1", 8081, attemptsPerClass);
+  const providerBefore = providerCounter(runtime);
+  const probeStatistics = {};
+  const publicDenied = await tcpDenied("127.0.0.1", 8081, attemptsPerClass, probeStatistics);
   const nodeDocument = JSON.parse(run("docker", ["inspect", runtime.fleet.nodes[0].name]));
   const nodeIp = nodeDocument?.[0]?.NetworkSettings?.Networks?.[runtime.fleet.network.name]?.IPAddress;
   if (!/^172\.|^10\.|^192\.168\./.test(nodeIp ?? "")) throw new Error("fleet node did not receive a private address");
@@ -174,8 +335,10 @@ async function runIsolation(runtime, timeline) {
   let crossFleetDenied = 0;
   try {
     run("docker", ["network", "create", "--internal", "--label", `dev.agentic-sandbox.run=${runtime.runId}`, "--label", "dev.agentic-sandbox.scope=celld-qualification", probe.network]);
-    const program = "const net=require('node:net');const [host,port,count]=process.argv.slice(1);let done=0,ok=0;for(let i=0;i<Number(count);i++){const s=net.connect({host,port:Number(port)});const t=setTimeout(()=>{s.destroy();if(++done===Number(count))finish()},500);s.once('connect',()=>{clearTimeout(t);ok++;s.destroy();if(++done===Number(count))finish()});s.once('error',()=>{clearTimeout(t);if(++done===Number(count))finish()})}function finish(){process.stdout.write(JSON.stringify({attempts:Number(count),succeeded:ok,denied:Number(count)-ok}))}";
-    const result = JSON.parse(run("docker", ["run", "--rm", "--name", probe.container, "--label", `dev.agentic-sandbox.run=${runtime.runId}`, "--label", "dev.agentic-sandbox.scope=celld-qualification", "--network", probe.network, "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true", "--pids-limit", "32", "--memory", "64m", NODE_PROBE_IMAGE, "node", "-e", program, nodeIp, "8081", String(attemptsPerClass)], { timeout: 120_000 }));
+    const program = "const net=require('node:net');const [host,portValue,countValue,limitValue]=process.argv.slice(1);const port=Number(portValue),count=Number(countValue),limit=Number(limitValue);let next=0,active=0,done=0,ok=0,max=0;function launch(){while(active<limit&&next<count){next++;active++;max=Math.max(max,active);const s=net.connect({host,port});let settled=false;const finishOne=(connected)=>{if(settled)return;settled=true;active--;done++;if(connected)ok++;if(done===count)process.stdout.write(JSON.stringify({attempts:count,succeeded:ok,denied:count-ok,max_in_flight:max}));else launch()};const t=setTimeout(()=>{s.destroy();finishOne(false)},500);s.once('connect',()=>{clearTimeout(t);s.destroy();finishOne(true)});s.once('error',()=>{clearTimeout(t);finishOne(false)})}}launch()";
+    const result = JSON.parse(run("docker", ["run", "--rm", "--name", probe.container, "--label", `dev.agentic-sandbox.run=${runtime.runId}`, "--label", "dev.agentic-sandbox.scope=celld-qualification", "--network", probe.network, "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true", "--pids-limit", "32", "--memory", "64m", NODE_PROBE_IMAGE, "node", "-e", program, nodeIp, "8081", String(attemptsPerClass), String(PROBE_CONCURRENCY)], { timeout: 120_000 }));
+    if (!Number.isSafeInteger(result.max_in_flight) || result.max_in_flight > PROBE_CONCURRENCY) throw new Error("cross-fleet probe exceeded the bounded pool");
+    probeStatistics.max_in_flight = Math.max(probeStatistics.max_in_flight ?? 0, result.max_in_flight);
     crossFleetDenied = result.denied;
   } finally {
     cleanupProbeResources(runtime.runId);
@@ -209,18 +372,23 @@ async function runIsolation(runtime, timeline) {
   }
   if (operationError) throw operationError;
   const diagnosis = diagnoseFleet(runtime.fleetPath);
-  timeline.push({ scenario: "UAT-CELLD-010", public_internal: { attempts: attemptsPerClass, denied: publicDenied }, cross_fleet: { attempts: attemptsPerClass, denied: crossFleetDenied }, cross_bucket: { attempts: attemptsPerClass, denied: crossBucketDenied }, fleet_status: diagnosis.status });
+  const providerAfter = providerCounter(runtime);
+  const providerEffects = providerAfter - providerBefore;
+  if (providerEffects < 0) throw new Error("management provider counter regressed during isolation probes");
+  timeline.push({ scenario: "UAT-CELLD-010", public_internal: { attempts: attemptsPerClass, denied: publicDenied }, cross_fleet: { attempts: attemptsPerClass, denied: crossFleetDenied }, cross_bucket: { attempts: attemptsPerClass, denied: crossBucketDenied }, provider_counter: { source: "management-effect-ledger", before: providerBefore, after: providerAfter, delta: providerEffects }, fleet_status: diagnosis.status });
   const denied = publicDenied + crossFleetDenied + crossBucketDenied;
-  return { assertions: [{ id: "CELLD.010.ISOLATION", measurements: { classes: ["public_internal", "cross_fleet", "cross_bucket"], forbidden_attempts: attemptsPerClass * 3, denied, succeeded: attemptsPerClass * 3 - denied, provider_effects: 0, routes_healed: diagnosis.status === "READY" } }], metrics: [{ name: "forbidden_routes_denied", value: denied, unit: "requests" }], faults: [{ kind: "isolated_cross_fleet_probe", healed: true }] };
+  return { assertions: [{ id: "CELLD.010.ISOLATION", measurements: { classes: ["public_internal", "cross_fleet", "cross_bucket"], forbidden_attempts: attemptsPerClass * 3, denied, succeeded: attemptsPerClass * 3 - denied, provider_counter_observed: true, provider_counter_before: providerBefore, provider_counter_after: providerAfter, provider_effects: providerEffects, routes_healed: diagnosis.status === "READY", probe_concurrency_limit: PROBE_CONCURRENCY, probe_max_in_flight: probeStatistics.max_in_flight } }], metrics: [{ name: "forbidden_routes_denied", value: denied, unit: "requests" }], faults: [{ kind: "isolated_cross_fleet_probe", healed: true }] };
 }
 
 async function runAuthentication(runtime, timeline) {
   const endpoint = workerEndpoint(runtime.fleet), keyring = workerKey(runtime.fleet.worker_vars_file_ref);
+  const providerBefore = providerCounter(runtime);
   let denied = 0;
+  const probeStatistics = {};
   for (const kind of DENIAL_CLASSES) {
     const codes = new Map();
-    for (let attempt = 0; attempt < 1_000; attempt += 1) {
-      const result = await negativeRequest(endpoint, keyring, kind, attempt);
+    const results = await mapBounded(Array.from({ length: 1_000 }, (_value, attempt) => attempt), PROBE_CONCURRENCY, (attempt) => negativeRequest(endpoint, keyring, kind, attempt), probeStatistics);
+    for (const result of results) {
       const expected = kind === "nonce_replay" ? result.status === 409 && result.code === "cell.signature_replayed" : result.status === 401 && typeof result.code === "string" && result.code.startsWith("cell.signature_");
       if (expected) denied += 1;
       codes.set(result.code, (codes.get(result.code) ?? 0) + 1);
@@ -237,9 +405,12 @@ async function runAuthentication(runtime, timeline) {
   const validHeaders = signedHeaders({ method: "GET", path: validPath, operationId: validOperation, generation: 1, body: "", ...keyring });
   const valid = await boundedRequest(endpoint, validPath, { method: "GET", headers: validHeaders, restrictedValues: [validHeaders["x-agentic-signature"], keyring.key] });
   if (valid.status !== 404 || valid.code !== "cell.missing") throw new Error("valid signed Worker identity did not authenticate exactly once");
-  timeline.push({ scenario: "UAT-CELLD-012", valid_operation_sha256: sha256(validOperation), status: valid.status, code: valid.code });
+  const providerAfter = providerCounter(runtime);
+  const providerEffects = providerAfter - providerBefore;
+  if (providerEffects < 0) throw new Error("management provider counter regressed during authentication probes");
+  timeline.push({ scenario: "UAT-CELLD-012", valid_operation_sha256: sha256(validOperation), status: valid.status, code: valid.code, provider_counter: { source: "management-effect-ledger", before: providerBefore, after: providerAfter, delta: providerEffects } });
   return { assertions: [
-    { id: "CELLD.012.DENIAL", measurements: { classes: DENIAL_CLASSES, attempts_per_class: 1_000, attempts: 8_000, denied, provider_effects: 0 } },
+    { id: "CELLD.012.DENIAL", measurements: { classes: DENIAL_CLASSES, attempts_per_class: 1_000, attempts: 8_000, denied, provider_counter_observed: true, provider_counter_before: providerBefore, provider_counter_after: providerAfter, provider_effects: providerEffects, probe_concurrency_limit: PROBE_CONCURRENCY, probe_max_in_flight: probeStatistics.max_in_flight } },
     { id: "CELLD.012.VALID", measurements: { attempts: 1, successes: 1, correlated: true, signature_value_absent: valid.restricted_absent, identity_removed: false } },
   ], metrics: [{ name: "signed_negative_denials", value: denied, unit: "requests" }], faults: [{ kind: "signed_authentication_negative_matrix", classes: DENIAL_CLASSES.length }] };
 }

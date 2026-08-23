@@ -6,8 +6,112 @@ import test from "node:test";
 
 import {
   cleanupProbeResources,
+  createNetworkAuthInventory,
   executeNetworkAuthDriver,
+  mapBounded,
+  planDirectionalPartition,
+  readManagementProviderCounter,
+  registerNetworkNamespace,
+  validateNetworkAuthInventory,
 } from "../../../scripts/celld-live-network-auth.mjs";
+
+test("provider effects are read from the protected management ledger", () => {
+  const directory = mkdtempSync(join(tmpdir(), "celld-provider-counter-test-"));
+  try {
+    const ledger = join(directory, "effect-ledger.sqlite");
+    writeFileSync(ledger, "fixture", { mode: 0o600 });
+    const calls = [];
+    const value = readManagementProviderCounter({ fleet: { callback: { effect_ledger_file_ref: ledger } } }, {
+      runner: (program, args, options) => {
+        calls.push({ program, args, options });
+        return "17\n";
+      },
+    });
+    assert.equal(value, 17);
+    assert.equal(calls[0].program, "sqlite3");
+    assert.deepEqual(calls[0].args.slice(0, 4), ["-readonly", "-batch", "-noheader", ledger]);
+    assert.match(calls[0].args[4], /SUM\(provider_dispatch_count\)/);
+    chmodSync(ledger, 0o644);
+    assert.throws(() => readManagementProviderCounter({ fleet: { callback: { effect_ledger_file_ref: ledger } } }, {
+      runner: () => { throw new Error("insecure ledger must fail before sqlite"); },
+    }), /not protected/);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("bounded probe pool preserves order and never exceeds 32 in flight", async () => {
+  let active = 0;
+  let observed = 0;
+  const statistics = {};
+  const values = Array.from({ length: 160 }, (_value, index) => index);
+  const results = await mapBounded(values, 32, async (value) => {
+    active += 1;
+    observed = Math.max(observed, active);
+    await new Promise((resolvePromise) => setImmediate(resolvePromise));
+    active -= 1;
+    return value * 2;
+  }, statistics);
+  assert.deepEqual(results, values.map((value) => value * 2));
+  assert.equal(observed, 32);
+  assert.equal(statistics.max_in_flight, 32);
+  await assert.rejects(() => mapBounded(values, 33, async (value) => value), /concurrency from 1 through 32/);
+});
+
+test("directional partition planner binds typed nft identities to an exact namespace", () => {
+  const inventory = createNetworkAuthInventory({
+    runId: "titan-765",
+    runRoot: "/dev/shm/celld-qualification/titan-765",
+    host: "titan",
+    now: new Date("2026-08-23T08:00:00Z"),
+  });
+  registerNetworkNamespace(inventory, {
+    container: "celld-fleet-node-1",
+    pid: 3210,
+    inode: 4026533001,
+    runLabel: "titan-765",
+  }, new Date("2026-08-23T08:00:01Z"));
+  const fault = planDirectionalPartition(inventory, {
+    direction: "celld_to_store",
+    sourceContainer: "celld-fleet-node-1",
+    sourceNamespaceInode: 4026533001,
+    destinationAddress: "172.30.0.10",
+    destinationPort: 8334,
+    faultId: "a".repeat(32),
+  }, new Date("2026-08-23T08:00:02Z"));
+  assert.equal(fault.boundary, "celld_store");
+  assert.equal(fault.nft_family, "inet");
+  assert.match(fault.nft_table, /^as_celld_[0-9a-f]{16}$/);
+  assert.equal(fault.nft_chain, `p_${"a".repeat(16)}`);
+  assert.equal(fault.nft_comment, `agentic-sandbox:celld-network:titan-765:${"a".repeat(32)}`);
+  assert.deepEqual(validateNetworkAuthInventory(inventory, {
+    runId: "titan-765",
+    runRoot: "/dev/shm/celld-qualification/titan-765",
+    hostSha256: inventory.host_sha256,
+  }), []);
+  assert.throws(() => planDirectionalPartition(inventory, {
+    direction: "node_to_peer",
+    sourceContainer: "celld-foreign-node-1",
+    sourceNamespaceInode: 4026533999,
+    destinationAddress: "172.30.0.11",
+    destinationPort: 8081,
+  }), /not exact-run inventory bound/);
+});
+
+test("network inventory validation rejects substituted rule and namespace identities", () => {
+  const inventory = createNetworkAuthInventory({ runId: "titan-765", runRoot: "/dev/shm/celld-qualification/titan-765", host: "titan" });
+  registerNetworkNamespace(inventory, { container: "celld-fleet-node-1", pid: 3, inode: 44, runLabel: "titan-765" });
+  planDirectionalPartition(inventory, {
+    direction: "celld_to_management",
+    sourceContainer: "celld-fleet-node-1",
+    sourceNamespaceInode: 44,
+    destinationAddress: "172.30.0.1",
+    destinationPort: 18443,
+    faultId: "b".repeat(32),
+  });
+  inventory.faults[0].nft_comment = `agentic-sandbox:celld-network:foreign:${"b".repeat(32)}`;
+  assert.match(validateNetworkAuthInventory(inventory).join("; "), /fault is invalid/);
+});
 
 test("disabled network/auth qualification returns pre-mutation NOT_RUN evidence", async () => {
   const directory = mkdtempSync(join(tmpdir(), "celld-network-auth-test-"));
@@ -68,7 +172,11 @@ test("probe cleanup refuses a foreign Docker label before deletion", () => {
 test("network/auth source fixes the qualified sample sizes and pins the probe image", () => {
   const source = readFileSync(new URL("../../../scripts/celld-live-network-auth.mjs", import.meta.url), "utf8");
   assert.match(source, /const attemptsPerClass = 1_000/);
-  assert.match(source, /attempt < 1_000/);
+  assert.match(source, /const PROBE_CONCURRENCY = 32/);
+  assert.match(source, /mapBounded\(Array\.from\(\{ length: 1_000 \}/);
+  assert.match(source, /String\(PROBE_CONCURRENCY\)/);
+  assert.match(source, /readManagementProviderCounter/);
+  assert.doesNotMatch(source, /provider_effects:\s*0/);
   assert.match(source, /docker\.io\/library\/node:20@sha256:[0-9a-f]{64}/);
   assert.doesNotMatch(source, /docker\.io\/library\/node:(?:latest|20)(?:["'])/);
   assert.match(source, /import \{ openStorageGatewayAccess \} from "\.\/celld-storage-gateway-access\.mjs"/);

@@ -511,10 +511,15 @@ const ALL_LIVE_EVALUATORS = Object.freeze({
   "CELLD.010.ISOLATION": (raw) => {
     const m = object(raw);
     const attempts = integer(m.forbidden_attempts, "forbidden_attempts", 1);
+    const providerBefore = integer(m.provider_counter_before, "provider_counter_before");
+    const providerAfter = integer(m.provider_counter_after, "provider_counter_after");
+    const providerEffects = integer(m.provider_effects, "provider_effects");
     const passed = exactStrings(m.classes, ["public_internal", "cross_fleet", "cross_bucket"], "classes")
       && integer(m.denied, "denied") === attempts
       && integer(m.succeeded, "succeeded") === 0
-      && integer(m.provider_effects, "provider_effects") === 0
+      && boolean(m.provider_counter_observed, "provider_counter_observed")
+      && providerAfter - providerBefore === providerEffects
+      && providerEffects === 0
       && boolean(m.routes_healed, "routes_healed");
     return evaluated(m, passed, "all forbidden topology and scope routes are denied");
   },
@@ -544,11 +549,16 @@ const ALL_LIVE_EVALUATORS = Object.freeze({
   "CELLD.012.DENIAL": (raw) => {
     const m = object(raw);
     const expected = 1_000 * denialClasses.length;
+    const providerBefore = integer(m.provider_counter_before, "provider_counter_before");
+    const providerAfter = integer(m.provider_counter_after, "provider_counter_after");
+    const providerEffects = integer(m.provider_effects, "provider_effects");
     const passed = exactStrings(m.classes, denialClasses, "classes")
       && integer(m.attempts_per_class, "attempts_per_class") === 1_000
       && integer(m.attempts, "attempts") === expected
       && integer(m.denied, "denied") === expected
-      && integer(m.provider_effects, "provider_effects") === 0;
+      && boolean(m.provider_counter_observed, "provider_counter_observed")
+      && providerAfter - providerBefore === providerEffects
+      && providerEffects === 0;
     return evaluated(m, passed, "every signed negative class is denied without an effect");
   },
   "CELLD.012.VALID": (raw) => {

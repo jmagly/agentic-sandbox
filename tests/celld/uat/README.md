@@ -35,6 +35,12 @@ Live automation uses two strict JSON contracts:
   and product-emitted PID/phase/timestamp event. The adjacent
   `crash-phase-evidence-v1.schema.json` normalizes that event with the observed
   before-dispatch process-absence seam for independent UAT-004 timing.
+- `network-auth-evidence-v1.schema.json` fixes the raw route-attempt,
+  management-ledger counter, bounded probe-pool, directional-partition, and
+  cleanup observations for UAT 010 and 012. The adjacent
+  `network-auth-inventory-v1.schema.json` binds every namespace and nftables
+  mutation to an exact run, host, container namespace inode, destination, and
+  non-reusable rule comment before application.
 
 The three-node Titan fixture is managed by
 `scripts/celld-fleet-fixture.mjs`. Its crash-resumable inventory is persisted
