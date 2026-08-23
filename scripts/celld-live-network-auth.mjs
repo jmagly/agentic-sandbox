@@ -294,6 +294,24 @@ function verifyMtlsCertificateSources(inventory) {
   }
 }
 
+export function mtlsNegativeIdentityFiles(inventory) {
+  const errors = validateNetworkAuthInventory(inventory);
+  if (errors.length) throw new Error(errors.join("; "));
+  const tlsRoot = join(inventory.run_root, "network-tls");
+  return Object.fromEntries([
+    ["wrong_cn", "agentic-celld-wrong-cn", 2],
+    ["cross_fleet_certificate", "agentic-celld-cross-fleet", 2],
+    ["expired_certificate", "agentic-celld-expired", 0],
+  ].map(([role, cn, days]) => [role, {
+    role,
+    cn,
+    days,
+    cert_file_ref: join(tlsRoot, `${role}.crt`),
+    key_file_ref: join(tlsRoot, `${role}.key`),
+    identity_file_ref: join(tlsRoot, `${role}.pem`),
+  }]));
+}
+
 export function prepareMtlsProxyCertificates(inventory, {
   runner = run,
   persist = persistNetworkAuthInventory,
@@ -328,6 +346,22 @@ export function prepareMtlsProxyCertificates(inventory, {
   runner("openssl", ["x509", "-in", clientCert, "-noout", "-checkend", "3600"]);
   writeProtected(clientIdentity, Buffer.concat([Buffer.from(readProtected(clientCert)), Buffer.from(readProtected(clientKey))]));
 
+  const negativeIdentities = mtlsNegativeIdentityFiles(inventory);
+  for (const identity of Object.values(negativeIdentities)) {
+    const csr = join(tlsRoot, `${identity.role}.csr`);
+    const extensions = join(tlsRoot, `${identity.role}-ext.cnf`);
+    writeProtected(extensions, "extendedKeyUsage=clientAuth\n");
+    runner("openssl", ["genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:2048", "-out", identity.key_file_ref]);
+    runner("openssl", ["req", "-new", "-key", identity.key_file_ref, "-subj", `/CN=${identity.cn}`, "-out", csr]);
+    runner("openssl", ["x509", "-req", "-in", csr, "-CA", caCert, "-CAkey", caKey, "-CAserial", caSerial, "-days", String(identity.days), "-sha256", "-extfile", extensions, "-out", identity.cert_file_ref]);
+    for (const path of [identity.key_file_ref, csr, identity.cert_file_ref]) protect(path);
+    if (identity.days > 0) {
+      runner("openssl", ["verify", "-purpose", "sslclient", "-CAfile", caCert, identity.cert_file_ref]);
+      runner("openssl", ["x509", "-in", identity.cert_file_ref, "-noout", "-checkend", "3600"]);
+    }
+    writeProtected(identity.identity_file_ref, Buffer.concat([Buffer.from(readProtected(identity.cert_file_ref)), Buffer.from(readProtected(identity.key_file_ref))]));
+  }
+
   const servers = [];
   for (const proxy of inventory.proxies) {
     const serverCsr = join(tlsRoot, `${proxy.node_container}-server.csr`);
@@ -341,7 +375,7 @@ export function prepareMtlsProxyCertificates(inventory, {
     runner("openssl", ["x509", "-in", proxy.server_cert_file_ref, "-noout", "-checkend", "3600"]);
     servers.push({ node_container: proxy.node_container, address: proxy.listen_address, cert_file_ref: proxy.server_cert_file_ref });
   }
-  return { tls_root: tlsRoot, management_client_identity_file_ref: clientIdentity, servers };
+  return { tls_root: tlsRoot, management_client_identity_file_ref: clientIdentity, negative_client_identities: negativeIdentities, servers };
 }
 
 function verifyMtlsProxyMaterial(proxy, binaryPath) {

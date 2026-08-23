@@ -14,6 +14,7 @@ import {
   executeNetworkAuthDriver,
   healDirectionalPartition,
   mapBounded,
+  mtlsNegativeIdentityFiles,
   mtlsProxyCreateArgs,
   networkAuthInventoryLocations,
   observeFleetNetworkNamespaces,
@@ -285,13 +286,20 @@ test("mTLS certificate preparation persists first and pins client/server purpose
   assert.equal(events[0], "verify-sources");
   assert.equal(events[1], "persist");
   assert.equal(result.servers.length, 2);
+  assert.deepEqual(Object.keys(result.negative_client_identities), ["wrong_cn", "cross_fleet_certificate", "expired_certificate"]);
   assert.equal(files.get(result.management_client_identity_file_ref).toString(), "CERTIFICATE\nPRIVATE-KEY\n");
+  assert.equal(files.get(result.negative_client_identities.cross_fleet_certificate.identity_file_ref).toString(), "CERTIFICATE\nPRIVATE-KEY\n");
   assert.equal([...files.values()].some((value) => value.toString().includes("subjectAltName=IP:172.30.0.20")), true);
   const commands = events.filter(Array.isArray).map((args) => args.join(" "));
   assert.equal(commands.some((command) => command.includes("verify -purpose sslclient")), true);
   assert.equal(commands.filter((command) => command.includes("verify -purpose sslserver")).length, 2);
-  assert.equal(commands.filter((command) => command.includes("-checkend 3600")).length, 3);
+  assert.equal(commands.filter((command) => command.includes("-checkend 3600")).length, 5);
   assert.equal(commands.some((command) => command.includes("/CN=agentic-celld-management")), true);
+  assert.equal(commands.some((command) => command.includes("/CN=agentic-celld-wrong-cn")), true);
+  assert.equal(commands.some((command) => command.includes("/CN=agentic-celld-cross-fleet")), true);
+  assert.equal(commands.some((command) => command.includes("/CN=agentic-celld-expired") && command.includes("req -new")), true);
+  assert.equal(commands.some((command) => command.includes("expired_certificate.csr") && command.includes("-days 0")), true);
+  assert.deepEqual(mtlsNegativeIdentityFiles(inventory), result.negative_client_identities);
 });
 
 test("mTLS proxy readiness requires every exact started sidecar", async () => {
