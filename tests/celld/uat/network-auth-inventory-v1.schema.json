@@ -49,7 +49,8 @@
           "name", "node_container", "listen_address", "listen_port",
           "target_address", "target_port", "binary_sha256", "image_ref", "ca_file_ref",
           "server_cert_file_ref", "server_key_file_ref",
-          "management_client_cert_file_ref", "status", "planned_at", "updated_at"
+          "management_client_cert_file_ref", "management_client_identity_file_ref",
+          "status", "planned_at", "updated_at"
         ],
         "properties": {
           "name": { "type": "string", "pattern": "^celld-[a-z0-9-]{1,80}$" },
@@ -64,6 +65,7 @@
           "server_cert_file_ref": { "type": "string", "pattern": "^/dev/shm/" },
           "server_key_file_ref": { "type": "string", "pattern": "^/dev/shm/" },
           "management_client_cert_file_ref": { "type": "string", "pattern": "^/dev/shm/" },
+          "management_client_identity_file_ref": { "type": "string", "pattern": "^/dev/shm/" },
           "status": { "enum": ["planned", "created", "started", "removed"] },
           "planned_at": { "type": "string", "format": "date-time" },
           "updated_at": { "type": "string", "format": "date-time" },

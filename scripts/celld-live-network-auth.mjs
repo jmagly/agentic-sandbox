@@ -112,6 +112,26 @@ export function registerNetworkNamespace(inventory, { container, pid, inode, run
   return inventory.namespaces.at(-1);
 }
 
+export function observeFleetNetworkNamespaces(inventory, fleet, { runner = run, namespaceInode = (pid) => lstatSync(`/proc/${pid}/ns/net`).ino, now = new Date() } = {}) {
+  if (fleet?.run_id !== inventory.run_id || !Array.isArray(fleet?.nodes) || typeof fleet?.network?.name !== "string") throw new Error("fleet namespace observation is not run bound");
+  const observed = [];
+  for (const node of fleet.nodes) {
+    let document;
+    try { document = JSON.parse(runner("docker", ["container", "inspect", node.name], { timeout: 30_000 })); } catch { throw new Error("fleet namespace inspection is not bounded JSON"); }
+    const value = document?.[0];
+    const pid = value?.State?.Pid;
+    const labels = value?.Config?.Labels;
+    const address = value?.NetworkSettings?.Networks?.[fleet.network.name]?.IPAddress;
+    if (value?.State?.Running !== true || labels?.["dev.agentic-sandbox.run"] !== inventory.run_id || labels?.["dev.agentic-sandbox.scope"] !== "celld-qualification" || !validIpAddress(address)) {
+      throw new Error("fleet namespace inspection is not exact-run owned");
+    }
+    const inode = namespaceInode(pid);
+    registerNetworkNamespace(inventory, { container: node.name, pid, inode, runLabel: inventory.run_id }, now);
+    observed.push({ container: node.name, pid, inode, address });
+  }
+  return observed;
+}
+
 export function planDirectionalPartition(inventory, { direction, sourceContainer, sourceNamespaceInode, destinationAddress, destinationPort, faultId = randomBytes(16).toString("hex") }, now = new Date()) {
   const boundary = PARTITION_BOUNDARIES.get(direction);
   const namespace = inventory.namespaces.find((entry) => entry.container === sourceContainer && entry.inode === sourceNamespaceInode && entry.run_label === inventory.run_id);
@@ -163,6 +183,7 @@ export function planMtlsProxy(inventory, { nodeContainer, listenAddress, binaryS
     server_cert_file_ref: join(tlsRoot, `${nodeContainer}-server.crt`),
     server_key_file_ref: join(tlsRoot, `${nodeContainer}-server.key`),
     management_client_cert_file_ref: join(tlsRoot, "management-client.crt"),
+    management_client_identity_file_ref: join(tlsRoot, "management-client.pem"),
     status: "planned",
     planned_at: timestamp,
     updated_at: timestamp,
@@ -195,7 +216,7 @@ export function validateNetworkAuthInventory(inventory, { runId, runRoot, hostSh
   for (const [index, proxy] of inventory.proxies.entries()) {
     const namespace = inventory.namespaces.find((entry) => entry.container === proxy?.node_container && entry.run_label === inventory.run_id);
     const tlsRoot = join(inventory.run_root, "network-tls");
-    if (!namespace || proxy?.name !== `${proxy.node_container}-mtls-proxy` || !CONTAINER_NAME.test(proxy.name) || proxyNames.has(proxy.name) || proxyNodes.has(proxy.node_container) || !validIpAddress(proxy?.listen_address) || proxy?.listen_port !== MTLS_PROXY_PORT || proxy?.target_address !== "127.0.0.1" || proxy?.target_port !== 8081 || !SHA256.test(proxy?.binary_sha256 ?? "") || !/^sha256:[0-9a-f]{64}$/.test(proxy?.image_ref ?? "") || proxy?.ca_file_ref !== join(inventory.run_root, "tls/ca.crt") || proxy?.server_cert_file_ref !== join(tlsRoot, `${proxy.node_container}-server.crt`) || proxy?.server_key_file_ref !== join(tlsRoot, `${proxy.node_container}-server.key`) || proxy?.management_client_cert_file_ref !== join(tlsRoot, "management-client.crt") || !["planned", "created", "started", "removed"].includes(proxy?.status) || !validTimestamp(proxy?.planned_at) || !validTimestamp(proxy?.updated_at) || (proxy?.status === "created" && !validTimestamp(proxy?.created_at)) || (proxy?.status === "started" && (!validTimestamp(proxy?.created_at) || !validTimestamp(proxy?.started_at))) || (proxy?.created_at !== undefined && !validTimestamp(proxy.created_at)) || (proxy?.started_at !== undefined && !validTimestamp(proxy.started_at)) || (proxy?.status === "removed" && !validTimestamp(proxy?.removed_at))) errors.push(`network inventory proxy is invalid at index ${index}`);
+    if (!namespace || proxy?.name !== `${proxy.node_container}-mtls-proxy` || !CONTAINER_NAME.test(proxy.name) || proxyNames.has(proxy.name) || proxyNodes.has(proxy.node_container) || !validIpAddress(proxy?.listen_address) || proxy?.listen_port !== MTLS_PROXY_PORT || proxy?.target_address !== "127.0.0.1" || proxy?.target_port !== 8081 || !SHA256.test(proxy?.binary_sha256 ?? "") || !/^sha256:[0-9a-f]{64}$/.test(proxy?.image_ref ?? "") || proxy?.ca_file_ref !== join(inventory.run_root, "tls/ca.crt") || proxy?.server_cert_file_ref !== join(tlsRoot, `${proxy.node_container}-server.crt`) || proxy?.server_key_file_ref !== join(tlsRoot, `${proxy.node_container}-server.key`) || proxy?.management_client_cert_file_ref !== join(tlsRoot, "management-client.crt") || proxy?.management_client_identity_file_ref !== join(tlsRoot, "management-client.pem") || !["planned", "created", "started", "removed"].includes(proxy?.status) || !validTimestamp(proxy?.planned_at) || !validTimestamp(proxy?.updated_at) || (proxy?.status === "created" && !validTimestamp(proxy?.created_at)) || (proxy?.status === "started" && (!validTimestamp(proxy?.created_at) || !validTimestamp(proxy?.started_at))) || (proxy?.created_at !== undefined && !validTimestamp(proxy.created_at)) || (proxy?.started_at !== undefined && !validTimestamp(proxy.started_at)) || (proxy?.status === "removed" && !validTimestamp(proxy?.removed_at))) errors.push(`network inventory proxy is invalid at index ${index}`);
     proxyNames.add(proxy?.name); proxyNodes.add(proxy?.node_container);
   }
   const faultIds = new Set();
@@ -257,6 +278,68 @@ export function mtlsProxyCreateArgs(inventory, proxy, { binaryPath, uid = typeof
     "--key", "/run/tls/server.key",
     "--client-cert", "/run/tls/management-client.crt",
   ];
+}
+
+function writeProtectedNew(path, value) {
+  writeFileSync(path, value, { mode: 0o600, flag: "wx" });
+  chmodSync(path, 0o600);
+}
+
+function verifyMtlsCertificateSources(inventory) {
+  for (const path of [join(inventory.run_root, "tls/ca.crt"), join(inventory.run_root, "tls/ca.key"), join(inventory.run_root, "tls/ca.srl")]) {
+    const metadata = lstatSync(path);
+    if (!metadata.isFile() || metadata.isSymbolicLink() || (metadata.mode & 0o077) !== 0) throw new Error("network mTLS CA source is not a protected regular file");
+  }
+}
+
+export function prepareMtlsProxyCertificates(inventory, {
+  runner = run,
+  persist = persistNetworkAuthInventory,
+  rootAvailable = (path) => !existsSync(path),
+  createDirectory = (path) => { mkdirSync(path, { mode: 0o700 }); chmodSync(path, 0o700); },
+  writeProtected = writeProtectedNew,
+  readProtected = readFileSync,
+  protect = (path) => chmodSync(path, 0o600),
+  verifySources = verifyMtlsCertificateSources,
+} = {}) {
+  const errors = validateNetworkAuthInventory(inventory);
+  if (errors.length || inventory.proxies.length === 0 || inventory.proxies.some((proxy) => proxy.status !== "planned")) throw new Error("network mTLS certificate plan is not an exact prepared inventory");
+  const tlsRoot = join(inventory.run_root, "network-tls");
+  if (!rootAvailable(tlsRoot)) throw new Error("network mTLS certificate root already exists");
+  verifySources(inventory);
+  persist(inventory);
+  createDirectory(tlsRoot);
+  const caCert = join(inventory.run_root, "tls/ca.crt");
+  const caKey = join(inventory.run_root, "tls/ca.key");
+  const caSerial = join(inventory.run_root, "tls/ca.srl");
+  const clientKey = join(tlsRoot, "management-client.key");
+  const clientCsr = join(tlsRoot, "management-client.csr");
+  const clientCert = join(tlsRoot, "management-client.crt");
+  const clientIdentity = join(tlsRoot, "management-client.pem");
+  const clientExtensions = join(tlsRoot, "management-client-ext.cnf");
+  writeProtected(clientExtensions, "extendedKeyUsage=clientAuth\n");
+  runner("openssl", ["genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:2048", "-out", clientKey]);
+  runner("openssl", ["req", "-new", "-key", clientKey, "-subj", "/CN=agentic-celld-management", "-out", clientCsr]);
+  runner("openssl", ["x509", "-req", "-in", clientCsr, "-CA", caCert, "-CAkey", caKey, "-CAserial", caSerial, "-days", "2", "-sha256", "-extfile", clientExtensions, "-out", clientCert]);
+  for (const path of [clientKey, clientCsr, clientCert]) protect(path);
+  runner("openssl", ["verify", "-purpose", "sslclient", "-CAfile", caCert, clientCert]);
+  runner("openssl", ["x509", "-in", clientCert, "-noout", "-checkend", "3600"]);
+  writeProtected(clientIdentity, Buffer.concat([Buffer.from(readProtected(clientCert)), Buffer.from(readProtected(clientKey))]));
+
+  const servers = [];
+  for (const proxy of inventory.proxies) {
+    const serverCsr = join(tlsRoot, `${proxy.node_container}-server.csr`);
+    const serverExtensions = join(tlsRoot, `${proxy.node_container}-server-ext.cnf`);
+    writeProtected(serverExtensions, `subjectAltName=IP:${proxy.listen_address}\nextendedKeyUsage=serverAuth\n`);
+    runner("openssl", ["genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:2048", "-out", proxy.server_key_file_ref]);
+    runner("openssl", ["req", "-new", "-key", proxy.server_key_file_ref, "-subj", "/CN=celld.internal", "-out", serverCsr]);
+    runner("openssl", ["x509", "-req", "-in", serverCsr, "-CA", caCert, "-CAkey", caKey, "-CAserial", caSerial, "-days", "2", "-sha256", "-extfile", serverExtensions, "-out", proxy.server_cert_file_ref]);
+    for (const path of [proxy.server_key_file_ref, serverCsr, proxy.server_cert_file_ref]) protect(path);
+    runner("openssl", ["verify", "-purpose", "sslserver", "-CAfile", caCert, proxy.server_cert_file_ref]);
+    runner("openssl", ["x509", "-in", proxy.server_cert_file_ref, "-noout", "-checkend", "3600"]);
+    servers.push({ node_container: proxy.node_container, address: proxy.listen_address, cert_file_ref: proxy.server_cert_file_ref });
+  }
+  return { tls_root: tlsRoot, management_client_identity_file_ref: clientIdentity, servers };
 }
 
 function verifyMtlsProxyMaterial(proxy, binaryPath) {
@@ -795,7 +878,7 @@ export async function executeNetworkAuthDriver({ scenarioId, runId, liveProfileP
 
   mkdirSync(artifactDir, { recursive: true, mode: 0o700 }); chmodSync(artifactDir, 0o700);
   const timeline = [];
-  let storage = null, fleet = null, fleetPath = null, campaign = null;
+  let storage = null, fleet = null, fleetPath = null, campaign = null, networkInventory = null;
   let cleanupStatus = "failed";
   const cleanupAssertions = [];
   try {
@@ -806,10 +889,28 @@ export async function executeNetworkAuthDriver({ scenarioId, runId, liveProfileP
     fleetPath = join(root, "fleet.json");
     await deployFleetWorker(fleetPath);
     if (startFleet(fleetPath).status !== "READY") throw new Error("network/auth fleet is not ready");
+    networkInventory = createNetworkAuthInventory({ runId, runRoot: root, host });
+    const namespaces = observeFleetNetworkNamespaces(networkInventory, fleet);
+    const proxyBinaryPath = join(dirname(config.callback_relay_binary_path), "agentic-celld-mtls-proxy");
+    const proxyBinary = lstatSync(proxyBinaryPath);
+    if (!proxyBinary.isFile() || proxyBinary.isSymbolicLink() || (proxyBinary.mode & 0o111) === 0) throw new Error("network/auth mTLS proxy executable is unavailable");
+    const proxyBinarySha256 = sha256(readFileSync(proxyBinaryPath));
+    for (const namespace of namespaces) {
+      planMtlsProxy(networkInventory, {
+        nodeContainer: namespace.container,
+        listenAddress: namespace.address,
+        binarySha256: proxyBinarySha256,
+        imageRef: config.docker_image_ref,
+      });
+    }
+    persistNetworkAuthInventory(networkInventory);
+    prepareMtlsProxyCertificates(networkInventory);
+    for (const proxy of networkInventory.proxies) startMtlsProxy(networkInventory, proxy, { binaryPath: proxyBinaryPath });
     const runtime = { config, storage, fleet, fleetPath, runId };
     campaign = await (dependencies.runScenario ?? (scenarioId === "UAT-CELLD-010" ? runIsolation : runAuthentication))(runtime, timeline);
   } finally {
     try { cleanupProbeResources(runId); cleanupAssertions.push("exact network probe container and network removed"); } catch (error) { cleanupAssertions.push(`network probe cleanup digest ${sha256(error.message)}`); }
+    try { if (networkInventory) recoverNetworkAuthInventory(networkInventory); cleanupAssertions.push("exact network partitions and mTLS proxies removed"); } catch (error) { cleanupAssertions.push(`network mutation cleanup digest ${sha256(error.message)}`); }
     try { if (fleetPath && existsSync(fleetPath)) cleanupFleet(fleetPath); cleanupAssertions.push("exact network/auth fleet removed"); } catch (error) { cleanupAssertions.push(`fleet cleanup digest ${sha256(error.message)}`); }
     try { if (storage) cleanupFixture(storage); cleanupAssertions.push("exact network/auth storage fixture removed"); } catch (error) { cleanupAssertions.push(`storage cleanup digest ${sha256(error.message)}`); }
     cleanupStatus = cleanupAssertions.some((value) => value.includes("digest")) ? "failed" : "passed";

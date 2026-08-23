@@ -16,8 +16,10 @@ import {
   mapBounded,
   mtlsProxyCreateArgs,
   networkAuthInventoryLocations,
+  observeFleetNetworkNamespaces,
   planMtlsProxy,
   planDirectionalPartition,
+  prepareMtlsProxyCertificates,
   readManagementProviderCounter,
   recoverNetworkAuthInventory,
   registerNetworkNamespace,
@@ -66,6 +68,29 @@ test("bounded probe pool preserves order and never exceeds 32 in flight", async 
   assert.equal(observed, 32);
   assert.equal(statistics.max_in_flight, 32);
   await assert.rejects(() => mapBounded(values, 33, async (value) => value), /concurrency from 1 through 32/);
+});
+
+test("fleet namespace observation joins exact Docker ownership, inode, and private address", () => {
+  const inventory = createNetworkAuthInventory({ runId: "titan-765", runRoot: "/dev/shm/celld-qualification/titan-765", host: "titan" });
+  const fleet = { run_id: "titan-765", network: { name: "celld-private" }, nodes: [{ name: "celld-fleet-node-1" }, { name: "celld-fleet-node-2" }] };
+  const observed = observeFleetNetworkNamespaces(inventory, fleet, {
+    runner: (_program, args) => {
+      const index = args.at(-1).endsWith("1") ? 1 : 2;
+      return JSON.stringify([{
+        State: { Running: true, Pid: 3200 + index },
+        Config: { Labels: { "dev.agentic-sandbox.run": "titan-765", "dev.agentic-sandbox.scope": "celld-qualification" } },
+        NetworkSettings: { Networks: { "celld-private": { IPAddress: `172.30.0.${20 + index}` } } },
+      }]);
+    },
+    namespaceInode: (pid) => 4026533000 + pid,
+    now: new Date("2026-08-23T08:00:00Z"),
+  });
+  assert.deepEqual(observed.map((entry) => entry.address), ["172.30.0.21", "172.30.0.22"]);
+  assert.deepEqual(inventory.namespaces.map((entry) => entry.inode), [4026536201, 4026536202]);
+  assert.throws(() => observeFleetNetworkNamespaces(createNetworkAuthInventory({ runId: "titan-765", runRoot: "/dev/shm/celld-qualification/titan-765", host: "titan" }), fleet, {
+    runner: () => JSON.stringify([{ State: { Running: true, Pid: 3 }, Config: { Labels: { "dev.agentic-sandbox.run": "foreign" } }, NetworkSettings: { Networks: { "celld-private": { IPAddress: "172.30.0.21" } } } }]),
+    namespaceInode: () => 44,
+  }), /not exact-run owned/);
 });
 
 test("directional partition planner binds typed nft identities to an exact namespace", () => {
@@ -232,6 +257,39 @@ test("mTLS proxy cleanup closes a persisted plan whose container was never creat
   assert.equal(proxy.status, "removed");
   assert.equal(proxy.created_at, undefined);
   assert.equal(inventory.state, "clean");
+});
+
+test("mTLS certificate preparation persists first and pins client/server purposes and node IP SANs", () => {
+  const inventory = createNetworkAuthInventory({ runId: "titan-765", runRoot: "/dev/shm/celld-qualification/titan-765", host: "titan" });
+  for (const [index, address] of ["172.30.0.20", "172.30.0.21"].entries()) {
+    const node = `celld-fleet-node-${index + 1}`;
+    registerNetworkNamespace(inventory, { container: node, pid: index + 3, inode: index + 44, runLabel: "titan-765" });
+    planMtlsProxy(inventory, { nodeContainer: node, listenAddress: address, binarySha256: "7".repeat(64), imageRef: `sha256:${"6".repeat(64)}` });
+  }
+  const files = new Map();
+  const events = [];
+  const result = prepareMtlsProxyCertificates(inventory, {
+    persist: () => events.push("persist"), rootAvailable: () => true,
+    verifySources: () => events.push("verify-sources"), createDirectory: (path) => events.push(`mkdir:${path}`),
+    writeProtected: (path, value) => { files.set(path, Buffer.from(value)); events.push(`write:${path}`); },
+    readProtected: (path) => files.get(path), protect: (path) => events.push(`protect:${path}`),
+    runner: (program, args) => {
+      events.push([program, ...args]);
+      const output = args[args.indexOf("-out") + 1];
+      if (output) files.set(output, Buffer.from(args[0] === "genpkey" ? "PRIVATE-KEY\n" : args[0] === "req" ? "CSR\n" : "CERTIFICATE\n"));
+      return "";
+    },
+  });
+  assert.equal(events[0], "verify-sources");
+  assert.equal(events[1], "persist");
+  assert.equal(result.servers.length, 2);
+  assert.equal(files.get(result.management_client_identity_file_ref).toString(), "CERTIFICATE\nPRIVATE-KEY\n");
+  assert.equal([...files.values()].some((value) => value.toString().includes("subjectAltName=IP:172.30.0.20")), true);
+  const commands = events.filter(Array.isArray).map((args) => args.join(" "));
+  assert.equal(commands.some((command) => command.includes("verify -purpose sslclient")), true);
+  assert.equal(commands.filter((command) => command.includes("verify -purpose sslserver")).length, 2);
+  assert.equal(commands.filter((command) => command.includes("-checkend 3600")).length, 3);
+  assert.equal(commands.some((command) => command.includes("/CN=agentic-celld-management")), true);
 });
 
 test("partition controller persists before mutation and heals only its exact nft table", () => {
