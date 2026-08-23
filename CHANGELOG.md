@@ -8,7 +8,7 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
-## [2026.8.5] — 2026-08-21
+## [2026.8.5] — 2026-08-23
 
 Patch release adding the protected Celld live-qualification implementation and
 preventing a completed libvirt checkpoint self-test from stranding its Actions
@@ -28,6 +28,16 @@ live evidence, soak, and human acceptance.
   observability prerequisites, and recovery prerequisites. Missing live
   dependencies remain typed `NOT_RUN`; UAT 016 soak and UAT 017 human
   acceptance remain operator-run (#747-#754, #764-#770, #772).
+- Added a schema-backed exact-head readiness gate for the complete Titan lane.
+  It requires all 13 automated scenarios, 44 single-owner assertions, 30
+  trusted live formulas, eight fixed drivers, nine dependency source sets,
+  bounded execution, serial cleanup, and all-outcome artifact retention before
+  fixture mutation (#772).
+- Added persist-before-mutate evidence controllers for credential/provenance,
+  correlated observability, and snapshot/runbook recovery campaigns. Their live
+  drivers remain typed `NOT_RUN` until the separately reviewed activation,
+  telemetry, versioned-snapshot, and external-evidence adapters exist
+  (#766, #769, #770).
 - Added a provider-neutral, offline-only Celld object-store migration and
   reverse-migration controller. It covers the Celld bucket namespace only,
   requires a complete writer inventory and stable listings, verifies every
@@ -55,6 +65,9 @@ live evidence, soak, and human acceptance.
   (UAT 003-015), binds destructive work to workflow opt-in plus exact-run
   ownership, rehearses offline migration, and always verifies cleanup and
   resource baselines (#754, #772).
+- Cargo compilation in repository container builds is capped at eight jobs,
+  preserving at least half of the 16-core build runner for the host and other
+  services (#789).
 
 ### Fixed
 
@@ -71,6 +84,9 @@ live evidence, soak, and human acceptance.
   reap only the fixed-name disposable self-test when an older workflow lacks
   those bounds, then schedule a restart of the deployed Titan runner service
   after cleanup completes (#744).
+- Removed a scheduler-starvation race from the libvirt circuit-breaker timeout
+  regression so loaded remote runners test the intended state transition
+  without depending on a 10 ms wall-clock window (#790).
 
 ### Documentation
 
