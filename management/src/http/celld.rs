@@ -1417,6 +1417,24 @@ mod tests {
     #[tokio::test]
     async fn interrupted_no_effect_observe_resumes_from_the_durable_dispatch_claim() {
         let (state, dispatcher, _directory) = callback_state();
+        let ledger = state.effect_ledger.as_ref().unwrap();
+        let provision = CellCommand::new(
+            "op-seed-interrupted-observe",
+            "instance-a",
+            1,
+            CellAction::Provision,
+            json!({"name":"instance-a","runtime":"docker"}),
+        )
+        .unwrap();
+        ledger.claim_managed(&provision).unwrap();
+        assert!(ledger.begin_dispatch(&provision.operation_id).unwrap());
+        ledger
+            .complete(
+                &provision.operation_id,
+                EffectStatus::Succeeded,
+                Some(&json!({"runtime_id":"runtime-a"})),
+            )
+            .unwrap();
         let command = CellCommand::new(
             "op-interrupted-observe",
             "instance-a",
@@ -1425,7 +1443,6 @@ mod tests {
             json!({}),
         )
         .unwrap();
-        let ledger = state.effect_ledger.as_ref().unwrap();
         ledger.claim_managed(&command).unwrap();
         assert!(ledger.begin_dispatch(&command.operation_id).unwrap());
 
