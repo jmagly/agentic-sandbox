@@ -28,17 +28,21 @@ const REQUIRED_TOOLS = Object.freeze([
   "jq",
   "make",
   "mkfs.xfs",
+  "nft",
   "node",
+  "nsenter",
+  "openssl",
   "python3",
   "qemu-img",
   "rustc",
   "sha256sum",
+  "sqlite3",
   "genisoimage",
   "timeout",
   "virsh",
   "xfs_quota",
 ]);
-const OPTIONAL_TOOLS = Object.freeze(["fio", "k6", "sqlite3", "stress-ng"]);
+const OPTIONAL_TOOLS = Object.freeze(["fio", "k6", "stress-ng"]);
 
 function run(program, args, timeout = 15_000) {
   const result = spawnSync(program, args, {
