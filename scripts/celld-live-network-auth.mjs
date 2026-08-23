@@ -3,6 +3,7 @@
 import { spawnSync } from "node:child_process";
 import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { request as httpsRequest } from "node:https";
 import { connect, isIP } from "node:net";
 import { hostname } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
@@ -705,14 +706,69 @@ function signedHeaders({ method, path, operationId, generation, body, keyId, key
   };
 }
 
-async function boundedRequest(endpoint, path, { method, headers, body, restrictedValues = [] }) {
-  const response = await fetch(new URL(path, endpoint), { method, headers, body, redirect: "error", signal: AbortSignal.timeout(10_000) });
-  const bytes = Buffer.from(await response.arrayBuffer());
+function decodedBoundedResponse(status, bytes, restrictedValues) {
   if (bytes.length > 4096) throw new Error("Worker denial response exceeds 4 KiB");
   const restrictedAbsent = restrictedValues.every((value) => typeof value === "string" && value.length > 0 && !bytes.includes(Buffer.from(value)));
   let value;
   try { value = JSON.parse(bytes.toString("utf8")); } catch { throw new Error("Worker denial response is not JSON"); }
-  return { status: response.status, code: value?.error?.code ?? null, restricted_absent: restrictedAbsent };
+  return { status, code: value?.error?.code ?? null, restricted_absent: restrictedAbsent };
+}
+
+function boundedHttpsRequest(url, { method, headers, body, restrictedValues, tls }) {
+  if (!Buffer.isBuffer(tls?.ca) || !Buffer.isBuffer(tls?.identity)) throw new Error("private Celld HTTPS requires protected CA and client identity bytes");
+  return new Promise((resolvePromise, rejectPromise) => {
+    const request = httpsRequest(url, {
+      method,
+      headers,
+      ca: tls.ca,
+      cert: tls.identity,
+      key: tls.identity,
+      rejectUnauthorized: true,
+      agent: false,
+      timeout: 10_000,
+    }, (response) => {
+      const chunks = [];
+      let length = 0;
+      response.on("data", (chunk) => {
+        length += chunk.length;
+        if (length > 4096) {
+          request.destroy(new Error("Worker denial response exceeds 4 KiB"));
+          return;
+        }
+        chunks.push(chunk);
+      });
+      response.once("end", () => {
+        try { resolvePromise(decodedBoundedResponse(response.statusCode, Buffer.concat(chunks), restrictedValues)); }
+        catch (error) { rejectPromise(error); }
+      });
+    });
+    request.once("timeout", () => request.destroy(new Error("private Celld HTTPS request timed out")));
+    request.once("error", rejectPromise);
+    if (body !== undefined) request.write(body);
+    request.end();
+  });
+}
+
+async function boundedRequest(endpoint, path, { method, headers, body, restrictedValues = [], tls = null }) {
+  const url = new URL(path, endpoint);
+  if (url.protocol === "https:") return boundedHttpsRequest(url, { method, headers, body, restrictedValues, tls });
+  if (url.protocol !== "http:" || tls !== null) throw new Error("Worker request transport is invalid");
+  const response = await fetch(url, { method, headers, body, redirect: "error", signal: AbortSignal.timeout(10_000) });
+  return decodedBoundedResponse(response.status, Buffer.from(await response.arrayBuffer()), restrictedValues);
+}
+
+export function privateCelldRoute(inventory, { readProtected = readFileSync, inspect = lstatSync } = {}) {
+  const errors = validateNetworkAuthInventory(inventory);
+  const proxy = inventory?.proxies?.[0];
+  if (errors.length || !proxy || proxy.status !== "started") throw new Error("private Celld route requires an exact started proxy inventory");
+  for (const path of [proxy.ca_file_ref, proxy.management_client_identity_file_ref]) {
+    const metadata = inspect(path);
+    if (!metadata.isFile() || metadata.isSymbolicLink() || (metadata.mode & 0o077) !== 0) throw new Error("private Celld route material is not a protected regular file");
+  }
+  return {
+    endpoint: `https://${proxy.listen_address}:${proxy.listen_port}`,
+    tls: { ca: Buffer.from(readProtected(proxy.ca_file_ref)), identity: Buffer.from(readProtected(proxy.management_client_identity_file_ref)) },
+  };
 }
 
 function workerEndpoint(fleet) {
@@ -728,7 +784,7 @@ function commandBody(operationId, instanceId) {
   return JSON.stringify({ document_type: "instance-cell-command", schema_version: "1", ...command, request_hash: sha256(canonicalJson(command)), issued_at: new Date().toISOString() });
 }
 
-async function negativeRequest(endpoint, keyring, kind, attempt) {
+async function negativeRequest(route, keyring, kind, attempt) {
   const instanceId = `negative-${kind}`;
   const operationId = `negative-${kind}-${attempt}`;
   const path = `/instance-cells/${instanceId}/commands`;
@@ -747,11 +803,11 @@ async function negativeRequest(endpoint, keyring, kind, attempt) {
   if (kind === "nonce_replay") {
     const getPath = `/instance-cells/replay-${attempt}`;
     const getHeaders = signedHeaders({ method: "GET", path: getPath, operationId, generation: 1, body: "", ...keyring });
-    const first = await boundedRequest(endpoint, getPath, { method: "GET", headers: getHeaders });
+    const first = await boundedRequest(route.endpoint, getPath, { method: "GET", headers: getHeaders, tls: route.tls });
     if (first.status !== 404 || first.code !== "cell.missing") throw new Error("nonce replay setup did not authenticate without a provider effect");
-    return boundedRequest(endpoint, getPath, { method: "GET", headers: getHeaders });
+    return boundedRequest(route.endpoint, getPath, { method: "GET", headers: getHeaders, tls: route.tls });
   }
-  return boundedRequest(endpoint, path, { method: "POST", headers: { "content-type": "application/json", ...headers }, body });
+  return boundedRequest(route.endpoint, path, { method: "POST", headers: { "content-type": "application/json", ...headers }, body, tls: route.tls });
 }
 
 async function tcpDenied(host, port, attempts, statistics) {
@@ -858,13 +914,13 @@ async function runIsolation(runtime, timeline) {
 }
 
 async function runAuthentication(runtime, timeline) {
-  const endpoint = workerEndpoint(runtime.fleet), keyring = workerKey(runtime.fleet.worker_vars_file_ref);
+  const route = privateCelldRoute(runtime.networkInventory), keyring = workerKey(runtime.fleet.worker_vars_file_ref);
   const providerBefore = providerCounter(runtime);
   let denied = 0;
   const probeStatistics = {};
   for (const kind of DENIAL_CLASSES) {
     const codes = new Map();
-    const results = await mapBounded(Array.from({ length: 1_000 }, (_value, attempt) => attempt), PROBE_CONCURRENCY, (attempt) => negativeRequest(endpoint, keyring, kind, attempt), probeStatistics);
+    const results = await mapBounded(Array.from({ length: 1_000 }, (_value, attempt) => attempt), PROBE_CONCURRENCY, (attempt) => negativeRequest(route, keyring, kind, attempt), probeStatistics);
     for (const result of results) {
       const expected = kind === "nonce_replay" ? result.status === 409 && result.code === "cell.signature_replayed" : result.status === 401 && typeof result.code === "string" && result.code.startsWith("cell.signature_");
       if (expected) denied += 1;
@@ -875,12 +931,12 @@ async function runAuthentication(runtime, timeline) {
   for (const kind of DENIAL_CLASSES) {
     const path = `/instance-cells/negative-${kind}`;
     const operationId = `absence-${kind}-${randomBytes(8).toString("hex")}`;
-    const result = await boundedRequest(endpoint, path, { method: "GET", headers: signedHeaders({ method: "GET", path, operationId, generation: 1, body: "", ...keyring }) });
+    const result = await boundedRequest(route.endpoint, path, { method: "GET", headers: signedHeaders({ method: "GET", path, operationId, generation: 1, body: "", ...keyring }), tls: route.tls });
     if (result.status !== 404 || result.code !== "cell.missing") throw new Error(`negative authentication class created durable state: ${kind}`);
   }
   const validOperation = `valid-${randomBytes(12).toString("hex")}`, validPath = `/instance-cells/${randomUUID()}`;
   const validHeaders = signedHeaders({ method: "GET", path: validPath, operationId: validOperation, generation: 1, body: "", ...keyring });
-  const valid = await boundedRequest(endpoint, validPath, { method: "GET", headers: validHeaders, restrictedValues: [validHeaders["x-agentic-signature"], keyring.key] });
+  const valid = await boundedRequest(route.endpoint, validPath, { method: "GET", headers: validHeaders, restrictedValues: [validHeaders["x-agentic-signature"], keyring.key], tls: route.tls });
   if (valid.status !== 404 || valid.code !== "cell.missing") throw new Error("valid signed Worker identity did not authenticate exactly once");
   const providerAfter = providerCounter(runtime);
   const providerEffects = providerAfter - providerBefore;

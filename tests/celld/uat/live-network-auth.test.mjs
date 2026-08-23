@@ -19,6 +19,7 @@ import {
   observeFleetNetworkNamespaces,
   planMtlsProxy,
   planDirectionalPartition,
+  privateCelldRoute,
   prepareMtlsProxyCertificates,
   readManagementProviderCounter,
   recoverNetworkAuthInventory,
@@ -312,6 +313,27 @@ test("mTLS proxy readiness requires every exact started sidecar", async () => {
   await assert.rejects(() => waitMtlsProxies(inventory, { attempts: 2, intervalMs: 0, delay: async () => {}, probe: async () => false }), /readiness failed/);
 });
 
+test("authentication route loads the exact protected mTLS proxy identity", () => {
+  const inventory = createNetworkAuthInventory({ runId: "titan-765", runRoot: "/dev/shm/celld-qualification/titan-765", host: "titan" });
+  registerNetworkNamespace(inventory, { container: "celld-fleet-node-1", pid: 3, inode: 44, runLabel: "titan-765" });
+  const proxy = planMtlsProxy(inventory, {
+    nodeContainer: "celld-fleet-node-1", listenAddress: "172.30.0.20", binarySha256: "7".repeat(64), imageRef: `sha256:${"6".repeat(64)}`,
+  });
+  proxy.status = "started";
+  proxy.created_at = "2026-08-23T08:00:07Z";
+  proxy.started_at = "2026-08-23T08:00:08Z";
+  proxy.updated_at = proxy.started_at;
+  const reads = [];
+  const route = privateCelldRoute(inventory, {
+    inspect: () => ({ isFile: () => true, isSymbolicLink: () => false, mode: 0o100600 }),
+    readProtected: (path) => { reads.push(path); return path.endsWith("ca.crt") ? "private-ca" : "client-identity"; },
+  });
+  assert.equal(route.endpoint, "https://172.30.0.20:8443");
+  assert.equal(route.tls.ca.toString(), "private-ca");
+  assert.equal(route.tls.identity.toString(), "client-identity");
+  assert.deepEqual(reads, [proxy.ca_file_ref, proxy.management_client_identity_file_ref]);
+});
+
 test("partition controller persists before mutation and heals only its exact nft table", () => {
   const inventory = createNetworkAuthInventory({ runId: "titan-765", runRoot: "/dev/shm/celld-qualification/titan-765", host: "titan", now: new Date("2026-08-23T08:00:00Z") });
   registerNetworkNamespace(inventory, { container: "celld-fleet-node-1", pid: 3210, inode: 4026533001, runLabel: "titan-765" }, new Date("2026-08-23T08:00:01Z"));
@@ -520,6 +542,7 @@ test("network/auth source fixes the qualified sample sizes and pins the probe im
   assert.match(source, /mapBounded\(Array\.from\(\{ length: 1_000 \}/);
   assert.match(source, /String\(PROBE_CONCURRENCY\)/);
   assert.match(source, /readManagementProviderCounter/);
+  assert.match(source, /const route = privateCelldRoute\(runtime\.networkInventory\)/);
   assert.doesNotMatch(source, /provider_effects:\s*0/);
   assert.match(source, /docker\.io\/library\/node:20@sha256:[0-9a-f]{64}/);
   assert.doesNotMatch(source, /docker\.io\/library\/node:(?:latest|20)(?:["'])/);
