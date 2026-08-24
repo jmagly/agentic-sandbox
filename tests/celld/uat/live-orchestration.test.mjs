@@ -25,6 +25,8 @@ import {
   waitDispatchGate,
 } from "../../../scripts/celld-live-orchestration.mjs";
 
+const orchestrationSource = readFileSync(new URL("../../../scripts/celld-live-orchestration.mjs", import.meta.url), "utf8");
+
 function config(overrides = {}) {
   return {
     schema_version: "agentic-sandbox.celld-live-orchestration/v1",
@@ -53,6 +55,19 @@ test("orchestration config confines exact-run mutation targets and immutable inp
   assert.match(validateOrchestrationConfig(config({ docker_image_ref: "latest" }), { repoRoot: "/repo" }).join(";"), /immutable local OCI image ID/);
   assert.match(validateOrchestrationConfig(config({ management_binary_path: "/tmp/agentic-mgmt" }), { repoRoot: "/repo" }).join(";"), /approved build target/);
   assert.match(validateOrchestrationConfig(config({ libvirt_uri: "qemu:///session" }), { repoRoot: "/repo" }).join(";"), /qemu:\/\/\/system/);
+});
+
+test("QEMU cleanup helper verification permits Cargo build hardlinks but keeps installed helper single-linked", () => {
+  const verifier = orchestrationSource.match(/export function verifyQemuCleanupHelperInstallation\(config\) \{[\s\S]*?\n\}/)?.[0] ?? "";
+  assert.notEqual(verifier, "", "missing QEMU cleanup helper verifier");
+  assert.match(verifier, /built\.isFile\(\)/);
+  assert.match(verifier, /built\.isSymbolicLink\(\)/);
+  assert.match(verifier, /built\.mode & 0o111/);
+  assert.doesNotMatch(verifier, /built\.nlink\s*!==\s*1/);
+  assert.match(verifier, /installed\.nlink\s*!==\s*1/);
+  assert.match(verifier, /installed\.uid !== 0/);
+  assert.match(verifier, /installed\.gid !== 0/);
+  assert.match(verifier, /\(installed\.mode & 0o777\) !== 0o755/);
 });
 
 test("callback request hash matches the Rust and Worker canonical contract", () => {

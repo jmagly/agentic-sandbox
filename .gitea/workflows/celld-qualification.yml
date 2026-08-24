@@ -456,6 +456,7 @@ jobs:
           test "${scratch}" = "${GITHUB_WORKSPACE}/.ci-tmp"
           du -sh "${target}" "${scratch}" 2>/dev/null || true
           cargo clean --manifest-path management/Cargo.toml --target-dir "${target}"
+          echo "TMPDIR=/tmp" >> "${GITHUB_ENV}"
           rm -rf -- "${scratch}"
 
       - name: Verify post-run resource and capacity baseline

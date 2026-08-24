@@ -51,6 +51,7 @@ test("Celld qualification generated evidence and scratch paths stay outside sour
   assert.match(workflow, /--output artifacts\/celld-qualification-readiness\.json/);
   assert.match(workflow, /CARGO_TARGET_DIR: \$\{\{ github\.workspace \}\}\/\.celld-target/);
   assert.match(workflow, /install -d -m 0700 "\$\{GITHUB_WORKSPACE\}\/\.ci-tmp"/);
+  assert.match(workflow, /echo "TMPDIR=\/tmp" >> "\$\{GITHUB_ENV\}"[\s\S]*rm -rf -- "\$\{scratch\}"/);
   assert.match(workflow, /CARGO_TARGET_DIR="\$\{GITHUB_WORKSPACE\}\/tools\/celld-callback-relay\/target"/);
   assert.match(workflow, /export SOURCE_DATE_EPOCH=0/);
   assert.match(workflow, /export CARGO_INCREMENTAL=0/);

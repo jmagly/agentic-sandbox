@@ -186,7 +186,7 @@ export function verifyQemuCleanupHelperInstallation(config) {
     const builtPath = builtQemuCleanupHelperPath(config.callback_relay_binary_path);
     const built = lstatSync(builtPath);
     const installed = lstatSync(QEMU_CLEANUP_HELPER_PATH);
-    if (!built.isFile() || built.isSymbolicLink() || built.nlink !== 1 || (built.mode & 0o111) === 0
+    if (!built.isFile() || built.isSymbolicLink() || (built.mode & 0o111) === 0
         || !installed.isFile() || installed.isSymbolicLink() || installed.nlink !== 1
         || installed.uid !== 0 || installed.gid !== 0 || (installed.mode & 0o777) !== 0o755) return false;
     const builtDigest = fileSha256(builtPath);
