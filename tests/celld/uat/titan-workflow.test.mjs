@@ -52,6 +52,10 @@ test("Celld qualification generated evidence and scratch paths stay outside sour
   assert.match(workflow, /CARGO_TARGET_DIR: \$\{\{ github\.workspace \}\}\/\.celld-target/);
   assert.match(workflow, /install -d -m 0700 "\$\{GITHUB_WORKSPACE\}\/\.ci-tmp"/);
   assert.match(workflow, /CARGO_TARGET_DIR="\$\{GITHUB_WORKSPACE\}\/tools\/celld-callback-relay\/target"/);
+  assert.match(workflow, /export SOURCE_DATE_EPOCH=0/);
+  assert.match(workflow, /export CARGO_INCREMENTAL=0/);
+  assert.match(workflow, /--remap-path-prefix=\$\{GITHUB_WORKSPACE\}=\/workspace/);
+  assert.match(workflow, /--remap-path-prefix=\$\{cargo_home\}=\/cargo-home/);
   const ignoredPaths = new Set(gitignore.split(/\r?\n/));
   for (const path of ["/artifacts/", "/.ci-tmp/", "/.celld-target/", "/tools/celld-callback-relay/target/"]) {
     assert.ok(ignoredPaths.has(path), `${path} must be ignored`);
