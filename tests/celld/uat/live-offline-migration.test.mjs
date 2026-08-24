@@ -187,6 +187,69 @@ test("sanitized operation context rejects unsafe dynamic details", () => {
   assert.equal(context.stderr_sha256, "4".repeat(64));
 });
 
+test("offline migration failure context preserves sanitized fleet diagnosis detail", () => {
+  const error = new Error("fleet startup failed with secret=must-not-appear");
+  error.name = "FleetStartupReadinessError";
+  error.evidence = {
+    schema_version: "agentic-sandbox.celld-fleet-diagnosis/v1",
+    status: "NOT_READY",
+    reason_code: "CELLD_FLEET_STARTUP_NOT_READY",
+    retryable: false,
+    membership: {
+      expected: 3,
+      running: 2,
+      reserve: 0,
+      probe: "failed",
+      probe_sha256: "5".repeat(64),
+      attempts: 4,
+    },
+    failure: {
+      attempts: 4,
+      max_attempts: 5,
+      deadline_ms: 5000,
+      backoff_ms: 250,
+      expected_node_ids_sha256: "6".repeat(64),
+      reason_code: "CELLD_DIAGNOSIS_NONRETRYABLE_FAILURE",
+      evidence_sha256: "7".repeat(64),
+      raw: "secret=must-not-appear",
+    },
+    nodes: [
+      { name: "node-a", role: "primary", node_id: "node-a", running: true, public_endpoint: "http://127.0.0.1:20001" },
+      { name: "node-b", role: "peer", node_id: "node-b", running: true, public_endpoint: "http://127.0.0.1:20002" },
+      { name: "node-c", role: "reserve", node_id: "node-c", running: false, public_endpoint: null },
+    ],
+  };
+  const context = sanitizeOperationError(error, "start-source-fleet");
+  assert.equal(JSON.stringify(context).includes("must-not-appear"), false);
+  assert.equal(JSON.stringify(context).includes("127.0.0.1"), false);
+  assert.equal(context.name, "FleetStartupReadinessError");
+  assert.equal(context.fleet_diagnosis.status, "NOT_READY");
+  assert.equal(context.fleet_diagnosis.retryable, false);
+  assert.deepEqual(context.fleet_diagnosis.membership, {
+    expected: 3,
+    running: 2,
+    reserve: 0,
+    probe: "failed",
+    attempts: 4,
+    probe_sha256: "5".repeat(64),
+  });
+  assert.deepEqual(context.fleet_diagnosis.failure, {
+    attempts: 4,
+    max_attempts: 5,
+    deadline_ms: 5000,
+    backoff_ms: 250,
+    reason_code: "CELLD_DIAGNOSIS_NONRETRYABLE_FAILURE",
+    evidence_sha256: "7".repeat(64),
+    expected_node_ids_sha256: "6".repeat(64),
+  });
+  assert.deepEqual(context.fleet_diagnosis.nodes, {
+    total: 3,
+    running: 2,
+    public_endpoints: 2,
+    reserve_running: 0,
+  });
+});
+
 test("live migration adapter restores the reusable source policy and fails cleanup closed", () => {
   const source = readFileSync(new URL("../../../scripts/celld-live-offline-migration.mjs", import.meta.url), "utf8");
   assert.match(source, /await setBucketWrite\(sourceStorage, true, sourceStore\)/);

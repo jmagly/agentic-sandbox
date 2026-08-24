@@ -222,7 +222,50 @@ export function sanitizeOperationError(error, failureStage) {
   if (typeof error.timedOut === "boolean") context.timed_out = error.timedOut;
   if (/^[0-9a-f]{64}$/.test(error.stdoutSha256 ?? "")) context.stdout_sha256 = error.stdoutSha256;
   if (/^[0-9a-f]{64}$/.test(error.stderrSha256 ?? "")) context.stderr_sha256 = error.stderrSha256;
+  const fleetDiagnosis = sanitizeFleetDiagnosisEvidence(error.evidence);
+  if (fleetDiagnosis) context.fleet_diagnosis = fleetDiagnosis;
   return context;
+}
+
+function sanitizeFleetDiagnosisEvidence(evidence) {
+  if (!evidence || typeof evidence !== "object" || Array.isArray(evidence)) return null;
+  const failure = evidence.failure && typeof evidence.failure === "object" && !Array.isArray(evidence.failure)
+    ? evidence.failure
+    : {};
+  const membership = evidence.membership && typeof evidence.membership === "object" && !Array.isArray(evidence.membership)
+    ? evidence.membership
+    : {};
+  const nodes = Array.isArray(evidence.nodes) ? evidence.nodes : [];
+  const sanitized = {
+    schema_version: evidence.schema_version === "agentic-sandbox.celld-fleet-diagnosis/v1" ? evidence.schema_version : undefined,
+    status: evidence.status === "READY" || evidence.status === "NOT_READY" ? evidence.status : undefined,
+    reason_code: evidence.reason_code === "CELLD_FLEET_STARTUP_NOT_READY" ? evidence.reason_code : undefined,
+    retryable: typeof evidence.retryable === "boolean" ? evidence.retryable : undefined,
+    membership: {
+      expected: Number.isSafeInteger(membership.expected) ? membership.expected : undefined,
+      running: Number.isSafeInteger(membership.running) ? membership.running : undefined,
+      reserve: Number.isSafeInteger(membership.reserve) ? membership.reserve : undefined,
+      probe: membership.probe === "passed" || membership.probe === "failed" ? membership.probe : undefined,
+      attempts: Number.isSafeInteger(membership.attempts) ? membership.attempts : undefined,
+      probe_sha256: /^[0-9a-f]{64}$/.test(membership.probe_sha256 ?? "") ? membership.probe_sha256 : undefined,
+    },
+    failure: {
+      attempts: Number.isSafeInteger(failure.attempts) ? failure.attempts : undefined,
+      max_attempts: Number.isSafeInteger(failure.max_attempts) ? failure.max_attempts : undefined,
+      deadline_ms: Number.isSafeInteger(failure.deadline_ms) ? failure.deadline_ms : undefined,
+      backoff_ms: Number.isSafeInteger(failure.backoff_ms) ? failure.backoff_ms : undefined,
+      reason_code: typeof failure.reason_code === "string" && /^CELLD_[A-Z0-9_]{1,96}$/.test(failure.reason_code) ? failure.reason_code : undefined,
+      evidence_sha256: /^[0-9a-f]{64}$/.test(failure.evidence_sha256 ?? "") ? failure.evidence_sha256 : undefined,
+      expected_node_ids_sha256: /^[0-9a-f]{64}$/.test(failure.expected_node_ids_sha256 ?? "") ? failure.expected_node_ids_sha256 : undefined,
+    },
+    nodes: {
+      total: nodes.length,
+      running: nodes.filter((node) => node?.running === true).length,
+      public_endpoints: nodes.filter((node) => typeof node?.public_endpoint === "string" && node.public_endpoint.length > 0).length,
+      reserve_running: nodes.filter((node) => node?.role === "reserve" && node?.running === true).length,
+    },
+  };
+  return JSON.parse(JSON.stringify(sanitized));
 }
 
 function decodeXml(value) {
