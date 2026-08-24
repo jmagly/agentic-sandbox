@@ -61,6 +61,32 @@ function pinnedCelldDiagnosisOutput(config, {
   return lines.join("\n");
 }
 
+function signedDirectDiagnosisOutput(config, {
+  fieldEntries = () => [
+    ["protocol", "1"],
+    ["resident_cells", "0"],
+    ["websockets", "0"],
+    ["rss_bytes", "1048576"],
+    ["in_use_bytes", "524288"],
+    ["cpu_percent", "0.00"],
+    ["fds", "12/1048576"],
+    ["pressured", "false"],
+    ["shed_cells", "0"],
+    ["restoring", "0"],
+    ["load_age_ms", "0"],
+  ],
+} = {}) {
+  return [
+    PINNED_DIAGNOSIS_OUTPUT.conditional_write_line,
+    ...config.nodes.map((node, index) => {
+      const fields = fieldEntries({ node, index })
+        .map(([key, value]) => `${key}=${value}`)
+        .join(" ");
+      return `ok peer ${node.node_id} at ${node.advertise} (signed direct probe) ${fields}`;
+    }),
+  ].join("\n");
+}
+
 function tracingPersistenceFs(events, { failDirectoryFsync = null } = {}) {
   const descriptors = new Map();
   return {
@@ -1172,12 +1198,64 @@ test("fleet readiness accepts only the exact pinned signed-direct expected-node 
       status: "READY",
     },
     {
+      name: "all three signed-direct IDs with reordered and added upstream telemetry",
+      output: (config) => signedDirectDiagnosisOutput(config, {
+        fieldEntries: () => [
+          ["upstream_metric", "not_available"],
+          ["load_age_ms", "unknown"],
+          ["protocol", "1"],
+          ["pressured", "unknown"],
+          ["fds", "unknown/unknown"],
+          ["cpu_percent", "0"],
+          ["in_use_bytes", "unknown"],
+          ["rss_bytes", "unknown"],
+          ["websockets", "unknown"],
+          ["resident_cells", "unknown"],
+          ["restoring", "unknown"],
+          ["shed_cells", "unknown"],
+        ],
+      }),
+      status: "READY",
+    },
+    {
       name: "signed-direct IDs with malformed telemetry still fail closed",
       output: (config) => pinnedCelldDiagnosisOutput(config, {
         telemetry: {
           cpu_percent: "NaN",
         },
       }),
+      status: "NOT_READY",
+      reasonCode: "CELLD_DIAGNOSIS_SIGNED_PEER_PROOF_REQUIRED",
+    },
+    {
+      name: "signed-direct IDs with unsupported protocol still fail closed",
+      output: (config) => signedDirectDiagnosisOutput(config, {
+        fieldEntries: () => [
+          ["protocol", "2"],
+          ["resident_cells", "0"],
+        ],
+      }),
+      status: "NOT_READY",
+      reasonCode: "CELLD_DIAGNOSIS_SIGNED_PEER_PROOF_REQUIRED",
+    },
+    {
+      name: "signed-direct IDs with duplicate telemetry still fail closed",
+      output: (config) => signedDirectDiagnosisOutput(config, {
+        fieldEntries: () => [
+          ["protocol", "1"],
+          ["resident_cells", "0"],
+          ["resident_cells", "1"],
+        ],
+      }),
+      status: "NOT_READY",
+      reasonCode: "CELLD_DIAGNOSIS_SIGNED_PEER_PROOF_REQUIRED",
+    },
+    {
+      name: "signed-direct IDs with malformed extra telemetry still fail closed",
+      output: (config) => [
+        PINNED_DIAGNOSIS_OUTPUT.conditional_write_line,
+        ...config.nodes.map((node) => `ok peer ${node.node_id} at ${node.advertise} (signed direct probe) protocol=1 extra=bad;`),
+      ].join("\n"),
       status: "NOT_READY",
       reasonCode: "CELLD_DIAGNOSIS_SIGNED_PEER_PROOF_REQUIRED",
     },

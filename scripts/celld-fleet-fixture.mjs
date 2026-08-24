@@ -75,7 +75,21 @@ const DEFAULT_STARTUP_READINESS = Object.freeze({
   backoffMs: 250,
 });
 const PINNED_CONDITIONAL_WRITE_LINE = "ok bucket conditional write (create, reject-create, update, reject-stale)";
-const PINNED_SIGNED_DIRECT_PEER_LINE = /^ok peer ([A-Za-z0-9][A-Za-z0-9._-]{0,127}) at ([^\s]+) \(signed direct probe\) protocol=1 resident_cells=(?:\d+|unknown) websockets=(?:\d+|unknown) rss_bytes=(?:\d+|unknown) in_use_bytes=(?:\d+|unknown) cpu_percent=(?:\d+(?:\.\d+)?|unknown) fds=(?:\d+|unknown)\/(?:\d+|unknown) pressured=(?:true|false|unknown) shed_cells=(?:\d+|unknown) restoring=(?:\d+|unknown) load_age_ms=(?:\d+|unknown)$/;
+const SIGNED_DIRECT_PEER_PREFIX = /^ok peer ([A-Za-z0-9][A-Za-z0-9._-]{0,127}) at ([^\s]+) \(signed direct probe\)(?:\s+(.+))?$/;
+const SIGNED_DIRECT_FIELD = /^([a-z][a-z0-9_]{0,63})=([A-Za-z0-9._:+,/-]{1,256})$/;
+const SIGNED_DIRECT_FIELD_VALIDATORS = Object.freeze({
+  protocol: /^1$/,
+  resident_cells: /^(?:\d+|unknown)$/,
+  websockets: /^(?:\d+|unknown)$/,
+  rss_bytes: /^(?:\d+|unknown)$/,
+  in_use_bytes: /^(?:\d+|unknown)$/,
+  cpu_percent: /^(?:\d+(?:\.\d+)?|unknown)$/,
+  fds: /^(?:\d+|unknown)\/(?:\d+|unknown)$/,
+  pressured: /^(?:true|false|unknown)$/,
+  shed_cells: /^(?:\d+|unknown)$/,
+  restoring: /^(?:\d+|unknown)$/,
+  load_age_ms: /^(?:\d+|unknown)$/,
+});
 const MAX_DIAGNOSIS_STDOUT_BYTES = 64 * 1024;
 
 export class CleanupResidueError extends Error {
@@ -1450,9 +1464,9 @@ function exactProbeReadiness(output, expectedNodeIds) {
   const signedPeers = [];
   let invalidSignedProof = false;
   for (const line of peerLines) {
-    const match = PINNED_SIGNED_DIRECT_PEER_LINE.exec(line);
-    if (!match) invalidSignedProof = true;
-    else signedPeers.push(match[1]);
+    const nodeId = parseSignedDirectPeerNodeId(line);
+    if (!nodeId) invalidSignedProof = true;
+    else signedPeers.push(nodeId);
   }
   const expected = new Set(expectedNodeIds);
   const duplicateOrForeign = signedPeers.length !== new Set(signedPeers).size
@@ -1470,6 +1484,21 @@ function exactProbeReadiness(output, expectedNodeIds) {
     retryable: !ready,
     reasonCode: ready ? "CELLD_DIAGNOSIS_READY" : "CELLD_DIAGNOSIS_LEASE_OR_PEER_INCOMPLETE",
   };
+}
+
+function parseSignedDirectPeerNodeId(line) {
+  const match = SIGNED_DIRECT_PEER_PREFIX.exec(line);
+  if (!match) return null;
+  const fields = new Map();
+  for (const token of String(match[3] ?? "").split(/\s+/).filter(Boolean)) {
+    const field = SIGNED_DIRECT_FIELD.exec(token);
+    if (!field || fields.has(field[1])) return null;
+    const validator = SIGNED_DIRECT_FIELD_VALIDATORS[field[1]];
+    if (validator && !validator.test(field[2])) return null;
+    fields.set(field[1], field[2]);
+  }
+  if (fields.get("protocol") !== "1") return null;
+  return match[1];
 }
 
 function isFleetControllerSubprocessError(error) {
