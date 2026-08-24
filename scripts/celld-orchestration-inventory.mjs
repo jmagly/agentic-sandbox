@@ -890,7 +890,14 @@ export function acquireOrchestrationInventoryLifecycle(config, { deadlineMs = 5_
       } catch (error) {
         rmSync(stagingPath, { recursive: true, force: true });
         if (!["EEXIST", "ENOTEMPTY"].includes(error.code)) throw error;
-        assertSafeLockDirectory(lockPath);
+        try {
+          assertSafeLockDirectory(lockPath);
+        } catch (lockError) {
+          if (lockError.code !== "ENOENT") throw lockError;
+          if (Date.now() > deadline) throw new Error("orchestration inventory compare-and-swap lock deadline expired");
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+          continue;
+        }
         const observed = readLockOwner(ownerPath);
         if (observed.status === "valid") {
           const observedStart = processStartTimeTicks(observed.owner.pid);
