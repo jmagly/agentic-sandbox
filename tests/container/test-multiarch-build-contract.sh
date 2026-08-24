@@ -55,8 +55,10 @@ for dockerfile in Dockerfile.dev deploy/docker/Dockerfile.management deploy/dock
 done
 grep -F 'CARGO_DOCKER_BUILD_JOBS: "8"' .gitea/workflows/ci.yaml >/dev/null
 [[ "$(grep -c -- '--build-arg.*CARGO_BUILD_JOBS' .gitea/workflows/ci.yaml)" -ge 2 ]]
-grep -F 'build-args: |' .gitea/workflows/ci.yaml >/dev/null
-grep -F 'CARGO_BUILD_JOBS=${{ env.CARGO_DOCKER_BUILD_JOBS }}' .gitea/workflows/ci.yaml >/dev/null
+[[ "$(grep -c -- 'timeout --signal=TERM --kill-after=60s 45m' .gitea/workflows/ci.yaml)" -ge 2 ]]
+grep -F -- '--provenance=false' .gitea/workflows/ci.yaml >/dev/null
+grep -F -- '--sbom=false' .gitea/workflows/ci.yaml >/dev/null
+grep -F 'CARGO_BUILD_JOBS=${CARGO_DOCKER_BUILD_JOBS}' .gitea/workflows/ci.yaml >/dev/null
 grep -F 'AGENT_IMAGE_CARGO_BUILD_JOBS:-8' scripts/build-multiarch-agent-images.sh >/dev/null
 grep -q 'COPY --from=agent-builder' images/container/Dockerfile.base
 grep -q 'codex-linux-arm64' images/container/Dockerfile.codex
