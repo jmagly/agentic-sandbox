@@ -159,9 +159,27 @@ export function validateOrchestrationInventory(inventory, config, options = {}) 
 }
 
 export function loadAuthorizedOrchestrationInventory(profile, config, expectedHostSha256) {
-  if (profile.authorization?.destructive_faults !== true || profile.authorization?.exact_run_owner !== profile.run_id) throw new Error("exact-run destructive authorization is required");
-  if (resolve(profile.authorization.inventory_path ?? "") !== resolve(config.inventory_path ?? "")) throw new Error("authorization inventory path is not the fixed orchestration inventory");
+  if (!profileHasExactDestructiveAuthorization(profile)) throw new Error("exact-run destructive authorization is required");
+  return loadProfileBoundOrchestrationInventory(profile, config, expectedHostSha256);
+}
+
+function profileHasExactDestructiveAuthorization(profile) {
+  return profile.authorization?.destructive_faults === true && profile.authorization?.exact_run_owner === profile.run_id;
+}
+
+function loadProfileBoundOrchestrationInventory(profile, config, expectedHostSha256) {
+  if (resolve(profile.authorization?.inventory_path ?? "") !== resolve(config.inventory_path ?? "")) throw new Error("authorization inventory path is not the fixed orchestration inventory");
   return loadProtectedOrchestrationInventory(config.inventory_path, config, { expectedHostSha256 });
+}
+
+function orchestrationInventoryNeedsDestructiveRecovery(inventory) {
+  const activeFaults = inventory.faults.filter((fault) => ["applied", "heal_pending"].includes(fault.status));
+  const activeResources = inventory.resources.filter((resource) => resource.status !== "removed");
+  const pendingIds = [...(inventory.incomplete_mutation_ids ?? [])];
+  const retainedQemuCleanup = Array.isArray(inventory.journal) && inventory.resources.some((resource) => resource.status === "removed"
+    && resource.substrate === "qemu"
+    && latestProviderCleanupPlan(inventory, resource.instance_id));
+  return pendingIds.length > 0 || activeFaults.length > 0 || activeResources.length > 0 || retainedQemuCleanup;
 }
 
 function executable(path, description) {
@@ -2813,7 +2831,8 @@ export async function executeOrchestrationDriver({ scenarioId, runId, liveProfil
   };
 }
 
-function loadProtectedOrchestrationRuntime(configPath, profilePath) {
+export function loadProtectedOrchestrationRuntime(configPath, profilePath, options = {}) {
+  const { requireDestructiveAuthorization = true } = options;
   const resolvedConfigPath = resolve(configPath);
   const config = protectedJson(resolvedConfigPath, "orchestration config");
   const errors = validateOrchestrationConfig(config);
@@ -2828,7 +2847,12 @@ function loadProtectedOrchestrationRuntime(configPath, profilePath) {
   }
   const observedHostSha256 = sha256(hostname());
   if (profile.environment.host_sha256 !== observedHostSha256) throw new Error("protected live profile does not authorize this host");
-  const orchestrationInventory = loadAuthorizedOrchestrationInventory(profile, config, observedHostSha256);
+  const orchestrationInventory = requireDestructiveAuthorization
+    ? loadAuthorizedOrchestrationInventory(profile, config, observedHostSha256)
+    : loadProfileBoundOrchestrationInventory(profile, config, observedHostSha256);
+  if (!requireDestructiveAuthorization && !profileHasExactDestructiveAuthorization(profile) && orchestrationInventoryNeedsDestructiveRecovery(orchestrationInventory)) {
+    throw new OrchestrationCleanupResidueError("exact-run destructive authorization is required for retained orchestration effects");
+  }
   const activeResources = orchestrationInventory.resources
     .filter((resource) => resource.status !== "removed")
     .map((resource) => [resource.instance_id, { instanceId: resource.instance_id, name: resource.name, substrate: resource.substrate }]);
@@ -2859,7 +2883,7 @@ async function recoverRetainedOrchestrationRun({ runId, orchestrationRoot, retai
   if (profilePath !== null && protectedProfilePath !== join("/dev/shm/agentic-celld-storage", runId, "live-profile.json")) {
     throw new Error("retained recovery profile is outside the exact production storage run layout");
   }
-  const runtime = loadProtectedOrchestrationRuntime(join(retained, "orchestration.json"), protectedProfilePath);
+  const runtime = loadProtectedOrchestrationRuntime(join(retained, "orchestration.json"), protectedProfilePath, { requireDestructiveAuthorization: false });
   if (runtime.runId !== runId || runtime.orchestrationInventory.owner?.run_id !== exactRunOwner) {
     throw new Error("retained orchestration inventory belongs to another run");
   }
@@ -2934,12 +2958,12 @@ export function cleanupOrchestrationRoot(configPath, options = {}) {
 
 async function main(args) {
   if (args[0] === "cleanup") {
-    if (args.includes("--profile")) loadProtectedOrchestrationRuntime(argument(args, "--config"), argument(args, "--profile"));
+    if (args.includes("--profile")) loadProtectedOrchestrationRuntime(argument(args, "--config"), argument(args, "--profile"), { requireDestructiveAuthorization: false });
     process.stdout.write(`${JSON.stringify(cleanupOrchestrationRoot(argument(args, "--config")))}\n`);
     return;
   }
   if (args[0] === "recover") {
-    const runtime = loadProtectedOrchestrationRuntime(argument(args, "--config"), argument(args, "--profile"));
+    const runtime = loadProtectedOrchestrationRuntime(argument(args, "--config"), argument(args, "--profile"), { requireDestructiveAuthorization: false });
     process.stdout.write(`${JSON.stringify(await recoverOrchestrationInventory(runtime))}\n`);
     return;
   }

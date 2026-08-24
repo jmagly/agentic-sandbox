@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
@@ -15,6 +15,7 @@ import {
   healPlannedOrchestrationFault,
   issueCommand,
   loadAuthorizedOrchestrationInventory,
+  loadProtectedOrchestrationRuntime,
   managementEnvironment,
   observeCelldOwnership,
   observeOrchestrationProvider,
@@ -490,6 +491,76 @@ test("authorized orchestration inventory rejects missing, symlinked, group-reada
     assert.throws(() => loadAuthorizedOrchestrationInventory(profile, liveConfig, "2".repeat(64)), /inventory run\/owner/);
   } finally {
     rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+function protectedRuntimeFixture({ runId, destructive = false, active = false } = {}) {
+  const resolvedRunId = runId ?? `test-${process.pid}-${Date.now()}`;
+  const root = join("/dev/shm/agentic-celld-orchestration", resolvedRunId);
+  const profileRoot = join("/dev/shm/agentic-celld-storage", resolvedRunId);
+  mkdirSync(root, { recursive: true, mode: 0o700 });
+  mkdirSync(profileRoot, { recursive: true, mode: 0o700 });
+  chmodSync(root, 0o700);
+  chmodSync(profileRoot, 0o700);
+  const liveConfig = config({
+    run_id: resolvedRunId,
+    working_root: root,
+    inventory_path: join(root, "orchestration-inventory.json"),
+    management_binary_path: join(process.cwd(), ".celld-target/release/agentic-mgmt"),
+    agent_client_binary_path: join(process.cwd(), ".celld-target/release/agent-client"),
+    callback_relay_binary_path: join(process.cwd(), "tools/celld-callback-relay/target/x86_64-unknown-linux-musl/release/agentic-celld-callback-relay"),
+  });
+  const hostSha256 = createHash("sha256").update(hostname()).digest("hex");
+  const document = inventoryV2({ includeProvision: active });
+  document.run_id = resolvedRunId;
+  document.working_root = root;
+  document.host_sha256 = hostSha256;
+  document.owner = { ...document.owner, run_id: resolvedRunId };
+  for (const resource of document.resources) resource.scenario_id = "UAT-CELLD-003";
+  const profile = {
+    schema_version: "agentic-sandbox.celld-live-profile/v1",
+    profile_id: `${resolvedRunId}-profile`,
+    run_id: resolvedRunId,
+    expected_sandbox_git: "1".repeat(40),
+    environment: { kind: "disposable-local", single_host: true, host_sha256: hostSha256 },
+    authorization: { destructive_faults: destructive, inventory_path: liveConfig.inventory_path, ...(destructive ? { exact_run_owner: resolvedRunId } : {}) },
+    drivers: { "celld-live-orchestration": { enabled: true, config_path: join(root, "orchestration.json") } },
+  };
+  writeFileSync(join(root, "orchestration.json"), `${JSON.stringify(liveConfig, null, 2)}\n`, { mode: 0o600 });
+  writeFileSync(join(root, "orchestration-inventory.json"), `${JSON.stringify(document, null, 2)}\n`, { mode: 0o600 });
+  writeFileSync(join(profileRoot, "live-profile.json"), `${JSON.stringify(profile, null, 2)}\n`, { mode: 0o600 });
+  chmodSync(join(root, "orchestration.json"), 0o600);
+  chmodSync(join(root, "orchestration-inventory.json"), 0o600);
+  chmodSync(join(profileRoot, "live-profile.json"), 0o600);
+  return { root, profileRoot, configPath: join(root, "orchestration.json"), profilePath: join(profileRoot, "live-profile.json") };
+}
+
+test("protected clean no-op orchestration recovery and cleanup do not require destructive fault authorization", async () => {
+  const fixture = protectedRuntimeFixture({ destructive: false, active: false });
+  try {
+    const runtime = loadProtectedOrchestrationRuntime(fixture.configPath, fixture.profilePath, { requireDestructiveAuthorization: false });
+    const recovered = await liveOrchestration.recoverOrchestrationInventory(runtime);
+    assert.equal(recovered.status, "PASS");
+    assert.equal(recovered.recovered_mutation_ids.length, 0);
+    const cleaned = liveOrchestration.cleanupOrchestrationRoot(fixture.configPath);
+    assert.equal(cleaned.status, "PASS");
+    assert.equal(existsSync(fixture.root), false);
+  } finally {
+    if (existsSync(fixture.root)) rmSync(fixture.root, { recursive: true, force: true });
+    if (existsSync(fixture.profileRoot)) rmSync(fixture.profileRoot, { recursive: true, force: true });
+  }
+});
+
+test("protected retained orchestration effects still require exact destructive authorization", () => {
+  const fixture = protectedRuntimeFixture({ destructive: false, active: true });
+  try {
+    assert.throws(
+      () => loadProtectedOrchestrationRuntime(fixture.configPath, fixture.profilePath, { requireDestructiveAuthorization: false }),
+      liveOrchestration.OrchestrationCleanupResidueError,
+    );
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+    rmSync(fixture.profileRoot, { recursive: true, force: true });
   }
 });
 
