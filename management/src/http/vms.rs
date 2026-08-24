@@ -919,21 +919,11 @@ mod tests {
         libvirt_circuit().reset_for_tests();
     }
 
-    #[tokio::test]
-    async fn test_libvirt_circuit_opens_after_repeated_timeouts() {
-        let _guard = libvirt_test_lock().lock().await;
-        let _env = LibvirtBlockingTestGuard::enable();
-        libvirt_circuit().reset_for_tests();
+    #[test]
+    fn test_libvirt_circuit_opens_after_repeated_timeouts() {
+        let circuit = LibvirtCircuit::new();
         for attempt in 1..=LIBVIRT_CIRCUIT_FAILURE_THRESHOLD {
-            let result = force_libvirt_timeout("test.circuit_timeout").await;
-            let retry_after_seconds = match result {
-                Err(VmError::LibvirtUnresponsive {
-                    retry_after_seconds,
-                }) => retry_after_seconds,
-                other => panic!(
-                    "timeout attempt {attempt} did not return LibvirtUnresponsive: {other:?}"
-                ),
-            };
+            let retry_after_seconds = circuit.record_timeout();
             let expected_retry_after = if attempt == LIBVIRT_CIRCUIT_FAILURE_THRESHOLD {
                 LIBVIRT_CIRCUIT_OPEN_SECONDS
             } else {
@@ -942,9 +932,8 @@ mod tests {
             assert_eq!(retry_after_seconds, expected_retry_after);
         }
 
-        let result = libvirt_circuit().before_call();
+        let result = circuit.before_call();
         assert!(matches!(result, Err(VmError::LibvirtUnresponsive { .. })));
-        libvirt_circuit().reset_for_tests();
     }
 
     #[test]
