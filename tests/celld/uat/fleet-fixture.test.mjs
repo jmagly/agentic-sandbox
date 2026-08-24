@@ -62,6 +62,7 @@ function pinnedCelldDiagnosisOutput(config, {
 }
 
 function signedDirectDiagnosisOutput(config, {
+  includeAt = true,
   fieldEntries = () => [
     ["protocol", "1"],
     ["resident_cells", "0"],
@@ -82,7 +83,8 @@ function signedDirectDiagnosisOutput(config, {
       const fields = fieldEntries({ node, index })
         .map(([key, value]) => `${key}=${value}`)
         .join(" ");
-      return `ok peer ${node.node_id} at ${node.advertise} (signed direct probe) ${fields}`;
+      const address = includeAt ? `at ${node.advertise}` : node.advertise;
+      return `ok peer ${node.node_id} ${address} (signed direct probe) ${fields}`;
     }),
   ].join("\n");
 }
@@ -1215,6 +1217,11 @@ test("fleet readiness accepts only the exact pinned signed-direct expected-node 
           ["shed_cells", "unknown"],
         ],
       }),
+      status: "READY",
+    },
+    {
+      name: "all three signed-direct IDs with bare host-port address form",
+      output: (config) => signedDirectDiagnosisOutput(config, { includeAt: false }),
       status: "READY",
     },
     {

@@ -75,7 +75,7 @@ const DEFAULT_STARTUP_READINESS = Object.freeze({
   backoffMs: 250,
 });
 const PINNED_CONDITIONAL_WRITE_LINE = "ok bucket conditional write (create, reject-create, update, reject-stale)";
-const SIGNED_DIRECT_PEER_PREFIX = /^ok peer ([A-Za-z0-9][A-Za-z0-9._-]{0,127}) at ([^\s]+) \(signed direct probe\)(?:\s+(.+))?$/;
+const SIGNED_DIRECT_PEER_PREFIX = /^ok peer ([A-Za-z0-9][A-Za-z0-9._-]{0,127}) (?:at ([A-Za-z0-9][A-Za-z0-9._-]{0,127}:\d{1,5})|([A-Za-z0-9][A-Za-z0-9._-]{0,127}:\d{1,5})) \(signed direct probe\)(?:\s+(.+))?$/;
 const SIGNED_DIRECT_FIELD = /^([a-z][a-z0-9_]{0,63})=([A-Za-z0-9._:+,/-]{1,256})$/;
 const SIGNED_DIRECT_FIELD_VALIDATORS = Object.freeze({
   protocol: /^1$/,
@@ -1490,7 +1490,7 @@ function parseSignedDirectPeerNodeId(line) {
   const match = SIGNED_DIRECT_PEER_PREFIX.exec(line);
   if (!match) return null;
   const fields = new Map();
-  for (const token of String(match[3] ?? "").split(/\s+/).filter(Boolean)) {
+  for (const token of String(match[4] ?? "").split(/\s+/).filter(Boolean)) {
     const field = SIGNED_DIRECT_FIELD.exec(token);
     if (!field || fields.has(field[1])) return null;
     const validator = SIGNED_DIRECT_FIELD_VALIDATORS[field[1]];
