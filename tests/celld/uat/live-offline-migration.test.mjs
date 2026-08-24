@@ -258,6 +258,8 @@ test("live migration adapter restores the reusable source policy and fails clean
   assert.match(source, /LiveMigrationJournal/);
   assert.match(source, /observeAuthorities\(\)/);
   assert.match(source, /await deployFleetWorker\(destinationFleetPath\)/);
+  assert.match(source, /LIVE_MIGRATION_FLEET_READINESS_POLICY = Object\.freeze\(\{\s*maxAttempts: 20,\s*deadlineMs: 60_000,\s*backoffMs: 750,\s*\}\)/);
+  assert.equal((source.match(/readinessPolicy: LIVE_MIGRATION_FLEET_READINESS_POLICY/g) ?? []).length, 2);
   assert.match(source, /failure_stage: failure\.failure_stage/);
   assert.match(source, /operation_context: failure\.operation_context/);
   assert.ok(source.indexOf("cleanupFleet(destinationFleetPath)") < source.indexOf("setBucketWrite(sourceStorage, true, sourceStore)"));

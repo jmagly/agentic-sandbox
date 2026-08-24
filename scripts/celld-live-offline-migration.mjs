@@ -19,6 +19,11 @@ const RUN_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const COPYABLE_HEADERS = new Set(["cache-control", "content-disposition", "content-encoding", "content-language", "content-type", "expires", "x-amz-storage-class", "x-amz-website-redirect-location"]);
 const MIGRATION_JOURNAL_SCHEMA = "agentic-sandbox.celld-migration-journal/v1";
 const FAILURE_STAGE = /^[a-z][a-z0-9_-]{0,63}$/;
+const LIVE_MIGRATION_FLEET_READINESS_POLICY = Object.freeze({
+  maxAttempts: 20,
+  deadlineMs: 60_000,
+  backoffMs: 750,
+});
 
 function sha256(value) { return createHash("sha256").update(value).digest("hex"); }
 function sleep(ms) { return new Promise((resolvePromise) => setTimeout(resolvePromise, ms)); }
@@ -454,7 +459,7 @@ export class LiveMigrationControl {
     if (id !== null) {
       const authority = this.authorities.get(id);
       await setBucketWrite(authority.storage, true, authority.store);
-      if (startFleet(authority.fleetPath).status !== "READY") throw new Error("migration authority did not become ready");
+      if (startFleet(authority.fleetPath, { readinessPolicy: LIVE_MIGRATION_FLEET_READINESS_POLICY }).status !== "READY") throw new Error("migration authority did not become ready");
     }
   }
 
@@ -596,7 +601,7 @@ export async function executeLiveOfflineMigration({ sourceConfigPath, destinatio
     failureStage = "deploy-destination-worker";
     await deployFleetWorker(destinationFleetPath);
     failureStage = "start-source-fleet";
-    if (startFleet(sourceFleetPath).status !== "READY") throw new Error("migration source fleet did not become ready");
+    if (startFleet(sourceFleetPath, { readinessPolicy: LIVE_MIGRATION_FLEET_READINESS_POLICY }).status !== "READY") throw new Error("migration source fleet did not become ready");
     const initialSuffix = randomBytes(12).toString("hex");
     const initialOperationId = `migration-source-write-${initialSuffix}`;
     failureStage = "seed-source-worker";
