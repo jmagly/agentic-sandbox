@@ -75,7 +75,7 @@ const DEFAULT_STARTUP_READINESS = Object.freeze({
   backoffMs: 250,
 });
 const PINNED_CONDITIONAL_WRITE_LINE = "ok bucket conditional write (create, reject-create, update, reject-stale)";
-const PINNED_SIGNED_DIRECT_PEER_LINE = /^ok peer ([A-Za-z0-9][A-Za-z0-9._-]{0,127}) at ([^\s]+) \(signed direct probe\) protocol=1 resident_cells=\d+ websockets=\d+ rss_bytes=\d+ in_use_bytes=\d+ cpu_percent=\d+\.\d{2} fds=\d+\/\d+ pressured=(?:true|false) shed_cells=\d+ restoring=\d+ load_age_ms=\d+$/;
+const PINNED_SIGNED_DIRECT_PEER_LINE = /^ok peer ([A-Za-z0-9][A-Za-z0-9._-]{0,127}) at ([^\s]+) \(signed direct probe\) protocol=1 resident_cells=\d+ websockets=\d+ rss_bytes=(?:\d+|unknown) in_use_bytes=(?:\d+|unknown) cpu_percent=\d+\.\d{2} fds=\d+\/\d+ pressured=(?:true|false) shed_cells=\d+ restoring=\d+ load_age_ms=(?:\d+|unknown)$/;
 const MAX_DIAGNOSIS_STDOUT_BYTES = 64 * 1024;
 
 export class CleanupResidueError extends Error {

@@ -44,6 +44,7 @@ function pinnedCelldDiagnosisOutput(config, {
   nodeIds = config.nodes.map((node) => node.node_id),
   signed = true,
   includeConditionalWrite = true,
+  telemetry = {},
 } = {}) {
   const lines = includeConditionalWrite ? [PINNED_DIAGNOSIS_OUTPUT.conditional_write_line] : [];
   for (const [index, nodeId] of nodeIds.entries()) {
@@ -51,6 +52,9 @@ function pinnedCelldDiagnosisOutput(config, {
     let line = PINNED_DIAGNOSIS_OUTPUT.signed_direct_peer_line_template
       .replace("{{NODE_ID}}", nodeId)
       .replace("{{ADDRESS}}", address);
+    for (const [field, value] of Object.entries(telemetry)) {
+      line = line.replace(new RegExp(`${field}=[^\\s]+`), `${field}=${value}`);
+    }
     if (!signed) line = line.replace(" (signed direct probe)", " (direct probe)");
     lines.push(line);
   }
@@ -1136,6 +1140,17 @@ test("fleet readiness accepts only the exact pinned signed-direct expected-node 
     {
       name: "all three exact expected signed-direct IDs",
       output: (config) => pinnedCelldDiagnosisOutput(config),
+      status: "READY",
+    },
+    {
+      name: "all three signed-direct IDs with upstream unknown telemetry",
+      output: (config) => pinnedCelldDiagnosisOutput(config, {
+        telemetry: {
+          rss_bytes: "unknown",
+          in_use_bytes: "unknown",
+          load_age_ms: "unknown",
+        },
+      }),
       status: "READY",
     },
     {
