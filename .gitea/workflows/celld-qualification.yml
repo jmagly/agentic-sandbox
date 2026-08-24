@@ -244,6 +244,7 @@ jobs:
             --arg inventory "${orchestration_inventory}" \
             --arg config "${fixture_config}" \
             --arg orchestration_config "${orchestration_config}" \
+            --arg credential_provenance_config "${credential_provenance_config}" \
             --argjson destructive_faults "${destructive_faults}" \
             --argjson orchestration_enabled "${CELLD_QUALIFICATION_ENABLE_ORCHESTRATION}" \
             --argjson worker_enabled "${CELLD_QUALIFICATION_ENABLE_WORKER}" \
@@ -264,7 +265,7 @@ jobs:
                 "celld-live-orchestration": {enabled: $orchestration_enabled, config_path: $orchestration_config},
                 "celld-live-worker": {enabled: $worker_enabled, config_path: $orchestration_config},
                 "celld-live-network-auth": {enabled: $network_auth_enabled, config_path: $orchestration_config},
-                "celld-live-credential-provenance": {enabled: $credential_provenance_enabled, config_path: env.CELLD_CREDENTIAL_PROVENANCE_CONFIG},
+                "celld-live-credential-provenance": {enabled: $credential_provenance_enabled, config_path: $credential_provenance_config},
                 "celld-live-rollout": {enabled: $rollout_enabled, config_path: $orchestration_config},
                 "celld-live-observability": {enabled: $observability_enabled, config_path: $orchestration_config},
                 "celld-live-recovery": {enabled: $recovery_enabled, config_path: $orchestration_config},
