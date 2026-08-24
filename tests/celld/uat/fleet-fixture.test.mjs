@@ -1154,6 +1154,34 @@ test("fleet readiness accepts only the exact pinned signed-direct expected-node 
       status: "READY",
     },
     {
+      name: "all three signed-direct IDs with live variable telemetry formatting",
+      output: (config) => pinnedCelldDiagnosisOutput(config, {
+        telemetry: {
+          resident_cells: "unknown",
+          websockets: "unknown",
+          rss_bytes: "unknown",
+          in_use_bytes: "unknown",
+          cpu_percent: "0",
+          fds: "unknown/unknown",
+          pressured: "unknown",
+          shed_cells: "unknown",
+          restoring: "unknown",
+          load_age_ms: "unknown",
+        },
+      }),
+      status: "READY",
+    },
+    {
+      name: "signed-direct IDs with malformed telemetry still fail closed",
+      output: (config) => pinnedCelldDiagnosisOutput(config, {
+        telemetry: {
+          cpu_percent: "NaN",
+        },
+      }),
+      status: "NOT_READY",
+      reasonCode: "CELLD_DIAGNOSIS_SIGNED_PEER_PROOF_REQUIRED",
+    },
+    {
       name: "one signed-direct foreign ID",
       output: (config) => pinnedCelldDiagnosisOutput(config, {
         nodeIds: [...config.nodes.slice(0, 2).map((node) => node.node_id), "foreign-node-session"],
