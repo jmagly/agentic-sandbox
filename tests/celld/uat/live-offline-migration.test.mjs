@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import test from "node:test";
 
-import { buildMigrationFailureEvidence, LiveMigrationJournal, LiveS3MigrationStore, summarizeDestinationQualificationRows } from "../../../scripts/celld-live-offline-migration.mjs";
+import { buildMigrationFailureEvidence, LiveMigrationJournal, LiveS3MigrationStore, sanitizeOperationError, summarizeDestinationQualificationRows } from "../../../scripts/celld-live-offline-migration.mjs";
 
 function fixtureClient() {
   const calls = [];
@@ -125,6 +125,14 @@ test("live migration journal is protected, hash chained, and fail-closed after a
 
 test("migration failure evidence hashes the error and binds retained namespaces to the last journal phase", () => {
   const journal = { entries: [{ phase: "destination_cutover", mutation: "activate_destination" }] };
+  const operationError = new Error("sensitive diagnostic text");
+  operationError.name = "FleetControllerSubprocessError";
+  operationError.program = "docker";
+  operationError.operation = "docker_run_celld_deploy";
+  operationError.exitStatus = 125;
+  operationError.timedOut = false;
+  operationError.stdoutSha256 = "1".repeat(64);
+  operationError.stderrSha256 = "2".repeat(64);
   const failure = buildMigrationFailureEvidence({
     sourceStorage: { run_id: "source-run", bucket: "source-bucket", run_prefix: "qualification/source-run", backend: { product: "SeaweedFS" } },
     destinationStorage: { bucket: "destination-bucket", run_prefix: "qualification/destination-run", backend: { product: "SeaweedFS" } },
@@ -132,19 +140,51 @@ test("migration failure evidence hashes the error and binds retained namespaces 
     startedAt: "2026-08-23T09:00:00.000Z",
     endedAt: "2026-08-23T09:01:00.000Z",
     sandboxGit: "1".repeat(40),
-    operationError: new Error("sensitive diagnostic text"),
+    operationError,
     cleanupErrors: [],
     journalEvidence: journal,
     journalErrorSha256: null,
     retainedNamespaces: true,
+    failureStage: "deploy-destination-worker",
   });
   assert.match(failure.error_sha256, /^[0-9a-f]{64}$/);
   assert.equal(JSON.stringify(failure).includes("sensitive diagnostic text"), false);
+  assert.equal(failure.failure_stage, "deploy-destination-worker");
+  assert.deepEqual(failure.operation_context, {
+    failure_stage: "deploy-destination-worker",
+    name: "FleetControllerSubprocessError",
+    message_sha256: failure.error_sha256,
+    program: "docker",
+    operation: "docker_run_celld_deploy",
+    exit_status: 125,
+    timed_out: false,
+    stdout_sha256: "1".repeat(64),
+    stderr_sha256: "2".repeat(64),
+  });
   assert.equal(failure.last_phase, "destination_cutover");
   assert.equal(failure.last_mutation, "activate_destination");
   assert.equal(failure.retain_namespaces, true);
   assert.match(failure.source_namespace_sha256, /^[0-9a-f]{64}$/);
   assert.match(failure.destination_namespace_sha256, /^[0-9a-f]{64}$/);
+});
+
+test("sanitized operation context rejects unsafe dynamic details", () => {
+  const error = new Error("raw stderr with secret=must-not-appear");
+  error.program = "docker --bad";
+  error.operation = "bad-operation";
+  error.signal = "SIGTERM";
+  error.errorCode = "ETIMEDOUT";
+  error.stdoutSha256 = "3".repeat(64);
+  error.stderrSha256 = "4".repeat(64);
+  const context = sanitizeOperationError(error, "deploy-source-worker");
+  assert.equal(JSON.stringify(context).includes("must-not-appear"), false);
+  assert.equal(context.failure_stage, "deploy-source-worker");
+  assert.equal(context.program, undefined);
+  assert.equal(context.operation, undefined);
+  assert.equal(context.signal, "SIGTERM");
+  assert.equal(context.error_code, "ETIMEDOUT");
+  assert.equal(context.stdout_sha256, "3".repeat(64));
+  assert.equal(context.stderr_sha256, "4".repeat(64));
 });
 
 test("live migration adapter restores the reusable source policy and fails cleanup closed", () => {
@@ -155,6 +195,8 @@ test("live migration adapter restores the reusable source policy and fails clean
   assert.match(source, /LiveMigrationJournal/);
   assert.match(source, /observeAuthorities\(\)/);
   assert.match(source, /await deployFleetWorker\(destinationFleetPath\)/);
+  assert.match(source, /failure_stage: failure\.failure_stage/);
+  assert.match(source, /operation_context: failure\.operation_context/);
   assert.ok(source.indexOf("cleanupFleet(destinationFleetPath)") < source.indexOf("setBucketWrite(sourceStorage, true, sourceStore)"));
   assert.match(source, /destinationRoot !== `\/dev\/shm\/agentic-celld-migration\/\$\{destinationRunId\}`/);
   assert.match(source, /sendWorkerCommand\(\{/);

@@ -18,6 +18,7 @@ const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const RUN_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const COPYABLE_HEADERS = new Set(["cache-control", "content-disposition", "content-encoding", "content-language", "content-type", "expires", "x-amz-storage-class", "x-amz-website-redirect-location"]);
 const MIGRATION_JOURNAL_SCHEMA = "agentic-sandbox.celld-migration-journal/v1";
+const FAILURE_STAGE = /^[a-z][a-z0-9_-]{0,63}$/;
 
 function sha256(value) { return createHash("sha256").update(value).digest("hex"); }
 function sleep(ms) { return new Promise((resolvePromise) => setTimeout(resolvePromise, ms)); }
@@ -157,8 +158,8 @@ export class LiveMigrationJournal {
   }
 }
 
-export function buildMigrationFailureEvidence({ sourceStorage, destinationStorage, destinationRunId, startedAt, endedAt, sandboxGit, operationError, cleanupErrors, journalEvidence, journalErrorSha256, retainedNamespaces }) {
-  if (!sourceStorage || !RUN_ID.test(sourceStorage.run_id ?? "") || !RUN_ID.test(destinationRunId ?? "") || !/^[0-9a-f]{40}$/.test(sandboxGit ?? "") || !Array.isArray(cleanupErrors) || typeof retainedNamespaces !== "boolean") throw new Error("migration failure evidence inputs are invalid");
+export function buildMigrationFailureEvidence({ sourceStorage, destinationStorage, destinationRunId, startedAt, endedAt, sandboxGit, operationError, cleanupErrors, journalEvidence, journalErrorSha256, retainedNamespaces, failureStage = "unknown" }) {
+  if (!sourceStorage || !RUN_ID.test(sourceStorage.run_id ?? "") || !RUN_ID.test(destinationRunId ?? "") || !/^[0-9a-f]{40}$/.test(sandboxGit ?? "") || !Array.isArray(cleanupErrors) || typeof retainedNamespaces !== "boolean" || !FAILURE_STAGE.test(failureStage)) throw new Error("migration failure evidence inputs are invalid");
   const lastJournalEntry = journalEvidence?.entries?.at(-1) ?? null;
   return {
     schema_version: "agentic-sandbox.celld-offline-migration-error/v1",
@@ -172,6 +173,8 @@ export function buildMigrationFailureEvidence({ sourceStorage, destinationStorag
     source_namespace_sha256: sha256(`${sourceStorage.bucket}/${sourceStorage.run_prefix}`),
     destination_namespace_sha256: destinationStorage ? sha256(`${destinationStorage.bucket}/${destinationStorage.run_prefix}`) : null,
     error_sha256: operationError ? sha256(operationError.message) : null,
+    failure_stage: failureStage,
+    operation_context: sanitizeOperationError(operationError, failureStage),
     cleanup_errors: cleanupErrors,
     migration_journal: journalEvidence,
     journal_error_sha256: journalErrorSha256,
@@ -202,6 +205,24 @@ export function summarizeDestinationQualificationRows(rows, limits) {
   }
   if (rounds.create.size !== limits.create_rounds || rounds.overwrite.size !== limits.overwrite_rounds || denials.size !== requiredDenials.size) throw new Error("destination qualification raw evidence is incomplete or duplicated");
   return { create_rows: rounds.create.size, overwrite_rows: rounds.overwrite.size, denial_rows: denials.size, total_rows: rows.length };
+}
+
+export function sanitizeOperationError(error, failureStage) {
+  if (!error) return null;
+  const context = {
+    failure_stage: FAILURE_STAGE.test(failureStage ?? "") ? failureStage : "unknown",
+    name: typeof error.name === "string" && error.name ? error.name : "Error",
+    message_sha256: sha256(error.message ?? ""),
+  };
+  if (typeof error.program === "string" && /^[A-Za-z0-9_.-]{1,64}$/.test(error.program)) context.program = error.program;
+  if (typeof error.operation === "string" && /^[a-z][a-z0-9_]{0,63}$/.test(error.operation)) context.operation = error.operation;
+  if (Number.isInteger(error.exitStatus)) context.exit_status = error.exitStatus;
+  if (typeof error.signal === "string" && /^[A-Z0-9_-]{1,32}$/.test(error.signal)) context.signal = error.signal;
+  if (typeof error.errorCode === "string" && /^[A-Z0-9_-]{1,64}$/.test(error.errorCode)) context.error_code = error.errorCode;
+  if (typeof error.timedOut === "boolean") context.timed_out = error.timedOut;
+  if (/^[0-9a-f]{64}$/.test(error.stdoutSha256 ?? "")) context.stdout_sha256 = error.stdoutSha256;
+  if (/^[0-9a-f]{64}$/.test(error.stderrSha256 ?? "")) context.stderr_sha256 = error.stderrSha256;
+  return context;
 }
 
 function decodeXml(value) {
@@ -484,20 +505,27 @@ export async function executeLiveOfflineMigration({ sourceConfigPath, destinatio
   let sourceStore = null, destinationStore = null, sourceGatewayAccess = null, destinationGatewayAccess = null;
   let migrationJournal = null;
   let migrationBoundaryStarted = false;
+  let failureStage = "initializing";
   let sanitized = null;
   let operationError = null;
   const cleanupErrors = [];
   let retainedNamespaces = false;
   try {
+    failureStage = "start-source-storage";
     startFixture(sourceStorage);
+    failureStage = "prepare-destination-storage";
     destinationStorage = prepareFixture({ fixtureProfile: "titan-single-host-storage", runId: destinationRunId, root: destinationRoot });
+    failureStage = "start-destination-storage";
     startFixture(destinationStorage);
+    failureStage = "open-source-gateway";
     sourceGatewayAccess = await openStorageGatewayAccess(sourceStorage, { services: ["s3gateway1"] });
+    failureStage = "open-destination-gateways";
     destinationGatewayAccess = await openStorageGatewayAccess(destinationStorage, { services: ["s3gateway1", "s3gateway2"] });
     const qualificationRows = [];
     let destinationQualification;
     let qualificationRowSummary;
     try {
+      failureStage = "qualify-destination-storage";
       destinationQualification = await runS3Qualification(storageProfile(destinationStorage, destinationStorage.identity_file_ref, destinationGatewayAccess.endpoints), {
         adminIdentityFileRef: destinationStorage.admin_identity_file_ref,
         revokedIdentityFileRef: destinationStorage.revoked_identity_file_ref,
@@ -511,17 +539,24 @@ export async function executeLiveOfflineMigration({ sourceConfigPath, destinatio
     }
     const qualificationArtifact = writeArtifact(qualificationPath, `${JSON.stringify(destinationQualification)}\n`);
     const qualificationRawArtifact = writeArtifact(qualificationRawPath, `${qualificationRows.map((row) => JSON.stringify(row)).join("\n")}\n`);
+    failureStage = "evaluate-destination-storage";
     const qualificationVerdict = evaluateStorageEvidence(destinationQualification);
     if (qualificationVerdict.status !== "PASS" || qualificationVerdict.live_qualification !== true) throw new Error(`destination storage qualification failed: ${qualificationVerdict.reason_code}`);
+    failureStage = "prepare-source-fleet";
     sourceFleet = prepareFleet({ storageConfigPath: sourceConfigPath });
+    failureStage = "prepare-destination-fleet";
     destinationFleet = prepareFleet({ storageConfigPath: join(destinationRoot, "fixture.json") });
     sourceFleetPath = join(sourceStorage.run_root, "fleet.json");
     destinationFleetPath = join(destinationStorage.run_root, "fleet.json");
+    failureStage = "deploy-source-worker";
     await deployFleetWorker(sourceFleetPath);
+    failureStage = "deploy-destination-worker";
     await deployFleetWorker(destinationFleetPath);
+    failureStage = "start-source-fleet";
     if (startFleet(sourceFleetPath).status !== "READY") throw new Error("migration source fleet did not become ready");
     const initialSuffix = randomBytes(12).toString("hex");
     const initialOperationId = `migration-source-write-${initialSuffix}`;
+    failureStage = "seed-source-worker";
     const initial = await sendWorkerCommand({
       endpoint: workerEndpoint(sourceFleet),
       varsFile: sourceFleet.worker_vars_file_ref,
@@ -535,12 +570,16 @@ export async function executeLiveOfflineMigration({ sourceConfigPath, destinatio
     if (initial.status !== 202 || initial.body?.document_type !== "instance-cell-state" || !initial.body?.effects?.some((effect) => effect.operation_id === initialOperationId)) throw new Error("migration source seed write failed");
     sourceStore = new LiveS3MigrationStore(sourceStorage, { gatewayEndpoints: sourceGatewayAccess.endpoints });
     destinationStore = new LiveS3MigrationStore(destinationStorage, { gatewayEndpoints: destinationGatewayAccess.endpoints });
+    failureStage = "ensure-destination-bucket";
     await destinationStore.ensureBucket();
     const sourceAuthority = { storage: sourceStorage, fleet: sourceFleet, fleetPath: sourceFleetPath, store: sourceStore };
     const destinationAuthority = { storage: destinationStorage, fleet: destinationFleet, fleetPath: destinationFleetPath, store: destinationStore };
     migrationBoundaryStarted = true;
+    failureStage = "create-migration-journal";
     migrationJournal = new LiveMigrationJournal(join(sourceStorage.run_root, "migration-journal.json"), { runId: sourceStorage.run_id, destinationRunId });
+    failureStage = "rehearse-offline-migration";
     const evidence = await rehearseOfflineMigration({ source: sourceStore, destination: destinationStore, control: new LiveMigrationControl(sourceAuthority, destinationAuthority, migrationJournal) });
+    failureStage = "validate-migration-journal";
     const journalEvidence = migrationJournal.evidence();
     if (journalEvidence.incomplete_plan_ids.length !== 0) throw new Error("successful migration journal retains an incomplete mutation");
     sanitized = {
@@ -602,8 +641,9 @@ export async function executeLiveOfflineMigration({ sourceConfigPath, destinatio
     let journalEvidence = null;
     let journalErrorSha256 = null;
     try { journalEvidence = migrationJournal?.evidence() ?? null; } catch (error) { journalErrorSha256 = sha256(error.message); }
-    const failure = buildMigrationFailureEvidence({ sourceStorage, destinationStorage, destinationRunId, startedAt, endedAt: new Date().toISOString(), sandboxGit: run("git", ["rev-parse", "HEAD"]), operationError, cleanupErrors, journalEvidence, journalErrorSha256, retainedNamespaces });
+    const failure = buildMigrationFailureEvidence({ sourceStorage, destinationStorage, destinationRunId, startedAt, endedAt: new Date().toISOString(), sandboxGit: run("git", ["rev-parse", "HEAD"]), operationError, cleanupErrors, journalEvidence, journalErrorSha256, retainedNamespaces, failureStage });
     writeArtifact(migrationErrorPath, `${JSON.stringify(failure, null, 2)}\n`);
+    process.stderr.write(`${JSON.stringify({ status: "FAIL", reason_code: "CELLD_LIVE_OFFLINE_MIGRATION_FAILED", failure_stage: failure.failure_stage, operation_context: failure.operation_context, error_sha256: failure.error_sha256, retain_namespaces: failure.retain_namespaces })}\n`);
     throw new Error(`offline migration failed: operation=${failure.error_sha256 ?? "none"} cleanup=${sha256(cleanupErrors.join(","))}`);
   }
   sanitized.ended_at = new Date().toISOString();

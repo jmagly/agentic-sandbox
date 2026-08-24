@@ -4,7 +4,7 @@
   "title": "Celld live offline migration failure evidence v1",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "run_id", "destination_run_id", "started_at", "ended_at", "sandbox_git", "source_backend", "destination_backend", "source_namespace_sha256", "destination_namespace_sha256", "error_sha256", "cleanup_errors", "migration_journal", "journal_error_sha256", "last_phase", "last_mutation", "retain_namespaces", "retained_state", "storage_boundary"],
+  "required": ["schema_version", "run_id", "destination_run_id", "started_at", "ended_at", "sandbox_git", "source_backend", "destination_backend", "source_namespace_sha256", "destination_namespace_sha256", "error_sha256", "failure_stage", "operation_context", "cleanup_errors", "migration_journal", "journal_error_sha256", "last_phase", "last_mutation", "retain_namespaces", "retained_state", "storage_boundary"],
   "properties": {
     "schema_version": { "const": "agentic-sandbox.celld-offline-migration-error/v1" },
     "run_id": { "$ref": "#/$defs/runId" },
@@ -17,6 +17,30 @@
     "source_namespace_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
     "destination_namespace_sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
     "error_sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+    "failure_stage": { "$ref": "#/$defs/failureStage" },
+    "operation_context": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["failure_stage", "name", "message_sha256"],
+          "properties": {
+            "failure_stage": { "$ref": "#/$defs/failureStage" },
+            "name": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,127}$" },
+            "message_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "program": { "type": "string", "pattern": "^[A-Za-z0-9_.-]{1,64}$" },
+            "operation": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$" },
+            "exit_status": { "type": ["integer", "null"], "minimum": 0 },
+            "signal": { "type": "string", "pattern": "^[A-Z0-9_-]{1,32}$" },
+            "error_code": { "type": "string", "pattern": "^[A-Z0-9_-]{1,64}$" },
+            "timed_out": { "type": "boolean" },
+            "stdout_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "stderr_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+          }
+        },
+        { "type": "null" }
+      ]
+    },
     "cleanup_errors": { "type": "array", "items": { "type": "string", "maxLength": 256 } },
     "migration_journal": { "oneOf": [{ "$ref": "https://agentic-sandbox.dev/schemas/celld-migration-journal/v1" }, { "type": "null" }] },
     "journal_error_sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
@@ -27,6 +51,7 @@
     "storage_boundary": { "type": "object", "additionalProperties": false, "required": ["migrated", "sandbox_local_storage"], "properties": { "migrated": { "const": "Celld object-store namespace only" }, "sandbox_local_storage": { "const": "not_targeted" } } }
   },
   "$defs": {
-    "runId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" }
+    "runId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
+    "failureStage": { "type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$" }
   }
 }

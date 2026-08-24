@@ -99,12 +99,7 @@ class FleetControllerSubprocessError extends Error {
     super(`${basename(program)} controller subprocess failed`);
     this.name = "FleetControllerSubprocessError";
     this.program = basename(program);
-    this.operation = this.program === "docker"
-        && args[0] === "exec"
-        && args[2] === CREDENTIAL_LAUNCHER_CONTAINER_PATH
-        && args[3] === "diagnose"
-      ? "docker_exec_diagnose"
-      : "other";
+    this.operation = classifyControllerOperation(this.program, args);
     this.exitStatus = Number.isInteger(result.status) ? result.status : null;
     this.signal = typeof result.signal === "string" ? result.signal : null;
     this.errorCode = typeof result.error?.code === "string" ? result.error.code : null;
@@ -120,6 +115,23 @@ class FleetControllerSubprocessError extends Error {
       writable: false,
     });
   }
+}
+
+function classifyControllerOperation(program, args) {
+  if (program !== "docker" || !Array.isArray(args) || typeof args[0] !== "string") return "other";
+  if (args[0] === "exec" && args[2] === CREDENTIAL_LAUNCHER_CONTAINER_PATH && args[3] === "diagnose") return "docker_exec_diagnose";
+  if (args[0] === "network" && args[1] === "inspect") return "docker_network_inspect";
+  if (args[0] === "inspect") return "docker_inspect";
+  if (args[0] === "run" && args.includes("deploy")) return "docker_run_celld_deploy";
+  if (args[0] === "run") return "docker_run";
+  if (args[0] === "rm") return "docker_remove";
+  if (args[0] === "pull") return "docker_pull";
+  if (args[0] === "image" && args[1] === "inspect") return "docker_image_inspect";
+  if (args[0] === "create") return "docker_create";
+  if (args[0] === "start") return "docker_start";
+  if (args[0] === "stop") return "docker_stop";
+  if (args[0] === "port") return "docker_port";
+  return "docker_other";
 }
 
 class FleetDiagnosisDeadlineError extends Error {
