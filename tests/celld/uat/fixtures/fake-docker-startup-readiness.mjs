@@ -16,6 +16,7 @@ const pinnedDiagnosis = JSON.parse(readFileSync(pinnedDiagnosisPath, "utf8"));
 const state = existsSync(statePath)
   ? JSON.parse(readFileSync(statePath, "utf8"))
   : { containers: {}, commands: [], diagnosis_attempts: 0 };
+state.port_attempts = state.port_attempts ?? 0;
 state.commands.push(args);
 
 function persist() {
@@ -80,10 +81,15 @@ if (args[0] === "network" && args[1] === "inspect") {
   state.containers[args[1]].running = true;
   output(args[1]);
 } else if (args[0] === "port") {
+  state.port_attempts += 1;
   if (diagnosisMode === "unrelated-exit75") {
     persist();
     process.stderr.write(`${diagnosisOutput(config.nodes.map((node) => node.node_id))}\n${secret}\n`);
     process.exitCode = 75;
+  } else if (diagnosisMode === "port-race-once" && state.port_attempts === 1) {
+    persist();
+    process.stderr.write(`transient port publication lag: ${secret}\n`);
+    process.exitCode = 1;
   } else {
     const index = config.nodes.findIndex((node) => node.name === args[1]);
     output(`127.0.0.1:${18080 + index}`);
@@ -110,6 +116,8 @@ if (args[0] === "network" && args[1] === "inspect") {
       process.stderr.write(`explicit peer readiness incomplete: ${secret}\n`);
       process.exitCode = 1;
     }
+  } else if (diagnosisMode === "port-race-once") {
+    process.stdout.write(`${diagnosisOutput(expectedNodeIds)}\n`);
   } else {
     process.stdout.write(`${diagnosisOutput(expectedNodeIds.slice(0, 2))}\n`);
     process.stderr.write(`explicit peer readiness incomplete: ${secret}\n`);

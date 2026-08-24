@@ -194,10 +194,10 @@ jobs:
           fixture_root="/dev/shm/agentic-celld-storage/${run_id}"
           fixture_config="${fixture_root}/fixture.json"
           live_profile="${fixture_root}/live-profile.json"
+          credential_provenance_config="${fixture_root}/credential-provenance.json"
           orchestration_root="/dev/shm/agentic-celld-orchestration/${run_id}"
           orchestration_config="${orchestration_root}/orchestration.json"
           orchestration_inventory="${orchestration_root}/orchestration-inventory.json"
-          credential_provenance_config="${orchestration_root}/credential-provenance.json"
           migration_destination_run_id="${run_id}-migration-destination"
           migration_destination_root="/dev/shm/agentic-celld-migration/${migration_destination_run_id}"
           {

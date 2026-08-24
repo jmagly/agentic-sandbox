@@ -1427,6 +1427,15 @@ function retryableProbeError(error, expectedNodeIds) {
   return probe.ready === false && probe.retryable === true;
 }
 
+function retryablePortDiscoveryError(error) {
+  return error instanceof FleetControllerSubprocessError
+    && error.program === "docker"
+    && error.operation === "docker_port"
+    && error.exitStatus === 1
+    && error.signal === null
+    && error.timedOut === false;
+}
+
 function diagnosisErrorEvidenceSha256(error, expectedNodeIdsSha256) {
   const classified = error instanceof FleetControllerSubprocessError ? {
     kind: "controller_subprocess",
@@ -1583,6 +1592,16 @@ export function diagnoseFleet(configPath, {
   try {
     nodes = observeFleetDiagnosisNodes(config, boundedRunner);
   } catch (error) {
+    if (retryablePortDiscoveryError(error)) {
+      const result = failureDocument(
+        unknownNodes(),
+        "CELLD_DIAGNOSIS_TRANSIENT_PORT_DISCOVERY",
+        diagnosisErrorEvidenceSha256(error, expectedNodeIdsSha256),
+        true,
+      );
+      persistResult(result);
+      return result;
+    }
     if (!(error instanceof FleetDiagnosisDeadlineError)) throw error;
     const result = failureDocument(
       unknownNodes(),

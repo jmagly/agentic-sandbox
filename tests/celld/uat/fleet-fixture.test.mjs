@@ -893,6 +893,25 @@ test("real pinned Celld subprocess outcomes authorize only exact diagnosis retri
     assert.deepEqual(diagnosisActions.map((action) => action.status), ["failed", "failed", "completed"]);
   });
 
+  await t.test("transient Docker port publication lag retries without trusting stderr", async () => {
+    const { started, startupState, startupInventory, secret } = await runCliMode("port-race-once", "port-race-once");
+    assert.equal(started.status, 0, started.stderr);
+    const evidence = JSON.parse(started.stdout);
+    assert.equal(evidence.status, "READY");
+    assert.equal(evidence.membership.attempts, 2);
+    assert.equal(startupState.port_attempts, 4);
+    assert.equal(startupState.diagnosis_attempts, 1);
+    assert.equal(startupState.commands.filter((args) => args[0] === "create").length, 3);
+    assert.equal(startupState.commands.filter((args) => args[0] === "start").length, 3);
+    assert.equal(startupState.commands.filter((args) => args[0] === "exec").length, 1);
+    assert.equal(startupState.commands.filter((args) => args[0] === "port").length, 4);
+    assert.ok(!started.stdout.includes(secret));
+    assert.ok(!started.stderr.includes(secret));
+    assert.ok(!JSON.stringify(startupInventory).includes(secret));
+    const diagnosisActions = startupInventory.actions.filter((action) => action.kind === "celld_diagnose");
+    assert.deepEqual(diagnosisActions.map((action) => action.status), ["completed"]);
+  });
+
   await t.test("exit 1 with exact-looking stderr and no controller stdout never retries", async () => {
     const { started, startupState, startupInventory } = await runCliMode("stderr-spoof", "stderr-spoof");
     assert.equal(started.status, 3);
