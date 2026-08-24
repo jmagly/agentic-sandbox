@@ -82,8 +82,8 @@ build_image() {
   run docker buildx build \
     --platform "$platforms" \
     --file "$dockerfile" \
-    --provenance=true \
-    --sbom=true \
+    --provenance=false \
+    --sbom=false \
     "${TAGS[@]}" \
     "$@" \
     --push .

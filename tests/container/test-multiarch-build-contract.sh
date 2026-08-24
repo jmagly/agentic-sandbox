@@ -22,6 +22,12 @@ grep -q 'AGENT_DEV_IMAGE=registry.example.test/agentic-sandbox/agent:dev-test-sh
 grep -q 'CODEX_IMAGE=registry.example.test/agentic-sandbox/codex:test-sha' <<<"$output"
 grep -q -- '--build-arg CARGO_BUILD_JOBS=8' <<<"$output"
 [[ "$(grep -c 'docker buildx build' <<<"$output")" -eq 6 ]]
+[[ "$(grep -c -- '--provenance=false' <<<"$output")" -eq 6 ]]
+[[ "$(grep -c -- '--sbom=false' <<<"$output")" -eq 6 ]]
+if grep -q -- '--provenance=true\\|--sbom=true' <<<"$output"; then
+  echo "multiarch Buildx publication must not invoke BuildKit provenance/SBOM export" >&2
+  exit 1
+fi
 grep -q 'inspect_with_retry' scripts/build-multiarch-agent-images.sh
 grep -q 'AGENT_IMAGE_INSPECT_ATTEMPTS' scripts/build-multiarch-agent-images.sh
 grep -q 'AGENT_IMAGE_INSPECT_DELAY_SECONDS' scripts/build-multiarch-agent-images.sh
