@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 
 const args = process.argv.slice(2);
 const statePath = process.env.CELLD_FAKE_DOCKER_STATE;
@@ -32,6 +33,19 @@ function labels() {
   };
 }
 
+function sha256(value) {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function containerId(name) {
+  return sha256(`${config.run_id}:${name}`);
+}
+
+function containerAddress(name) {
+  const index = config.nodes.findIndex((node) => node.name === name);
+  return `172.29.0.${20 + Math.max(index, 0)}`;
+}
+
 function output(value) {
   persist();
   process.stdout.write(`${value}\n`);
@@ -47,11 +61,20 @@ function diagnosisOutput(nodeIds) {
 }
 
 if (args[0] === "network" && args[1] === "inspect") {
+  const containers = {};
+  for (const [name, container] of Object.entries(state.containers)) {
+    if (!container.running || name.endsWith("-callback-relay")) continue;
+    const id = containerId(name);
+    const address = containerAddress(name);
+    containers[id] = { Name: name, IPv4Address: `${address}/16` };
+  }
   output(JSON.stringify([{
+    Id: containerId(config.network.name),
     Name: config.network.name,
     Driver: "bridge",
     Scope: "local",
     Internal: true,
+    Ingress: false,
     Labels: {
       "com.docker.compose.project": storage.project,
       "com.docker.compose.network": "storage-private",
@@ -59,6 +82,7 @@ if (args[0] === "network" && args[1] === "inspect") {
       "dev.agentic-sandbox.scope": "celld-qualification",
     },
     IPAM: { Config: [{ Gateway: "172.29.0.1" }] },
+    Containers: containers,
   }]));
 } else if (args[0] === "pull") {
   output(config.pins.celld.image_ref);
@@ -71,7 +95,25 @@ if (args[0] === "network" && args[1] === "inspect") {
     process.stderr.write("not found\n");
     process.exitCode = 1;
   } else {
-    output(JSON.stringify([{ Config: { Labels: container.labels, Image: container.image }, State: { Running: container.running } }]));
+    const id = containerId(args[1]);
+    const address = containerAddress(args[1]);
+    output(JSON.stringify([{
+      Id: id,
+      Name: `/${args[1]}`,
+      Config: { Labels: container.labels, Image: container.image },
+      HostConfig: { PortBindings: {} },
+      NetworkSettings: {
+        Ports: {},
+        Networks: {
+          [config.network.name]: {
+            NetworkID: containerId(config.network.name),
+            IPAddress: address,
+            Aliases: [args[1]],
+          },
+        },
+      },
+      State: { Running: container.running },
+    }]));
   }
 } else if (args[0] === "create") {
   const name = args[args.indexOf("--name") + 1];

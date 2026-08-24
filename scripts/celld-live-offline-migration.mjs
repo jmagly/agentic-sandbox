@@ -7,7 +7,7 @@ import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { CELLD_MIGRATION_SCOPE, REQUIRED_WRITER_CLASSES, rehearseOfflineMigration } from "./celld-offline-migration.mjs";
-import { cleanupFleet, deployFleetWorker, diagnoseFleet, prepareFleet, probeFleetWorker, startFleet, stopFleetForWorkerDeployment } from "./celld-fleet-fixture.mjs";
+import { cleanupFleet, deployFleetWorker, diagnoseFleet, openFleetWorkerAccess, prepareFleet, probeFleetWorker, startFleet, stopFleetForWorkerDeployment } from "./celld-fleet-fixture.mjs";
 import { cleanupFixture, fixtureEnvironment, prepareFixture, startFixture, validateFixtureConfig } from "./celld-seaweedfs-fixture.mjs";
 import { openStorageGatewayAccess } from "./celld-storage-gateway-access.mjs";
 import { runS3Qualification } from "./celld-storage-race-runner.mjs";
@@ -421,23 +421,46 @@ async function setBucketWrite(config, writable, store) {
   throw new Error("SeaweedFS gateway did not recover after identity-policy reload");
 }
 
-function workerEndpoint(fleet) {
-  const output = run("docker", ["port", fleet.nodes[0].name, "8080/tcp"]);
-  const match = /^127\.0\.0\.1:(\d+)$/.exec(output);
-  if (!match) throw new Error("migration Worker listener is not loopback-only");
-  return `http://127.0.0.1:${match[1]}`;
-}
-
 export class LiveMigrationControl {
   constructor(source, destination, journal) {
     this.authorities = new Map([[source.store.id, source], [destination.store.id, destination]]);
     this.source = source;
     this.destination = destination;
     this.journal = journal;
+    this.workerAccesses = new Map();
     if (!(journal instanceof LiveMigrationJournal)) throw new Error("live migration control requires the exact durable journal");
   }
 
-  async stopAllWriters() { for (const authority of this.authorities.values()) stopAuthorityFleet(authority); }
+  async closeWorkerAccess(id) {
+    const access = this.workerAccesses.get(id);
+    if (!access) return;
+    this.workerAccesses.delete(id);
+    await access.close();
+  }
+
+  async closeAllWorkerAccess() {
+    const failures = [];
+    for (const id of [...this.workerAccesses.keys()].reverse()) {
+      try { await this.closeWorkerAccess(id); } catch (error) { failures.push(error); }
+    }
+    if (failures.length) throw new Error(`migration Worker forwarder cleanup failed: ${sha256(failures.map((error) => error.message).join("\n"))}`);
+  }
+
+  async workerEndpoint(id) {
+    const authority = this.authorities.get(id);
+    if (!authority) throw new Error("migration Worker authority is unknown");
+    let access = this.workerAccesses.get(id);
+    if (!access) {
+      access = await openFleetWorkerAccess(authority.fleetPath);
+      this.workerAccesses.set(id, access);
+    }
+    return access.endpoint;
+  }
+
+  async stopAllWriters() {
+    await this.closeAllWorkerAccess();
+    for (const authority of this.authorities.values()) stopAuthorityFleet(authority);
+  }
 
   async listWriters() {
     const observations = await this.observeAuthorities();
@@ -460,6 +483,7 @@ export class LiveMigrationControl {
       const authority = this.authorities.get(id);
       await setBucketWrite(authority.storage, true, authority.store);
       if (startFleet(authority.fleetPath, { readinessPolicy: LIVE_MIGRATION_FLEET_READINESS_POLICY }).status !== "READY") throw new Error("migration authority did not become ready");
+      await this.workerEndpoint(id);
     }
   }
 
@@ -507,7 +531,7 @@ export class LiveMigrationControl {
 
   async runCanary(id) {
     const authority = this.authorities.get(id);
-    return diagnoseFleet(authority.fleetPath).status === "READY" && (await probeFleetWorker(authority.fleetPath)).status === "READY";
+    return diagnoseFleet(authority.fleetPath).status === "READY" && (await probeFleetWorker(authority.fleetPath, { endpoint: await this.workerEndpoint(id) })).status === "READY";
   }
 
   async recordCutover(id) {
@@ -521,7 +545,7 @@ export class LiveMigrationControl {
     const suffix = randomBytes(12).toString("hex");
     const operationId = `migration-write-${suffix}`;
     const result = await sendWorkerCommand({
-      endpoint: workerEndpoint(authority.fleet),
+      endpoint: await this.workerEndpoint(id),
       varsFile: authority.fleet.worker_vars_file_ref,
       instanceId: `migration-${suffix}`,
       operationId,
@@ -550,8 +574,8 @@ export async function executeLiveOfflineMigration({ sourceConfigPath, destinatio
   const qualificationErrorPath = join(dirname(artifactPath), "celld-offline-migration-destination-qualification-error.json");
   const migrationErrorPath = join(dirname(artifactPath), "celld-offline-migration-error.json");
   let destinationStorage = null, sourceFleet = null, destinationFleet = null, sourceFleetPath = null, destinationFleetPath = null;
-  let sourceStore = null, destinationStore = null, sourceGatewayAccess = null, destinationGatewayAccess = null;
-  let migrationJournal = null;
+  let sourceStore = null, destinationStore = null, sourceGatewayAccess = null, destinationGatewayAccess = null, sourceSeedWorkerAccess = null;
+  let migrationJournal = null, migrationControl = null;
   let migrationBoundaryStarted = false;
   let failureStage = "initializing";
   let sanitized = null;
@@ -602,11 +626,13 @@ export async function executeLiveOfflineMigration({ sourceConfigPath, destinatio
     await deployFleetWorker(destinationFleetPath);
     failureStage = "start-source-fleet";
     if (startFleet(sourceFleetPath, { readinessPolicy: LIVE_MIGRATION_FLEET_READINESS_POLICY }).status !== "READY") throw new Error("migration source fleet did not become ready");
+    failureStage = "open-source-worker";
+    sourceSeedWorkerAccess = await openFleetWorkerAccess(sourceFleetPath);
     const initialSuffix = randomBytes(12).toString("hex");
     const initialOperationId = `migration-source-write-${initialSuffix}`;
     failureStage = "seed-source-worker";
     const initial = await sendWorkerCommand({
-      endpoint: workerEndpoint(sourceFleet),
+      endpoint: sourceSeedWorkerAccess.endpoint,
       varsFile: sourceFleet.worker_vars_file_ref,
       instanceId: `migration-source-${initialSuffix}`,
       operationId: initialOperationId,
@@ -616,6 +642,8 @@ export async function executeLiveOfflineMigration({ sourceConfigPath, destinatio
       nonce: randomBytes(16).toString("hex"),
     });
     if (initial.status !== 202 || initial.body?.document_type !== "instance-cell-state" || !initial.body?.effects?.some((effect) => effect.operation_id === initialOperationId)) throw new Error("migration source seed write failed");
+    await sourceSeedWorkerAccess.close();
+    sourceSeedWorkerAccess = null;
     sourceStore = new LiveS3MigrationStore(sourceStorage, { gatewayEndpoints: sourceGatewayAccess.endpoints });
     destinationStore = new LiveS3MigrationStore(destinationStorage, { gatewayEndpoints: destinationGatewayAccess.endpoints });
     failureStage = "ensure-destination-bucket";
@@ -626,7 +654,8 @@ export async function executeLiveOfflineMigration({ sourceConfigPath, destinatio
     failureStage = "create-migration-journal";
     migrationJournal = new LiveMigrationJournal(join(sourceStorage.run_root, "migration-journal.json"), { runId: sourceStorage.run_id, destinationRunId });
     failureStage = "rehearse-offline-migration";
-    const evidence = await rehearseOfflineMigration({ source: sourceStore, destination: destinationStore, control: new LiveMigrationControl(sourceAuthority, destinationAuthority, migrationJournal) });
+    migrationControl = new LiveMigrationControl(sourceAuthority, destinationAuthority, migrationJournal);
+    const evidence = await rehearseOfflineMigration({ source: sourceStore, destination: destinationStore, control: migrationControl });
     failureStage = "validate-migration-journal";
     const journalEvidence = migrationJournal.evidence();
     if (journalEvidence.incomplete_plan_ids.length !== 0) throw new Error("successful migration journal retains an incomplete mutation");
@@ -664,6 +693,8 @@ export async function executeLiveOfflineMigration({ sourceConfigPath, destinatio
   } catch (error) {
     operationError = error;
   } finally {
+    try { if (migrationControl) await migrationControl.closeAllWorkerAccess(); } catch (error) { cleanupErrors.push(`migration-worker-forwarder:${sha256(error.message)}`); }
+    try { if (sourceSeedWorkerAccess) await sourceSeedWorkerAccess.close(); } catch (error) { cleanupErrors.push(`source-seed-forwarder:${sha256(error.message)}`); }
     try { if (destinationFleetPath && existsSync(destinationFleetPath)) cleanupFleet(destinationFleetPath); } catch (error) { cleanupErrors.push(`destination-fleet:${sha256(error.message)}`); }
     try { if (sourceFleetPath && existsSync(sourceFleetPath)) cleanupFleet(sourceFleetPath); } catch (error) { cleanupErrors.push(`source-fleet:${sha256(error.message)}`); }
     retainedNamespaces = operationError !== null && migrationBoundaryStarted;

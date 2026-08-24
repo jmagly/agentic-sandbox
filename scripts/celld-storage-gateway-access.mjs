@@ -101,10 +101,12 @@ export function inspectGatewayTarget(config, service, { runner = run } = {}) {
 export async function startLoopbackForwarder({ host, port }, {
   serverFactory = createServer,
   connectionFactory = createConnection,
+  scheme = "https",
 } = {}) {
   if (!isPrivateIpv4(host, { allowLoopback: true }) || !Number.isSafeInteger(port) || port < 1 || port > 65_535) {
     throw accessError("gateway", "gateway-private-address-unavailable");
   }
+  if (!["http", "https"].includes(scheme)) throw accessError("gateway", "gateway-forwarder-unavailable");
   const sockets = new Set();
   let fatalError = null;
   const markFatal = (error) => { fatalError ??= error instanceof Error ? error : new Error("gateway forwarder failed"); };
@@ -134,7 +136,7 @@ export async function startLoopbackForwarder({ host, port }, {
           reject(new Error("loopback listener identity is invalid"));
           return;
         }
-        resolveEndpoint(`https://127.0.0.1:${address.port}`);
+        resolveEndpoint(`${scheme}://127.0.0.1:${address.port}`);
       });
     });
   } catch {

@@ -13,6 +13,7 @@ import {
   diagnoseFleet,
   ensureFleetBucket,
   janitorPreview,
+  openFleetWorkerAccess,
   prepareFleet,
   probeFleetWorker,
   startCallbackRelays,
@@ -130,6 +131,7 @@ class FakeDocker {
     this.runOutput = "Current Version ID: 1111111111111111\ndeployment committed";
     this.failRunLeavesContainer = false;
     this.expectedFaultSignal = "disabled";
+    this.failPortDiscovery = false;
   }
 
   labels() {
@@ -141,10 +143,37 @@ class FakeDocker {
     };
   }
 
+  containerId(name) {
+    return sha256(`${this.config.run_id}:${name}`);
+  }
+
+  containerAddress(name) {
+    const index = this.config.nodes.findIndex((node) => node.name === name);
+    return `172.29.0.${20 + Math.max(index, 0)}`;
+  }
+
   inspect(name) {
     const container = this.containers.get(name);
     if (!container) throw new Error("not found");
-    return JSON.stringify([{ Config: { Labels: container.labels, Image: container.image }, State: { Running: container.running } }]);
+    const id = this.containerId(name);
+    const address = this.containerAddress(name);
+    return JSON.stringify([{
+      Id: id,
+      Name: `/${name}`,
+      Config: { Labels: container.labels, Image: container.image },
+      HostConfig: { PortBindings: {} },
+      NetworkSettings: {
+        Ports: {},
+        Networks: {
+          [this.config.network.name]: {
+            NetworkID: this.containerId(this.config.network.name),
+            IPAddress: address,
+            Aliases: [name],
+          },
+        },
+      },
+      State: { Running: container.running },
+    }]);
   }
 
   run = (program, args, options = {}) => {
@@ -152,11 +181,20 @@ class FakeDocker {
     assert.equal(options.env?.AWS_ACCESS_KEY_ID, undefined);
     assert.equal(options.env?.AWS_SECRET_ACCESS_KEY, undefined);
     if (args[0] === "network" && args[1] === "inspect") {
+      const containers = {};
+      for (const [name, container] of this.containers) {
+        if (!container.running || name.endsWith("-callback-relay")) continue;
+        const id = this.containerId(name);
+        const address = this.containerAddress(name);
+        containers[id] = { Name: name, IPv4Address: `${address}/16` };
+      }
       return JSON.stringify([{
+        Id: this.containerId(this.config.network.name),
         Name: this.config.network.name,
         Driver: "bridge",
         Scope: "local",
         Internal: true,
+        Ingress: false,
         Labels: {
           "com.docker.compose.project": this.storage.project,
           "com.docker.compose.network": "storage-private",
@@ -164,6 +202,7 @@ class FakeDocker {
           "dev.agentic-sandbox.scope": "celld-qualification",
         },
         IPAM: { Config: [{ Gateway: "172.29.0.1" }] },
+        Containers: containers,
       }]);
     }
     if (args[0] === "pull") return this.config.pins.celld.image_ref;
@@ -221,6 +260,19 @@ class FakeDocker {
       return args.at(-1);
     }
     if (args[0] === "port") {
+      if (this.failPortDiscovery) {
+        const error = new Error("docker controller subprocess failed");
+        error.name = "FleetControllerSubprocessError";
+        error.program = "docker";
+        error.operation = "docker_port";
+        error.exitStatus = 1;
+        error.signal = null;
+        error.errorCode = null;
+        error.timedOut = false;
+        error.stdoutSha256 = sha256("");
+        error.stderrSha256 = sha256("port is not published");
+        throw error;
+      }
       const index = this.config.nodes.findIndex((node) => node.name === args[1]);
       return `127.0.0.1:${18080 + index}`;
     }
@@ -535,6 +587,43 @@ test("fleet persists every container target before creation and reports real rea
   const inventory = JSON.parse(readFileSync(inventoryPath, "utf8"));
   assert.equal(inventory.state, "stopped_for_worker_deployment");
   assert.equal(inventory.actions.filter((action) => action.kind === "docker_stop_for_worker_deployment" && action.status === "completed").length, 3);
+});
+
+test("fleet startup does not misclassify running nodes when Docker omits internal-network port publication", async () => {
+  const { config, storage, configPath } = fixture();
+  const docker = new FakeDocker(config, storage);
+  docker.failPortDiscovery = true;
+  const diagnosis = startFleet(configPath, {
+    runner: docker.run,
+    credentialLauncherPath: process.execPath,
+    readinessPolicy: { maxAttempts: 1, deadlineMs: 1_000, backoffMs: 0 },
+  });
+
+  assert.equal(diagnosis.status, "READY");
+  assert.equal(diagnosis.membership.running, 3);
+  assert.equal(diagnosis.membership.reserve, 1);
+  assert.equal(diagnosis.membership.probe, "passed");
+  assert.deepEqual(diagnosis.nodes.map((node) => node.public_endpoint), [null, null, null]);
+
+  const events = [];
+  const access = await openFleetWorkerAccess(configPath, {
+    runner: docker.run,
+    forwarderFactory: async (target, options) => {
+      events.push({ event: "open", target, options });
+      return {
+        endpoint: "http://127.0.0.1:25001",
+        async close() { events.push({ event: "close" }); },
+      };
+    },
+  });
+
+  assert.equal(access.endpoint, "http://127.0.0.1:25001");
+  assert.equal(access.node, config.nodes[0].name);
+  assert.deepEqual(events[0], { event: "open", target: { host: "172.29.0.20", port: 8080 }, options: { scheme: "http" } });
+  await access.close();
+  assert.deepEqual(events.at(-1), { event: "close" });
+  assert.equal(cleanupFleet(configPath, { runner: docker.run }).status, "PASS");
+  assert.equal(docker.containers.size, 0);
 });
 
 test("fleet startup retries only the bounded repeatable diagnosis mutation", async (t) => {
@@ -875,7 +964,7 @@ test("real pinned Celld subprocess outcomes authorize only exact diagnosis retri
     assert.ok(!started.stdout.includes(secret));
     assert.ok(!started.stderr.includes(secret));
     assert.ok(!JSON.stringify(startupInventory).includes(secret));
-    return { config, started, startupState, startupInventory };
+    return { config, started, startupState, startupInventory, secret };
   }
 
   await t.test("exit 1 with zero then partial exact signed peers converges from stdout alone", async () => {
@@ -893,18 +982,19 @@ test("real pinned Celld subprocess outcomes authorize only exact diagnosis retri
     assert.deepEqual(diagnosisActions.map((action) => action.status), ["failed", "failed", "completed"]);
   });
 
-  await t.test("transient Docker port publication lag retries without trusting stderr", async () => {
+  await t.test("transient Docker port publication lag falls back to exact private node inspection without trusting stderr", async () => {
     const { started, startupState, startupInventory, secret } = await runCliMode("port-race-once", "port-race-once");
     assert.equal(started.status, 0, started.stderr);
     const evidence = JSON.parse(started.stdout);
     assert.equal(evidence.status, "READY");
-    assert.equal(evidence.membership.attempts, 2);
-    assert.equal(startupState.port_attempts, 4);
+    assert.equal(evidence.membership.attempts, 1);
+    assert.equal(startupState.port_attempts, 3);
     assert.equal(startupState.diagnosis_attempts, 1);
     assert.equal(startupState.commands.filter((args) => args[0] === "create").length, 3);
     assert.equal(startupState.commands.filter((args) => args[0] === "start").length, 3);
     assert.equal(startupState.commands.filter((args) => args[0] === "exec").length, 1);
-    assert.equal(startupState.commands.filter((args) => args[0] === "port").length, 4);
+    assert.equal(startupState.commands.filter((args) => args[0] === "port").length, 3);
+    assert.equal(startupState.commands.filter((args) => args[0] === "network" && args[1] === "inspect").length, 2);
     assert.ok(!started.stdout.includes(secret));
     assert.ok(!started.stderr.includes(secret));
     assert.ok(!JSON.stringify(startupInventory).includes(secret));

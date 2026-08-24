@@ -24,7 +24,7 @@ import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 
 import { fixtureEnvironment, validateFixtureConfig } from "./celld-seaweedfs-fixture.mjs";
-import { openStorageGatewayAccess } from "./celld-storage-gateway-access.mjs";
+import { isPrivateIpv4, openStorageGatewayAccess, startLoopbackForwarder } from "./celld-storage-gateway-access.mjs";
 import { loadReviewedRolloutCandidates } from "./celld-rollout-candidate.mjs";
 import { S3V1Client, STORAGE_PROFILE_SCHEMA } from "./celld-storage-qualifier.mjs";
 import { probeWorkerAuthentication } from "./celld-worker-client.mjs";
@@ -41,6 +41,7 @@ const RUN_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const SAFE_NAME = /^[a-z0-9][a-z0-9_.-]{0,127}$/;
 const SHA256 = /^sha256:[0-9a-f]{64}$/;
 const HEX_SHA256 = /^[0-9a-f]{64}$/;
+const CONTAINER_ID = /^[0-9a-f]{64}$/;
 const EXPECTED_IMAGE = Object.freeze({
   product: "Celld",
   version: "0.2.1",
@@ -811,6 +812,12 @@ function assertOwnedContainer(document, config, name) {
   }
 }
 
+function assertExactFleetNodeDocument(document, config, node) {
+  if (!document || document.length !== 1) throw new Error(`fleet node ${node.name} is unavailable`);
+  assertOwnedContainer(document, config, node.name);
+  if (document[0]?.Config?.Image !== config.pins.celld.image_ref) throw new Error(`fleet node ${node.name} image identity is invalid`);
+}
+
 function assertStorageNetwork(runner, config, storage) {
   const network = JSON.parse(runner("docker", ["network", "inspect", config.network.name]));
   const labels = network?.[0]?.Labels ?? {};
@@ -837,6 +844,57 @@ function storageNetworkGateway(network) {
     throw new Error("storage-private network gateway is not an RFC1918 IPv4 address");
   }
   return gateway;
+}
+
+function inspectFleetNodePrivateTarget(config, storage, node, document, runner) {
+  assertExactFleetNodeDocument(document, config, node);
+  if (document[0]?.State?.Running !== true) throw new Error(`fleet node ${node.name} is not running`);
+  const network = assertStorageNetwork(runner, config, storage);
+  const container = document[0];
+  const containerId = container.Id;
+  if (!CONTAINER_ID.test(containerId ?? "")) throw new Error(`fleet node ${node.name} container identity is invalid`);
+  const networks = container.NetworkSettings?.Networks ?? {};
+  const attachment = networks[config.network.name];
+  if (Object.keys(networks).length !== 1 || !attachment || attachment.NetworkID !== network.Id) {
+    throw new Error(`fleet node ${node.name} network attachment is invalid`);
+  }
+  const address = String(attachment.IPAddress ?? "");
+  if (!isPrivateIpv4(address)) throw new Error(`fleet node ${node.name} private address is unavailable`);
+  const member = network.Containers?.[containerId];
+  if (member?.Name !== node.name || !String(member?.IPv4Address ?? "").startsWith(`${address}/`)) {
+    throw new Error(`fleet node ${node.name} network membership is invalid`);
+  }
+  return { host: address, port: 8080 };
+}
+
+function discoverPublishedWorkerEndpoint(runner, nodeName) {
+  try {
+    const port = runner("docker", ["port", nodeName, "8080/tcp"]);
+    const match = /^127\.0\.0\.1:(\d+)$/.exec(port.trim());
+    if (!match) throw new Error(`node ${nodeName} public listener is not loopback-only`);
+    return `http://127.0.0.1:${match[1]}`;
+  } catch (error) {
+    if (retryablePortDiscoveryError(error)) return null;
+    throw error;
+  }
+}
+
+export async function openFleetWorkerAccess(configPath, {
+  runner = defaultRunner,
+  nodeIndex = 0,
+  forwarderFactory = startLoopbackForwarder,
+} = {}) {
+  const { config, storage } = loadFixture(configPath);
+  if (!Number.isSafeInteger(nodeIndex) || nodeIndex < 0 || nodeIndex >= config.nodes.length) throw new Error("fleet Worker node selection is invalid");
+  const node = config.nodes[nodeIndex];
+  const document = inspectContainer(runner, node.name);
+  const target = inspectFleetNodePrivateTarget(config, storage, node, document, runner);
+  const forwarder = await forwarderFactory(target, { scheme: "http" });
+  return {
+    endpoint: forwarder.endpoint,
+    node: node.name,
+    close: () => forwarder.close(),
+  };
 }
 
 export async function ensureFleetBucket(config, storage, runner, {
@@ -1370,18 +1428,16 @@ export function startCallbackRelays(configPath, {
   return result;
 }
 
-function observeFleetDiagnosisNodes(config, runner) {
+function observeFleetDiagnosisNodes(config, storage, runner) {
   return config.nodes.map((node) => {
     const document = inspectContainer(runner, node.name);
     if (!document) return { name: node.name, node_id: node.node_id, role: node.role, running: false, public_endpoint: null };
-    assertOwnedContainer(document, config, node.name);
+    assertExactFleetNodeDocument(document, config, node);
     const running = document[0]?.State?.Running === true;
     let publicEndpoint = null;
     if (running) {
-      const port = runner("docker", ["port", node.name, "8080/tcp"]);
-      const match = /127\.0\.0\.1:(\d+)$/.exec(port);
-      if (!match) throw new Error(`node ${node.name} public listener is not loopback-only`);
-      publicEndpoint = `http://127.0.0.1:${match[1]}`;
+      publicEndpoint = discoverPublishedWorkerEndpoint(runner, node.name);
+      if (!publicEndpoint) inspectFleetNodePrivateTarget(config, storage, node, document, runner);
     }
     return { name: node.name, node_id: node.node_id, role: node.role, running, public_endpoint: publicEndpoint };
   });
@@ -1416,8 +1472,18 @@ function exactProbeReadiness(output, expectedNodeIds) {
   };
 }
 
+function isFleetControllerSubprocessError(error) {
+  return error instanceof FleetControllerSubprocessError
+    || (error?.name === "FleetControllerSubprocessError"
+      && typeof error.program === "string"
+      && typeof error.operation === "string"
+      && (Number.isInteger(error.exitStatus) || error.exitStatus === null)
+      && (typeof error.signal === "string" || error.signal === null)
+      && typeof error.timedOut === "boolean");
+}
+
 function retryableProbeError(error, expectedNodeIds) {
-  if (!(error instanceof FleetControllerSubprocessError)
+  if (!isFleetControllerSubprocessError(error)
       || error.program !== "docker"
       || error.operation !== "docker_exec_diagnose"
       || error.exitStatus !== 1
@@ -1428,7 +1494,7 @@ function retryableProbeError(error, expectedNodeIds) {
 }
 
 function retryablePortDiscoveryError(error) {
-  return error instanceof FleetControllerSubprocessError
+  return isFleetControllerSubprocessError(error)
     && error.program === "docker"
     && error.operation === "docker_port"
     && error.exitStatus === 1
@@ -1437,7 +1503,7 @@ function retryablePortDiscoveryError(error) {
 }
 
 function diagnosisErrorEvidenceSha256(error, expectedNodeIdsSha256) {
-  const classified = error instanceof FleetControllerSubprocessError ? {
+  const classified = isFleetControllerSubprocessError(error) ? {
     kind: "controller_subprocess",
     program: error.program,
     operation: error.operation,
@@ -1590,7 +1656,7 @@ export function diagnoseFleet(configPath, {
 
   let nodes;
   try {
-    nodes = observeFleetDiagnosisNodes(config, boundedRunner);
+    nodes = observeFleetDiagnosisNodes(config, storage, boundedRunner);
   } catch (error) {
     if (retryablePortDiscoveryError(error)) {
       const result = failureDocument(
@@ -1693,6 +1759,7 @@ export async function probeFleetWorker(configPath, {
   fetcher = fetch,
   now = () => new Date(),
   nonceFactory = () => randomBytes(16).toString("hex"),
+  endpoint,
 } = {}) {
   const { config, inventory } = loadFixture(configPath);
   assertWorkerVarsReady(config, inventory);
@@ -1701,15 +1768,19 @@ export async function probeFleetWorker(configPath, {
   if (!document) throw new Error("Worker probe requires the primary fleet node");
   assertOwnedContainer(document, config, primary.name);
   if (document[0]?.State?.Running !== true) throw new Error("Worker probe requires a running primary fleet node");
-  const port = runner("docker", ["port", primary.name, "8080/tcp"]);
-  const match = /^127\.0\.0\.1:(\d+)$/.exec(port.trim());
-  if (!match) throw new Error("Worker probe endpoint must be host-loopback only");
-  const endpoint = `http://127.0.0.1:${match[1]}`;
+  let targetEndpoint = endpoint;
+  if (targetEndpoint !== undefined && !/^http:\/\/127\.0\.0\.1:[1-9][0-9]{0,4}$/.test(targetEndpoint)) throw new Error("Worker probe endpoint must be host-loopback only");
+  if (targetEndpoint === undefined) {
+    const port = runner("docker", ["port", primary.name, "8080/tcp"]);
+    const match = /^127\.0\.0\.1:(\d+)$/.exec(port.trim());
+    if (!match) throw new Error("Worker probe endpoint must be host-loopback only");
+    targetEndpoint = `http://127.0.0.1:${match[1]}`;
+  }
   const instanceId = `qualification-${sha256(config.run_id).slice(0, 24)}`;
   const operationId = `probe-${sha256(`${config.run_id}:${primary.name}`).slice(0, 24)}`;
   const nonce = nonceFactory();
   const action = planAction(config, inventory, { kind: "worker_public_auth_probe", target: primary.name }, now());
-  const checks = await probeWorkerAuthentication({ endpoint, varsFile: config.worker_vars_file_ref, instanceId, operationId, fetcher, now: now(), nonce });
+  const checks = await probeWorkerAuthentication({ endpoint: targetEndpoint, varsFile: config.worker_vars_file_ref, instanceId, operationId, fetcher, now: now(), nonce });
   completeAction(config, inventory, action, now());
   const result = {
     schema_version: "agentic-sandbox.celld-worker-probe/v1",

@@ -258,6 +258,12 @@ test("live migration adapter restores the reusable source policy and fails clean
   assert.match(source, /LiveMigrationJournal/);
   assert.match(source, /observeAuthorities\(\)/);
   assert.match(source, /await deployFleetWorker\(destinationFleetPath\)/);
+  assert.match(source, /openFleetWorkerAccess/);
+  assert.match(source, /failureStage = "open-source-worker"/);
+  assert.match(source, /sourceSeedWorkerAccess = await openFleetWorkerAccess\(sourceFleetPath\)/);
+  assert.match(source, /await this\.workerEndpoint\(id\)/);
+  assert.match(source, /await this\.closeAllWorkerAccess\(\)/);
+  assert.match(source, /sourceSeedWorkerAccess\.close\(\)/);
   assert.match(source, /LIVE_MIGRATION_FLEET_READINESS_POLICY = Object\.freeze\(\{\s*maxAttempts: 20,\s*deadlineMs: 60_000,\s*backoffMs: 750,\s*\}\)/);
   assert.equal((source.match(/readinessPolicy: LIVE_MIGRATION_FLEET_READINESS_POLICY/g) ?? []).length, 2);
   assert.match(source, /failure_stage: failure\.failure_stage/);
@@ -270,6 +276,8 @@ test("live migration adapter restores the reusable source policy and fails clean
   assert.match(source, /openStorageGatewayAccess\(destinationStorage, \{ services: \["s3gateway1", "s3gateway2"\] \}\)/);
   assert.match(source, /gatewayEndpoints: destinationGatewayAccess\.endpoints/);
   assert.doesNotMatch(source, /compose[^\n]*\["port",\s*"s3gateway/);
+  assert.doesNotMatch(source, /function workerEndpoint/);
+  assert.doesNotMatch(source, /run\("docker", \["port", fleet\.nodes\[0\]\.name, "8080\/tcp"\]\)/);
   assert.match(source, /evaluateStorageEvidence\(destinationQualification\)/);
   assert.doesNotMatch(source, /getWorkerCell/);
   assert.doesNotMatch(source, /local_storage_touched:\s*true/);
