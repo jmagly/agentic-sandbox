@@ -338,7 +338,8 @@ async function runExcluded(runtime, timeline) {
   const operation = (name) => `worker.run-excluded.${name}`;
   const primary = runtime.fleet.nodes[0].name;
   const negativeRoot = await withDriverOperation(operation("prepare-negative-projects"), errorFields, () => prepareNegativeProjects(runtime.root));
-  await runWorkerCommand(operation("copy-negative-projects"), errorFields, "docker", ["cp", negativeRoot, `${primary}:/tmp/celld-negative`], { timeout: 120_000 }, "CELLD_LIVE_WORKER_COPY_NEGATIVE_PROJECTS_FAILED");
+  await runWorkerCommand(operation("reset-negative-projects"), errorFields, "docker", ["exec", primary, "sh", "-c", "rm -rf /tmp/celld-negative && mkdir -p /tmp/celld-negative"], { timeout: 120_000 }, "CELLD_LIVE_WORKER_RESET_NEGATIVE_PROJECTS_FAILED");
+  await runWorkerCommand(operation("copy-negative-projects"), errorFields, "docker", ["cp", `${negativeRoot}/.`, `${primary}:/tmp/celld-negative/`], { timeout: 120_000 }, "CELLD_LIVE_WORKER_COPY_NEGATIVE_PROJECTS_FAILED");
   const before = await withDriverOperation(operation("inventory-before"), errorFields, () => inventorySnapshot(runtime));
   let typedRejections = 0, silentSuccesses = 0;
   const codes = {};

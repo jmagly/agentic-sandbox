@@ -160,7 +160,11 @@ test("Worker driver fixes the evaluator-owned matrices and does not claim UAT-00
   assert.match(source, /withWorkerAccess\(operation\("worker-endpoint"\)/);
   assert.match(source, /operation\("deploy-candidate"\)/);
   assert.match(source, /operation\("capability-cases"\)/);
+  assert.match(source, /operation\("reset-negative-projects"\)/);
+  assert.match(source, /CELLD_LIVE_WORKER_RESET_NEGATIVE_PROJECTS_FAILED/);
   assert.match(source, /operation\("copy-negative-projects"\)/);
+  assert.match(source, /\$\{negativeRoot\}\/\./);
+  assert.match(source, /\$\{primary\}:\/tmp\/celld-negative\//);
   assert.match(source, /CELLD_LIVE_WORKER_COPY_NEGATIVE_PROJECTS_FAILED/);
   assert.match(source, /operation\(`dry-run-\$\{capability\}`\)/);
   assert.doesNotMatch(source, /proofHash/);

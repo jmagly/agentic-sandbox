@@ -118,6 +118,7 @@ test("fleet namespace observation joins exact Docker ownership, inode, and priva
     runner: (_program, args) => {
       const index = args.at(-1).endsWith("1") ? 1 : 2;
       return JSON.stringify([{
+        Id: String(index).repeat(64),
         State: { Running: true, Pid: 3200 + index },
         Config: { Labels: { "dev.agentic-sandbox.run": "titan-765", "dev.agentic-sandbox.scope": "celld-qualification" } },
         NetworkSettings: { Networks: { "celld-private": { IPAddress: `172.30.0.${20 + index}` } } },
@@ -127,6 +128,7 @@ test("fleet namespace observation joins exact Docker ownership, inode, and priva
     now: new Date("2026-08-23T08:00:00Z"),
   });
   assert.deepEqual(observed.map((entry) => entry.address), ["172.30.0.21", "172.30.0.22"]);
+  assert.deepEqual(observed.map((entry) => entry.container_id), ["1".repeat(64), "2".repeat(64)]);
   assert.deepEqual(inventory.namespaces.map((entry) => entry.inode), [4026536201, 4026536202]);
   assert.throws(() => observeFleetNetworkNamespaces(createNetworkAuthInventory({ runId: "titan-765", runRoot: "/dev/shm/celld-qualification/titan-765", host: "titan" }), fleet, {
     runner: () => JSON.stringify([{ State: { Running: true, Pid: 3 }, Config: { Labels: { "dev.agentic-sandbox.run": "foreign" } }, NetworkSettings: { Networks: { "celld-private": { IPAddress: "172.30.0.21" } } } }]),
@@ -307,14 +309,15 @@ test("mTLS proxy plans bind an exact node, private listener, and node-loopback p
 
 test("mTLS proxy controller persists before creation and removes only the exact owned sidecar", () => {
   const inventory = createNetworkAuthInventory({ runId: "titan-765", runRoot: "/dev/shm/celld-qualification/titan-765", host: "titan" });
-  registerNetworkNamespace(inventory, { container: "celld-fleet-node-1", pid: 3, inode: 44, runLabel: "titan-765" });
+  const nodeContainerId = "a".repeat(64);
+  registerNetworkNamespace(inventory, { container: "celld-fleet-node-1", containerId: nodeContainerId, pid: 3, inode: 44, runLabel: "titan-765" });
   const proxy = planMtlsProxy(inventory, {
     nodeContainer: "celld-fleet-node-1", listenAddress: "172.30.0.20", binarySha256: "7".repeat(64), imageRef: `sha256:${"6".repeat(64)}`,
   });
   const document = JSON.stringify([{
     Name: `/${proxy.name}`, State: { Running: true },
     Config: { Image: proxy.image_ref, Labels: { "dev.agentic-sandbox.run": "titan-765", "dev.agentic-sandbox.scope": "celld-qualification" } },
-    HostConfig: { NetworkMode: "container:celld-fleet-node-1" },
+    HostConfig: { NetworkMode: `container:${nodeContainerId}` },
   }]);
   const events = [];
   let inspections = 0;

@@ -40,6 +40,7 @@ const PARTITION_BOUNDARIES = new Map([
 const RUN_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const CONTAINER_NAME = /^celld-[a-z0-9-]{1,80}$/;
 const SHA256 = /^[0-9a-f]{64}$/;
+const DOCKER_CONTAINER_ID = /^[0-9a-f]{64}$/;
 
 function sha256(value) { return createHash("sha256").update(value).digest("hex"); }
 
@@ -110,13 +111,15 @@ export function createNetworkAuthInventory({ runId, runRoot, host = hostname(), 
   return inventory;
 }
 
-export function registerNetworkNamespace(inventory, { container, pid, inode, runLabel }, now = new Date()) {
+export function registerNetworkNamespace(inventory, { container, containerId, pid, inode, runLabel }, now = new Date()) {
   if (inventory.state !== "prepared" && inventory.state !== "active") throw new Error("network namespace registration requires a prepared inventory");
-  if (!CONTAINER_NAME.test(container ?? "") || !Number.isSafeInteger(pid) || pid < 1 || !Number.isSafeInteger(inode) || inode < 1 || runLabel !== inventory.run_id) {
+  if (!CONTAINER_NAME.test(container ?? "") || (containerId !== undefined && !DOCKER_CONTAINER_ID.test(containerId)) || !Number.isSafeInteger(pid) || pid < 1 || !Number.isSafeInteger(inode) || inode < 1 || runLabel !== inventory.run_id) {
     throw new Error("network namespace identity is not exact-run owned");
   }
   if (inventory.namespaces.some((entry) => entry.container === container || entry.inode === inode)) throw new Error("network namespace identity is duplicated");
-  inventory.namespaces.push({ container, pid, inode, run_label: runLabel });
+  const namespace = { container, pid, inode, run_label: runLabel };
+  if (containerId !== undefined) namespace.container_id = containerId;
+  inventory.namespaces.push(namespace);
   inventory.updated_at = now.toISOString();
   return inventory.namespaces.at(-1);
 }
@@ -128,15 +131,16 @@ export function observeFleetNetworkNamespaces(inventory, fleet, { runner = run, 
     let document;
     try { document = JSON.parse(runner("docker", ["container", "inspect", node.name], { timeout: 30_000 })); } catch { throw new Error("fleet namespace inspection is not bounded JSON"); }
     const value = document?.[0];
+    const containerId = value?.Id;
     const pid = value?.State?.Pid;
     const labels = value?.Config?.Labels;
     const address = value?.NetworkSettings?.Networks?.[fleet.network.name]?.IPAddress;
-    if (value?.State?.Running !== true || labels?.["dev.agentic-sandbox.run"] !== inventory.run_id || labels?.["dev.agentic-sandbox.scope"] !== "celld-qualification" || !validIpAddress(address)) {
+    if (value?.State?.Running !== true || !DOCKER_CONTAINER_ID.test(containerId ?? "") || labels?.["dev.agentic-sandbox.run"] !== inventory.run_id || labels?.["dev.agentic-sandbox.scope"] !== "celld-qualification" || !validIpAddress(address)) {
       throw new Error("fleet namespace inspection is not exact-run owned");
     }
     const inode = namespaceInode(pid);
-    registerNetworkNamespace(inventory, { container: node.name, pid, inode, runLabel: inventory.run_id }, now);
-    observed.push({ container: node.name, pid, inode, address });
+    registerNetworkNamespace(inventory, { container: node.name, containerId, pid, inode, runLabel: inventory.run_id }, now);
+    observed.push({ container: node.name, container_id: containerId, pid, inode, address });
   }
   return observed;
 }
@@ -244,10 +248,12 @@ export function validateNetworkAuthInventory(inventory, { runId, runRoot, hostSh
   if (!validTimestamp(inventory.created_at) || !validTimestamp(inventory.updated_at)) errors.push("network inventory timestamps are invalid");
   if (!["prepared", "active", "cleanup_residue", "clean"].includes(inventory.state)) errors.push("network inventory state is invalid");
   if (!Array.isArray(inventory.namespaces) || !Array.isArray(inventory.guards) || !Array.isArray(inventory.proxies) || !Array.isArray(inventory.faults)) return [...errors, "network inventory namespaces/guards/proxies/faults must be arrays"];
-  const containers = new Set(), inodes = new Set();
+  const containers = new Set(), containerIds = new Set(), inodes = new Set();
   for (const [index, namespace] of inventory.namespaces.entries()) {
-    if (!CONTAINER_NAME.test(namespace?.container ?? "") || !Number.isSafeInteger(namespace?.pid) || namespace.pid < 1 || !Number.isSafeInteger(namespace?.inode) || namespace.inode < 1 || namespace?.run_label !== inventory.run_id || containers.has(namespace.container) || inodes.has(namespace.inode)) errors.push(`network inventory namespace is invalid at index ${index}`);
-    containers.add(namespace?.container); inodes.add(namespace?.inode);
+    if (!CONTAINER_NAME.test(namespace?.container ?? "") || (namespace?.container_id !== undefined && (!DOCKER_CONTAINER_ID.test(namespace.container_id) || containerIds.has(namespace.container_id))) || !Number.isSafeInteger(namespace?.pid) || namespace.pid < 1 || !Number.isSafeInteger(namespace?.inode) || namespace.inode < 1 || namespace?.run_label !== inventory.run_id || containers.has(namespace.container) || inodes.has(namespace.inode)) errors.push(`network inventory namespace is invalid at index ${index}`);
+    containers.add(namespace?.container);
+    if (namespace?.container_id !== undefined) containerIds.add(namespace.container_id);
+    inodes.add(namespace?.inode);
   }
   const guardIds = new Set(), guardContainers = new Set();
   for (const [index, guard] of inventory.guards.entries()) {
@@ -435,8 +441,13 @@ function verifyMtlsProxyMaterial(proxy, binaryPath) {
 function assertOwnedMtlsProxy(document, inventory, proxy) {
   const value = document?.[0];
   const labels = value?.Config?.Labels;
-  if (labels?.["dev.agentic-sandbox.run"] !== inventory.run_id || labels?.["dev.agentic-sandbox.scope"] !== "celld-qualification" || value?.Name !== `/${proxy.name}` || value?.HostConfig?.NetworkMode !== `container:${proxy.node_container}` || value?.Config?.Image !== proxy.image_ref) {
-    throw new Error("refusing a substituted mTLS proxy container");
+  const namespace = inventory.namespaces.find((entry) => entry.container === proxy.node_container && entry.run_label === inventory.run_id);
+  const acceptedNetworkModes = new Set([`container:${proxy.node_container}`]);
+  if (DOCKER_CONTAINER_ID.test(namespace?.container_id ?? "")) acceptedNetworkModes.add(`container:${namespace.container_id}`);
+  if (!namespace || labels?.["dev.agentic-sandbox.run"] !== inventory.run_id || labels?.["dev.agentic-sandbox.scope"] !== "celld-qualification" || value?.Name !== `/${proxy.name}` || !acceptedNetworkModes.has(value?.HostConfig?.NetworkMode) || value?.Config?.Image !== proxy.image_ref) {
+    throw annotateDriverError(new Error("refusing a substituted mTLS proxy container"), {
+      errorCode: "CELLD_MTLS_PROXY_CONTAINER_SUBSTITUTED",
+    });
   }
   return value;
 }
@@ -474,7 +485,15 @@ export function startMtlsProxy(inventory, proxy, {
   if (inspected.status !== 0) throw commandResultError("network-auth.start-mtls-proxy.inspect-started", "CELLD_MTLS_PROXY_INSPECT_FAILED", inspected, "mTLS proxy disappeared after start");
   let document;
   try { document = JSON.parse(inspected.stdout); } catch { throw new Error("mTLS proxy inspection is not bounded JSON"); }
-  const observed = assertOwnedMtlsProxy(document, inventory, proxy);
+  let observed;
+  try {
+    observed = assertOwnedMtlsProxy(document, inventory, proxy);
+  } catch (error) {
+    throw annotateDriverError(error, {
+      operation: "network-auth.start-mtls-proxy.verify-ownership",
+      errorCode: "CELLD_MTLS_PROXY_CONTAINER_SUBSTITUTED",
+    });
+  }
   if (observed.State?.Running !== true) throw annotateDriverError(new Error("mTLS proxy did not remain running"), {
     operation: "network-auth.start-mtls-proxy.verify-running",
     errorCode: "CELLD_MTLS_PROXY_NOT_RUNNING",

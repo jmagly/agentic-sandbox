@@ -1247,6 +1247,65 @@ test("normal and restart cleanup remove an exact immutable identity once and ret
   }
 });
 
+test("normal provider cleanup continues exact Docker cleanup after QEMU helper residue while preserving failure", async () => {
+  const fixture = exactRunFixture("red-qemu-docker-residue");
+  try {
+    fixture.config.vm_storage_dir = join(fixture.root, "vm-storage");
+    const qemuStoragePath = join(fixture.config.vm_storage_dir, "celld-qemu-provider");
+    mkdirSync(qemuStoragePath, { recursive: true, mode: 0o700 });
+    writeFileSync(join(qemuStoragePath, "disk.qcow2"), "authorized storage\n", { mode: 0o600 });
+    const { resource: qemuResource } = addObservedQemuProvider(fixture.inventory, qemuStoragePath, {
+      name: "celld-qemu-provider",
+    });
+    const { resource: dockerResource } = addObservedProvider(fixture.inventory, {
+      subject: providerSubject({
+        instanceId: "123e4567-e89b-42d3-a456-426614174001",
+        name: "celld-docker-provider",
+        substrate: "docker",
+      }),
+    });
+    const runtime = {
+      scenarioId: "UAT-CELLD-003",
+      runId: fixture.runId,
+      config: fixture.config,
+      orchestrationInventory: fixture.inventory,
+      providerResources: new Map(fixture.inventory.resources.map((resource) => [resource.instance_id, {
+        instanceId: resource.instance_id, name: resource.name, substrate: resource.substrate,
+      }])),
+      persistInventory: () => {},
+    };
+    const present = new Map([[qemuResource.instance_id, true], [dockerResource.instance_id, true]]);
+    const removals = [];
+    let cleanupError;
+    await assert.rejects(
+      liveOrchestration.cleanupOwnedProviderResources(runtime, {
+        observeProviderResource: async ({ resource }) => {
+          const record = fixture.inventory.resources.find((entry) => entry.instance_id === resource.instanceId);
+          if (resource.substrate === "qemu") return persistedQemuObservation(record, qemuStoragePath, { present: present.get(resource.instanceId) });
+          return persistedDockerObservation(record, present.get(resource.instanceId));
+        },
+        removeProviderResource: async ({ resource }) => {
+          removals.push(resource.instanceId);
+          if (resource.substrate === "qemu") throw new liveOrchestration.OrchestrationCleanupResidueError("simulated QEMU helper failure");
+          present.set(resource.instanceId, false);
+        },
+      }),
+      (error) => {
+        cleanupError = error;
+        return error instanceof liveOrchestration.OrchestrationCleanupResidueError;
+      },
+    );
+    assert.equal(cleanupError.message, "simulated QEMU helper failure");
+    assert.deepEqual(removals, [qemuResource.instance_id, dockerResource.instance_id]);
+    assert.equal(qemuResource.status, "cleanup_pending");
+    assert.equal(dockerResource.status, "removed");
+    assert.equal(fixture.inventory.state, "cleanup_residue");
+    assert.equal(runtime.providerResources.has(dockerResource.instance_id), false);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
 test("v1 recovery and provider cleanup are read-only fail-closed and never enter the legacy destructive path", async (t) => {
   await t.test("recovery", async () => {
     const fixture = exactRunFixture("red-v1-recovery");

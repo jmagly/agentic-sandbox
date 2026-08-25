@@ -2271,11 +2271,17 @@ function qemuCleanupHelperRequest(runtime, plan) {
 
 function invokeInstalledQemuCleanupHelper(runtime, request) {
   if (!verifyQemuCleanupHelperInstallation(runtime.config)) {
-    throw new OrchestrationCleanupResidueError("installed QEMU cleanup helper is not the exact root-owned reviewed binary");
+    throw annotateDriverError(new OrchestrationCleanupResidueError("installed QEMU cleanup helper is not the exact root-owned reviewed binary"), {
+      operation: "orchestration.cleanup-provider.qemu-helper.verify-installation",
+      errorCode: "CELLD_ORCHESTRATION_QEMU_HELPER_INSTALL_INVALID",
+    });
   }
   const input = `${JSON.stringify(request)}\n`;
   if (Buffer.byteLength(input) > QEMU_CLEANUP_HELPER_MAX_INPUT) {
-    throw new OrchestrationCleanupResidueError("QEMU cleanup helper request exceeds its fixed input bound");
+    throw annotateDriverError(new OrchestrationCleanupResidueError("QEMU cleanup helper request exceeds its fixed input bound"), {
+      operation: "orchestration.cleanup-provider.qemu-helper.request-bound",
+      errorCode: "CELLD_ORCHESTRATION_QEMU_HELPER_REQUEST_TOO_LARGE",
+    });
   }
   const result = spawnSync("/usr/bin/sudo", ["-n", "--", QEMU_CLEANUP_HELPER_PATH], {
     encoding: "utf8",
@@ -2292,7 +2298,16 @@ function invokeInstalledQemuCleanupHelper(runtime, request) {
       || response?.schema_version !== "agentic-sandbox.celld-qemu-cleanup-helper-result/v1"
       || !["deleted", "absent"].includes(response?.status)
       || response.capture_path !== request.capture_path) {
-    throw new OrchestrationCleanupResidueError("privileged QEMU cleanup helper refused or failed the exact journal-owned capture");
+    throw annotateDriverError(new OrchestrationCleanupResidueError("privileged QEMU cleanup helper refused or failed the exact journal-owned capture"), {
+      operation: "orchestration.cleanup-provider.qemu-helper",
+      errorCode: "CELLD_ORCHESTRATION_QEMU_HELPER_FAILED",
+      code: result.error?.code,
+      signal: result.signal,
+      exitStatus: result.status,
+      stdoutSha256: sha256(result.stdout ?? ""),
+      stderrSha256: sha256(result.stderr ?? ""),
+      timedOut: result.error?.code === "ETIMEDOUT",
+    });
   }
   return response;
 }
@@ -2732,8 +2747,9 @@ export async function cleanupOwnedProviderResources(runtime, dependencies = {}) 
   const remove = dependencies.removeProviderResource
     ?? (async ({ plan, resource, record, observation }) => removeExactlyObservedProvider(runtime, resource, record, observation, { plan }));
   const assertions = [];
-  try {
-    for (const record of runtime.orchestrationInventory.resources) {
+  const failures = [];
+  for (const record of runtime.orchestrationInventory.resources) {
+    try {
       const resource = runtime.providerResources?.get(record.instance_id) ?? {
         instanceId: record.instance_id,
         name: record.name,
@@ -2756,11 +2772,12 @@ export async function cleanupOwnedProviderResources(runtime, dependencies = {}) 
       completeProviderCleanup(runtime, cleanupPlan, { present: false, owned: true, provider_storage_present: false });
       runtime.providerResources?.delete(record.instance_id);
       assertions.push(`${record.substrate === "docker" ? "Docker" : "QEMU"} provider identity ${sha256(record.instance_id)} absent`);
+    } catch (error) {
+      failures.push(error instanceof OrchestrationCleanupResidueError ? error : new OrchestrationCleanupResidueError(error.message, { cause: error }));
     }
-    return assertions;
-  } catch (error) {
-    markCleanupResidue(runtime, error);
   }
+  if (failures.length) markCleanupResidue(runtime, failures[0]);
+  return assertions;
 }
 
 function unavailable({ scenarioId, runId, profile, startedAt, reasonCode }) {
