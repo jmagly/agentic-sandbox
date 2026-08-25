@@ -38,6 +38,7 @@ import {
   validateNetworkAuthInventory,
   validateDirectionalRouteMatrices,
   validateTcpProbeResult,
+  waitManagementCelldStatus,
   waitManagementProviderLedger,
   waitMtlsProxies,
 } from "../../../scripts/celld-live-network-auth.mjs";
@@ -103,6 +104,30 @@ test("provider ledger readiness waits for management startup to create the ledge
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
+});
+
+test("management Celld status readiness fails fast on invalid startup config", async () => {
+  const configured = await waitManagementCelldStatus({}, {}, {
+    timeoutMs: 1_000,
+    intervalMs: 1,
+    requester: async () => ({
+      statusCode: 200,
+      body: JSON.stringify({ status: { enabled: true, configured: true, unavailable_code: null }, configuration_error: null }),
+    }),
+  });
+  assert.equal(configured.status.configured, true);
+
+  await assert.rejects(
+    () => waitManagementCelldStatus({}, {}, {
+      timeoutMs: 1_000,
+      intervalMs: 1,
+      requester: async () => ({
+        statusCode: 200,
+        body: JSON.stringify({ status: { enabled: true, configured: false, unavailable_code: null }, configuration_error: "private startup detail" }),
+      }),
+    }),
+    (error) => error.errorCode === "CELLD_MANAGEMENT_CELLD_CONFIG_INVALID" && /^[0-9a-f]{64}$/.test(error.evidenceSha256) && /^[0-9a-f]{64}$/.test(error.stderrSha256),
+  );
 });
 
 test("bounded probe pool preserves order and never exceeds 32 in flight", async () => {
@@ -811,6 +836,10 @@ test("network/auth source fixes the qualified sample sizes and pins the probe im
   assert.match(source, /String\(PROBE_CONCURRENCY\)/);
   assert.match(source, /readManagementProviderCounter/);
   assert.match(source, /waitManagementProviderLedger/);
+  assert.match(source, /waitManagementCelldStatus/);
+  assert.match(source, /network-auth\.wait-management-celld-status/);
+  assert.match(source, /CELLD_MANAGEMENT_CELLD_CONFIG_INVALID/);
+  assert.match(source, /\/api\/v2\/celld\/status/);
   assert.match(source, /network-auth\.wait-provider-ledger/);
   assert.match(source, /const route = privateCelldRoute\(runtime\.networkInventory\)/);
   assert.match(source, /role: kind === "public_route" \? "public" : "cross-fleet"/);

@@ -274,19 +274,23 @@ async function runCapabilities(runtime, timeline) {
   ], metrics: [{ name: "worker_capability_cases_passed", value: passed, unit: "cases" }], faults: [{ kind: "worker_deployment_rollback", healed: rollbackPreserved }] };
 }
 
-function inventorySnapshot(runtime) {
-  const containers = run("docker", ["ps", "--all", "--filter", `label=dev.agentic-sandbox.run=${runtime.runId}`, "--format", "{{.Names}}"] ).split(/\r?\n/).filter(Boolean).sort();
-  const pids = runtime.fleet.nodes.map((node) => run("docker", ["inspect", "--format", "{{.State.Pid}}", node.name]));
-  const processTrees = runtime.fleet.nodes.map((node) => run("docker", ["top", node.name, "-eo", "pid,ppid,comm"])).sort();
-  const ports = runtime.fleet.nodes.map((node) => run("docker", ["port", node.name])).sort();
-  const socketTables = pids.map((pid) => run("sudo", ["-n", "nsenter", "--target", pid, "--net", "cat", "/proc/net/tcp", "/proc/net/tcp6", "/proc/net/udp", "/proc/net/udp6", "/proc/net/unix"])).sort();
-  const domains = run("virsh", ["--connect", runtime.config.libvirt_uri, "list", "--all", "--name"]).split(/\r?\n/).filter(Boolean).sort();
-  const reviewedFiles = run("find", [runtime.config.base_images_dir, runtime.config.vm_storage_dir, runtime.config.agentshare_root, ...runtime.fleet.nodes.map((node) => node.state_dir), "-xdev", "-mindepth", "1", "-maxdepth", "3", "-printf", "%p|%y|%s\n"]).split(/\r?\n/).filter(Boolean).sort();
-  const containerFiles = runtime.fleet.nodes.map((node) => run("docker", ["diff", node.name])).sort();
+function inventoryCommand(operation, errorFields, program, args, options = {}) {
+  return runWorkerCommand(operation, errorFields, program, args, options, "CELLD_LIVE_WORKER_INVENTORY_FAILED");
+}
+
+function inventorySnapshot(runtime, operation = (name) => `worker.inventory.${name}`, errorFields = {}) {
+  const containers = inventoryCommand(operation("docker-ps"), errorFields, "docker", ["ps", "--all", "--filter", `label=dev.agentic-sandbox.run=${runtime.runId}`, "--format", "{{.Names}}"], { timeout: 30_000 }).split(/\r?\n/).filter(Boolean).sort();
+  const pids = runtime.fleet.nodes.map((node) => inventoryCommand(operation("docker-inspect-pid"), errorFields, "docker", ["inspect", "--format", "{{.State.Pid}}", node.name], { timeout: 30_000 }));
+  const processTrees = runtime.fleet.nodes.map((node) => inventoryCommand(operation("docker-top"), errorFields, "docker", ["top", node.name, "-eo", "pid,ppid,comm"], { timeout: 30_000 })).sort();
+  const portMaps = runtime.fleet.nodes.map((node) => inventoryCommand(operation("docker-inspect-ports"), errorFields, "docker", ["inspect", "--format", "{{json .NetworkSettings.Ports}}", node.name], { timeout: 30_000 })).sort();
+  const socketTables = pids.map((pid) => inventoryCommand(operation("nsenter-socket-table"), errorFields, "sudo", ["-n", "nsenter", "--target", pid, "--net", "cat", "/proc/net/tcp", "/proc/net/tcp6", "/proc/net/udp", "/proc/net/udp6", "/proc/net/unix"], { timeout: 30_000 })).sort();
+  const domains = inventoryCommand(operation("virsh-list-domains"), errorFields, "virsh", ["--connect", runtime.config.libvirt_uri, "list", "--all", "--name"], { timeout: 30_000 }).split(/\r?\n/).filter(Boolean).sort();
+  const reviewedFiles = inventoryCommand(operation("find-reviewed-files"), errorFields, "find", [runtime.config.base_images_dir, runtime.config.vm_storage_dir, runtime.config.agentshare_root, ...runtime.fleet.nodes.map((node) => node.state_dir), "-xdev", "-mindepth", "1", "-maxdepth", "3", "-printf", "%p|%y|%s\n"], { timeout: 120_000 }).split(/\r?\n/).filter(Boolean).sort();
+  const containerFiles = runtime.fleet.nodes.map((node) => inventoryCommand(operation("docker-diff"), errorFields, "docker", ["diff", node.name], { timeout: 30_000 })).sort();
   return {
     containers,
     processes_sha256: sha256(JSON.stringify({ pids, process_trees: processTrees })),
-    sockets_sha256: sha256(JSON.stringify({ ports, socket_tables: socketTables })),
+    sockets_sha256: sha256(JSON.stringify({ port_maps: portMaps, socket_tables: socketTables })),
     domains,
     files_sha256: sha256(JSON.stringify({ reviewed_files: reviewedFiles, container_files: containerFiles })),
   };
@@ -364,7 +368,7 @@ async function runExcluded(runtime, timeline) {
   const negativeRoot = await withDriverOperation(operation("prepare-negative-projects"), errorFields, () => prepareNegativeProjects(runtime.root));
   await runWorkerCommand(operation("reset-negative-projects"), errorFields, "docker", ["exec", primary, "sh", "-c", "rm -rf /tmp/celld-negative && mkdir -p /tmp/celld-negative"], { timeout: 120_000 }, "CELLD_LIVE_WORKER_RESET_NEGATIVE_PROJECTS_FAILED");
   await withDriverOperation(operation("copy-negative-projects"), errorFields, () => copyNegativeProjectsToContainer(primary, negativeRoot, operation, errorFields));
-  const before = await withDriverOperation(operation("inventory-before"), errorFields, () => inventorySnapshot(runtime));
+  const before = await withDriverOperation(operation("inventory-before"), errorFields, () => inventorySnapshot(runtime, (name) => operation(`inventory-before.${name}`), errorFields));
   let typedRejections = 0, silentSuccesses = 0;
   const codes = {};
   const attempts = [];
@@ -380,7 +384,7 @@ async function runExcluded(runtime, timeline) {
     }
     codes[capability] = rejected;
   }
-  const after = await withDriverOperation(operation("inventory-after"), errorFields, () => inventorySnapshot(runtime));
+  const after = await withDriverOperation(operation("inventory-after"), errorFields, () => inventorySnapshot(runtime, (name) => operation(`inventory-after.${name}`), errorFields));
   const effects = excludedInventoryEffects(before, after);
   const unchanged = Object.values(effects).every((value) => value === 0);
   const diagnosis = await withDriverOperation(operation("diagnose-fleet"), errorFields, () => diagnoseFleet(runtime.fleetPath));

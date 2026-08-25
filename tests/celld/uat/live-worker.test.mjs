@@ -168,6 +168,9 @@ test("Worker driver fixes the evaluator-owned matrices and does not claim UAT-00
   assert.match(source, /cat > \$\{targetPath\}/);
   assert.doesNotMatch(source, /\["cp", `\$\{negativeRoot\}\/\.`/);
   assert.match(source, /CELLD_LIVE_WORKER_COPY_NEGATIVE_PROJECTS_FAILED/);
+  assert.match(source, /CELLD_LIVE_WORKER_INVENTORY_FAILED/);
+  assert.match(source, /NetworkSettings\.Ports/);
+  assert.doesNotMatch(source, /\["port", node\.name\]/);
   assert.match(source, /operation\(`dry-run-\$\{capability\}`\)/);
   assert.doesNotMatch(source, /proofHash/);
   assert.doesNotMatch(source, /AWS_SHARED_CREDENTIALS_FILE/);

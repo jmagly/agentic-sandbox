@@ -990,6 +990,91 @@ export async function waitManagementProviderLedger(runtime, { runner = run, time
   throw latest ?? new Error("management provider counter ledger is unavailable");
 }
 
+function managementCelldStatusRequest(management, fleet) {
+  return new Promise((resolvePromise, rejectPromise) => {
+    const request = httpsRequest({
+      hostname: management.managementHost,
+      port: 8122,
+      path: "/api/v2/celld/status",
+      method: "GET",
+      servername: fleet.callback.management_server_name,
+      ca: readFileSync(fleet.callback.ca_file_ref),
+      cert: readFileSync(fleet.callback.relay_client_cert_file_ref),
+      key: readFileSync(fleet.callback.relay_client_key_file_ref),
+      rejectUnauthorized: true,
+      agent: false,
+      timeout: 10_000,
+    }, (response) => {
+      const chunks = [];
+      let length = 0;
+      response.on("data", (chunk) => {
+        length += chunk.length;
+        if (length > 8192) {
+          request.destroy(new Error("management Celld status response exceeds 8 KiB"));
+          return;
+        }
+        chunks.push(chunk);
+      });
+      response.once("end", () => {
+        resolvePromise({ statusCode: response.statusCode, body: Buffer.concat(chunks).toString("utf8") });
+      });
+    });
+    request.once("timeout", () => request.destroy(new Error("management Celld status request timed out")));
+    request.once("error", rejectPromise);
+    request.end();
+  });
+}
+
+function managementCelldStatusError(operation, errorCode, document, message, fields = {}) {
+  return driverOperationError(operation, {
+    errorCode,
+    evidenceSha256: sha256(JSON.stringify(document ?? {})),
+    ...fields,
+  }, message);
+}
+
+export async function readManagementCelldStatus(management, fleet, { requester = managementCelldStatusRequest } = {}) {
+  const response = await requester(management, fleet);
+  if (!Number.isSafeInteger(response?.statusCode) || response.statusCode !== 200) {
+    const bodySha256 = sha256(response?.body ?? "");
+    throw managementCelldStatusError("network-auth.management-celld-status.http", "CELLD_MANAGEMENT_CELLD_STATUS_HTTP_FAILED", { status_code: response?.statusCode ?? null, body_sha256: bodySha256 }, "management Celld status endpoint is unavailable", { stdoutSha256: bodySha256 });
+  }
+  let document;
+  try {
+    document = JSON.parse(response.body);
+  } catch {
+    const bodySha256 = sha256(response.body ?? "");
+    throw managementCelldStatusError("network-auth.management-celld-status.json", "CELLD_MANAGEMENT_CELLD_STATUS_INVALID_JSON", { body_sha256: bodySha256 }, "management Celld status endpoint returned invalid JSON", { stdoutSha256: bodySha256 });
+  }
+  const configured = document?.status?.enabled === true && document?.status?.configured === true && document?.configuration_error === null;
+  if (!configured) {
+    const configurationErrorSha256 = sha256(String(document?.configuration_error ?? ""));
+    throw managementCelldStatusError("network-auth.management-celld-status.config", "CELLD_MANAGEMENT_CELLD_CONFIG_INVALID", {
+      enabled: document?.status?.enabled ?? null,
+      configured: document?.status?.configured ?? null,
+      unavailable_code: document?.status?.unavailable_code ?? null,
+      configuration_error_sha256: configurationErrorSha256,
+    }, "management Celld configuration is invalid", { stderrSha256: configurationErrorSha256 });
+  }
+  return document;
+}
+
+export async function waitManagementCelldStatus(management, fleet, { requester = managementCelldStatusRequest, timeoutMs = 120_000, intervalMs = 250 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  let latest = null;
+  do {
+    try {
+      return await readManagementCelldStatus(management, fleet, { requester });
+    } catch (error) {
+      latest = error;
+      if (error?.errorCode === "CELLD_MANAGEMENT_CELLD_CONFIG_INVALID") throw error;
+      if (Date.now() >= deadline) break;
+      await sleep(intervalMs);
+    }
+  } while (Date.now() < deadline);
+  throw latest ?? new Error("management Celld status endpoint is unavailable");
+}
+
 function providerCounter(runtime) {
   return runtime.readProviderCounter?.() ?? readManagementProviderCounter(runtime);
 }
@@ -1624,6 +1709,7 @@ export async function executeNetworkAuthDriver({ scenarioId, runId, liveProfileP
       tlsIdentityFile: networkInventory.proxies[0].management_client_identity_file_ref,
     }));
     await withDriverOperation("network-auth.wait-management", errorFields, () => waitManagement(management, fleet));
+    await withDriverOperation("network-auth.wait-management-celld-status", errorFields, () => waitManagementCelldStatus(management, fleet));
     await withDriverOperation("network-auth.wait-provider-ledger", errorFields, () => waitManagementProviderLedger({ fleet }));
     await withDriverOperation("network-auth.start-callback-relays", errorFields, () => startCallbackRelays(fleetPath, { relayBinaryPath: config.callback_relay_binary_path }));
     const runtime = { config, storage, fleet, fleetPath, runId, management, managementHost, networkInventory };
