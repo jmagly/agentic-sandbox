@@ -1406,17 +1406,17 @@ jobs:
   release-attach:
     name: Create Gitea release + attach binaries
     runs-on: titan
-    # Gitea Actions can leave downstream release-only jobs in a failed runner
-    # state on non-tag pushes when their needs graph contains skipped jobs.
-    # Use always() plus explicit prerequisite results so non-tag pushes
-    # resolve this release-only job to skipped, while tag pushes still require
-    # every release prerequisite to pass before publication.
+    # Keep this as a plain tag/ref gate instead of `always() && ...`.
+    # Gitea 1.25 queues downstream `always()` jobs on non-tag branch/manual CI
+    # before resolving the tag predicate, which leaves green branch validation
+    # runs non-terminal behind no-op release publication jobs (#794).
+    # Tag pushes still require every release prerequisite to pass before
+    # publication.
     #
     # A skipped or failed immutable macOS developer bundle blocks release
     # creation and every downstream mirror. New tags cannot silently omit the
     # explicitly documented Apple Silicon developer package.
     if: >
-      always() &&
       startsWith(gitea.ref, 'refs/tags/v') &&
       needs.release-binaries.result == 'success' &&
       needs.release-linux-packages.result == 'success' &&
@@ -1601,7 +1601,6 @@ jobs:
     name: Publish crates to crates.io (#296)
     runs-on: titan
     if: >
-      always() &&
       startsWith(gitea.ref, 'refs/tags/v') &&
       needs.release-attach.result == 'success'
     needs: [release-attach]
@@ -1651,7 +1650,6 @@ jobs:
     name: Mirror container images to public registries (#299/#478)
     runs-on: titan
     if: >
-      always() &&
       startsWith(gitea.ref, 'refs/tags/v') &&
       needs.docker.result == 'success' &&
       needs.integration.result == 'success'
@@ -1782,7 +1780,6 @@ jobs:
     name: Sign artifacts + generate SBOM (#300)
     runs-on: titan
     if: >
-      always() &&
       startsWith(gitea.ref, 'refs/tags/v') &&
       needs.release-attach.result == 'success' &&
       needs.multi-registry-push.result == 'success'
@@ -2082,7 +2079,6 @@ jobs:
     name: Mirror release to GitHub Releases (#306)
     runs-on: titan
     if: >
-      always() &&
       startsWith(gitea.ref, 'refs/tags/v') &&
       needs.release-attach.result == 'success'
     needs: [release-attach]
