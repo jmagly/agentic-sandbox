@@ -6,7 +6,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$repo_root"
 
 workflow=.gitea/workflows/macos-release-ceremony.yml
-ci=.gitea/workflows/ci.yaml
+ci=.gitea/workflows/release.yml
 preflight=scripts/macos-release-preflight.sh
 
 for forbidden_trigger in pull_request push schedule workflow_call workflow_run; do
