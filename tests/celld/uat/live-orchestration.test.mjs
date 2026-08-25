@@ -14,6 +14,7 @@ import {
   executeOrchestrationDriver,
   healPlannedOrchestrationFault,
   issueCommand,
+  launchManagement,
   loadAuthorizedOrchestrationInventory,
   loadProtectedOrchestrationRuntime,
   managementEnvironment,
@@ -119,6 +120,72 @@ test("management transport can be pinned to the private Celld mTLS proxy", () =>
     assert.equal(environment.AGENTIC_CELLD_TLS_CA_FILE, tlsCa);
     assert.equal(environment.AGENTIC_CELLD_TLS_CLIENT_IDENTITY_FILE, tlsIdentity);
     assert.throws(() => managementEnvironment(liveConfig, fleet, "172.30.0.1", { tlsCaFile: tlsCa }), /requires both/);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("management launch annotates protected environment failures", () => {
+  const directory = mkdtempSync(join(tmpdir(), "celld-management-launch-env-test-"));
+  try {
+    const fleet = {
+      run_root: directory,
+      worker_vars_file_ref: join(directory, "missing-worker-vars"),
+      callback: {
+        management_server_cert_file_ref: join(directory, "management.crt"), management_server_key_file_ref: join(directory, "management.key"),
+        ca_file_ref: join(directory, "ca.crt"), management_auth_key_file_ref: join(directory, "management-auth-key"),
+        effect_ledger_file_ref: join(directory, "effect-ledger.sqlite"), client_cn: "agentic-celld-worker-callback",
+      },
+      pins: { celld: { version: "v0.2.1", commit: "1".repeat(40) } },
+    };
+    let failure;
+    assert.throws(
+      () => launchManagement(config({ management_binary_path: join(directory, "agentic-mgmt") }), fleet, "127.0.0.1", { celldEndpoint: "http://127.0.0.1:18080" }),
+      (error) => {
+        failure = error;
+        return true;
+      },
+    );
+    assert.equal(failure.operation, "orchestration.launch-management.environment");
+    assert.equal(failure.errorCode, "CELLD_MANAGEMENT_ENVIRONMENT_INVALID");
+    assert.equal(failure.code, "ENOENT");
+    const document = liveOrchestration.driverErrorDocument(failure);
+    assert.equal(document.operation, "orchestration.launch-management.environment");
+    assert.equal(document.error_code, "CELLD_MANAGEMENT_ENVIRONMENT_INVALID");
+    assert.equal(document.node_code, "ENOENT");
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("management launch annotates spawn failures before readiness polling", () => {
+  const directory = mkdtempSync(join(tmpdir(), "celld-management-launch-spawn-test-"));
+  try {
+    const workerVars = join(directory, "worker-vars");
+    writeFileSync(workerVars, "CELL_AUTH_KEY_ID=run-key\nCELL_AUTH_KEY=this-is-a-long-enough-qualification-key\n", { mode: 0o600 });
+    const fleet = {
+      run_root: directory,
+      worker_vars_file_ref: workerVars,
+      callback: {
+        management_server_cert_file_ref: join(directory, "management.crt"), management_server_key_file_ref: join(directory, "management.key"),
+        ca_file_ref: join(directory, "ca.crt"), management_auth_key_file_ref: join(directory, "management-auth-key"),
+        effect_ledger_file_ref: join(directory, "effect-ledger.sqlite"), client_cn: "agentic-celld-worker-callback",
+      },
+      pins: { celld: { version: "v0.2.1", commit: "1".repeat(40) } },
+    };
+    let failure;
+    assert.throws(
+      () => launchManagement(config({ management_binary_path: join(directory, "missing-agentic-mgmt") }), fleet, "127.0.0.1", { celldEndpoint: "http://127.0.0.1:18080" }),
+      (error) => {
+        failure = error;
+        return true;
+      },
+    );
+    assert.equal(failure.operation, "orchestration.launch-management.spawn");
+    assert.equal(failure.errorCode, "CELLD_MANAGEMENT_SPAWN_NO_PID");
+    const document = liveOrchestration.driverErrorDocument(failure);
+    assert.equal(document.operation, "orchestration.launch-management.spawn");
+    assert.equal(document.error_code, "CELLD_MANAGEMENT_SPAWN_NO_PID");
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

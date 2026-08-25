@@ -561,28 +561,66 @@ export function managementEnvironment(config, fleet, managementHost, { celldEndp
 
 export function launchManagement(config, fleet, managementHost, celldTransport = {}) {
   const logPath = join(fleet.run_root, "management-state", "management.log");
-  const processHandle = spawn(config.management_binary_path, [], {
-    cwd: REPO_ROOT,
-    env: managementEnvironment(config, fleet, managementHost, celldTransport),
-    shell: false,
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  const stat = readFileSync(`/proc/${processHandle.pid}/stat`, "utf8");
-  const fieldsAfterCommand = stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/);
-  const processStartTimeTicks = fieldsAfterCommand[19];
-  if (!/^[0-9]+$/.test(processStartTimeTicks ?? "")) throw new Error("management process start identity is unavailable");
-  processHandle.spawn_identity = {
-    run_id: config.run_id,
-    executable_sha256: sha256(readFileSync(config.management_binary_path)),
-    process_start_time_ticks: processStartTimeTicks,
-  };
+  let environment;
+  try {
+    environment = managementEnvironment(config, fleet, managementHost, celldTransport);
+  } catch (error) {
+    throw annotateDriverError(error, {
+      operation: "orchestration.launch-management.environment",
+      errorCode: "CELLD_MANAGEMENT_ENVIRONMENT_INVALID",
+    });
+  }
   const append = (chunk) => {
     const previous = existsSync(logPath) ? readFileSync(logPath) : Buffer.alloc(0);
     const combined = Buffer.concat([previous, chunk]).subarray(-1024 * 1024);
     writeFileSync(logPath, combined, { mode: 0o600 });
   };
+  const processHandle = spawn(config.management_binary_path, [], {
+    cwd: REPO_ROOT,
+    env: environment,
+    shell: false,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  processHandle.once("error", () => {});
   processHandle.stdout.on("data", append);
   processHandle.stderr.on("data", append);
+  if (!Number.isSafeInteger(processHandle.pid) || processHandle.pid < 1) {
+    throw driverOperationError("orchestration.launch-management.spawn", {
+      errorCode: "CELLD_MANAGEMENT_SPAWN_NO_PID",
+    }, "management process did not report a pid");
+  }
+  let processStartTimeTicks;
+  try {
+    const stat = readFileSync(`/proc/${processHandle.pid}/stat`, "utf8");
+    const fieldsAfterCommand = stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/);
+    processStartTimeTicks = fieldsAfterCommand[19];
+    if (!/^[0-9]+$/.test(processStartTimeTicks ?? "")) {
+      throw driverOperationError("orchestration.launch-management.spawn-identity", {
+        errorCode: "CELLD_MANAGEMENT_START_IDENTITY_UNAVAILABLE",
+      }, "management process start identity is unavailable");
+    }
+  } catch (error) {
+    if (processHandle.exitCode === null && processHandle.signalCode === null) processHandle.kill("SIGTERM");
+    throw annotateDriverError(error, {
+      operation: "orchestration.launch-management.spawn-identity",
+      errorCode: "CELLD_MANAGEMENT_PROC_STAT_UNREADABLE",
+    });
+  }
+  let executableSha256;
+  try {
+    executableSha256 = sha256(readFileSync(config.management_binary_path));
+  } catch (error) {
+    if (processHandle.exitCode === null && processHandle.signalCode === null) processHandle.kill("SIGTERM");
+    throw annotateDriverError(error, {
+      operation: "orchestration.launch-management.executable-hash",
+      errorCode: "CELLD_MANAGEMENT_BINARY_UNREADABLE",
+    });
+  }
+  processHandle.spawn_identity = {
+    run_id: config.run_id,
+    executable_sha256: executableSha256,
+    process_start_time_ticks: processStartTimeTicks,
+  };
   return { processHandle, logPath, managementHost };
 }
 

@@ -12,7 +12,7 @@ import { fileURLToPath } from "node:url";
 
 import { cleanupFleet, deployFleetWorker, diagnoseFleet, prepareFleet, startCallbackRelays, startFleet } from "./celld-fleet-fixture.mjs";
 import { cleanupFixture, prepareFixture, startFixture } from "./celld-seaweedfs-fixture.mjs";
-import { driverErrorDocument, driverOperationError, emitDriverError as emitLiveDriverError, withDriverOperation } from "./celld-live-driver-error.mjs";
+import { annotateDriverError, driverErrorDocument, driverOperationError, emitDriverError as emitLiveDriverError, withDriverOperation } from "./celld-live-driver-error.mjs";
 import { openStorageGatewayAccess } from "./celld-storage-gateway-access.mjs";
 import { S3V1Client, STORAGE_PROFILE_SCHEMA } from "./celld-storage-qualifier.mjs";
 import { launchManagement, stopManagementAndWait, storageGateway, validateOrchestrationConfig, waitManagement } from "./celld-live-orchestration.mjs";
@@ -562,7 +562,7 @@ export function cleanupMtlsProxies(inventory, { executor = rawCommand, persist =
 function rawCommand(program, args, options = {}) {
   const result = spawnSync(program, args, { encoding: "utf8", shell: false, ...options });
   if (result.error) throw result.error;
-  return { status: result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
+  return { status: result.status, signal: result.signal, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
 }
 
 function exactNamespace(inventory, fault, { dockerRunner = run, namespaceInode = (pid) => lstatSync(`/proc/${pid}/ns/net`).ino } = {}) {
@@ -596,23 +596,88 @@ export function listenerGuardCommands(inventory, guard) {
   };
 }
 
+function commandFailureFields(result, errorCode) {
+  const fields = {
+    errorCode,
+    stdoutSha256: sha256(result?.stdout ?? ""),
+    stderrSha256: sha256(result?.stderr ?? ""),
+  };
+  if (Number.isInteger(result?.status)) fields.exitStatus = result.status;
+  if (typeof result?.signal === "string") fields.signal = result.signal;
+  return fields;
+}
+
+function listenerGuardApplyStep(index, peerCount) {
+  if (index === 0) return "add-table";
+  if (index === 1) return "add-chain";
+  if (index === 2) return "add-loopback-accept";
+  if (index < peerCount + 3) return `add-peer-accept-${index - 3}`;
+  if (index === peerCount + 3) return "add-bypass-drop";
+  return `apply-${index}`;
+}
+
+function executeListenerGuardCommand(executor, operation, args) {
+  try {
+    return executor("sudo", ["-n", "nsenter", ...args], { timeout: 30_000 });
+  } catch (error) {
+    throw annotateDriverError(error, {
+      operation,
+      errorCode: "CELLD_LISTENER_GUARD_COMMAND_UNAVAILABLE",
+    });
+  }
+}
+
 export function applyListenerGuard(inventory, guard, { executor = rawCommand, persist = persistNetworkAuthInventory, dockerRunner = run, namespaceInode, now = new Date() } = {}) {
   if (guard.status !== "planned") throw new Error("only a planned listener guard can be applied");
-  exactNamespace(inventory, guard, { dockerRunner, namespaceInode });
-  persist(inventory);
-  const commands = listenerGuardCommands(inventory, guard);
-  const existing = executor("sudo", ["-n", "nsenter", ...commands.inspect], { timeout: 30_000 });
-  if (existing.status === 0) throw new Error("refusing to replace an existing listener guard table");
-  for (const args of commands.apply) {
-    const result = executor("sudo", ["-n", "nsenter", ...args], { timeout: 30_000 });
-    if (result.status !== 0) throw new Error(`listener guard apply failed: ${sha256(result.stderr ?? "")}`);
+  try {
+    exactNamespace(inventory, guard, { dockerRunner, namespaceInode });
+  } catch (error) {
+    throw annotateDriverError(error, {
+      operation: "network-auth.apply-listener-guard.exact-namespace",
+      errorCode: "CELLD_LISTENER_GUARD_NAMESPACE_INVALID",
+    });
+  }
+  try {
+    persist(inventory);
+  } catch (error) {
+    throw annotateDriverError(error, {
+      operation: "network-auth.apply-listener-guard.persist-planned",
+      errorCode: "CELLD_LISTENER_GUARD_PERSIST_FAILED",
+    });
+  }
+  let commands;
+  try {
+    commands = listenerGuardCommands(inventory, guard);
+  } catch (error) {
+    throw annotateDriverError(error, {
+      operation: "network-auth.apply-listener-guard.plan-commands",
+      errorCode: "CELLD_LISTENER_GUARD_COMMAND_PLAN_INVALID",
+    });
+  }
+  const existing = executeListenerGuardCommand(executor, "network-auth.apply-listener-guard.inspect-existing", commands.inspect);
+  if (existing.status === 0) {
+    throw driverOperationError("network-auth.apply-listener-guard.inspect-existing", commandFailureFields(existing, "CELLD_LISTENER_GUARD_TABLE_EXISTS"), "refusing to replace an existing listener guard table");
+  }
+  for (const [index, args] of commands.apply.entries()) {
+    const operation = `network-auth.apply-listener-guard.${listenerGuardApplyStep(index, guard.same_fleet_addresses.length)}`;
+    const result = executeListenerGuardCommand(executor, operation, args);
+    if (result.status !== 0) {
+      throw driverOperationError(operation, commandFailureFields(result, "CELLD_LISTENER_GUARD_APPLY_FAILED"), "listener guard apply command failed");
+    }
   }
   const timestamp = now.toISOString();
   guard.status = "applied";
   guard.applied_at = timestamp;
   guard.updated_at = timestamp;
   inventory.updated_at = timestamp;
-  persist(inventory);
+  try {
+    persist(inventory);
+  } catch (error) {
+    throw annotateDriverError(error, {
+      operation: "network-auth.apply-listener-guard.persist-applied",
+      errorCode: "CELLD_LISTENER_GUARD_PERSIST_FAILED",
+    });
+  }
   return guard;
 }
 

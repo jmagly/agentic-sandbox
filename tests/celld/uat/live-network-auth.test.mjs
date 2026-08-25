@@ -224,6 +224,45 @@ test("listener guard allows loopback and exact peers while dropping every bypass
   assert.match(validateNetworkAuthInventory(inventory).join(";"), /listener guard is invalid/);
 });
 
+test("listener guard apply failures expose exact safe command evidence", () => {
+  const inventory = createNetworkAuthInventory({ runId: "titan-765", runRoot: "/dev/shm/celld-qualification/titan-765", host: "titan", now: new Date("2026-08-23T08:00:00Z") });
+  registerNetworkNamespace(inventory, { container: "celld-fleet-node-1", pid: 31, inode: 401, runLabel: "titan-765" });
+  registerNetworkNamespace(inventory, { container: "celld-fleet-node-2", pid: 32, inode: 402, runLabel: "titan-765" });
+  const guard = planListenerGuard(inventory, {
+    sourceContainer: "celld-fleet-node-1", sourceNamespaceInode: 401, sameFleetAddresses: ["172.30.0.21", "172.30.0.20"],
+  }, new Date("2026-08-23T08:00:01Z"));
+  const stderr = "secret listener guard stderr";
+  let failure;
+  assert.throws(
+    () => applyListenerGuard(inventory, guard, {
+      persist: () => {},
+      dockerRunner: () => "31|titan-765|celld-qualification",
+      namespaceInode: () => 401,
+      executor: (_program, args) => {
+        if (args.includes("list") && args.includes("table")) return { status: 1, stdout: "", stderr: "not found" };
+        if (args.includes("add") && args.includes("table")) return { status: 0, stdout: "", stderr: "" };
+        if (args.includes("add") && args.includes("chain")) return { status: 2, stdout: "", stderr };
+        return { status: 0, stdout: "", stderr: "" };
+      },
+      now: new Date("2026-08-23T08:00:02Z"),
+    }),
+    (error) => {
+      failure = error;
+      return true;
+    },
+  );
+  assert.equal(failure.operation, "network-auth.apply-listener-guard.add-chain");
+  assert.equal(failure.errorCode, "CELLD_LISTENER_GUARD_APPLY_FAILED");
+  assert.equal(failure.exitStatus, 2);
+  assert.equal(failure.stderrSha256, createHash("sha256").update(stderr).digest("hex"));
+  const document = networkAuthDriverErrorDocument(failure);
+  assert.equal(document.operation, "network-auth.apply-listener-guard.add-chain");
+  assert.equal(document.error_code, "CELLD_LISTENER_GUARD_APPLY_FAILED");
+  assert.equal(document.exit_status, 2);
+  assert.equal(document.stderr_sha256, createHash("sha256").update(stderr).digest("hex"));
+  assert.equal(JSON.stringify(document).includes(stderr), false);
+});
+
 test("directional matrices isolate only the selected route and fully heal", () => {
   const timestamp = "2026-08-23T08:00:00Z";
   const routes = ["management_to_celld", "celld_to_management", "celld_to_store", "node_to_peer"];
