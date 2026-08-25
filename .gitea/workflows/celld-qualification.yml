@@ -497,7 +497,21 @@ jobs:
                 signal: .command.signal,
                 stdout_tail: .command.stdout_tail,
                 stderr_tail: .command.stderr_tail
-              } end)
+              } end),
+              live_driver_evidence: [.live_driver_evidence[]? | {
+                driver_id,
+                status,
+                reason,
+                assigned_assertions,
+                command: (if .command == null then null else {
+                  exit_code: .command.exit_code,
+                  signal: .command.signal,
+                  stdout_sha256: .command.stdout_sha256,
+                  stderr_sha256: .command.stderr_sha256,
+                  stdout_tail: .command.stdout_tail,
+                  stderr_tail: .command.stderr_tail
+                } end)
+              }]
             }' "${result_dir}/evidence.jsonl"
           fi
 

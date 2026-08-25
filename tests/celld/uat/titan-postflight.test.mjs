@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { evaluateTitanPostflight, main } from "../../../scripts/celld-titan-postflight.mjs";
+import { evaluateTitanPostflight, isCelldQualificationResourceName, main } from "../../../scripts/celld-titan-postflight.mjs";
 
 function baseline() {
   const resources = { complete: true, errors: [], docker_containers: ["existing"], docker_networks: ["bridge", "host", "none"], docker_volumes: ["volume"], libvirt_domains: ["domain"], vm_root_entries: ["domain"], qualification_agentshare_entries: [] };
@@ -23,14 +23,32 @@ test("Titan postflight passes only when exact resources and capacity return to b
   assert.ok(result.checks.every((check) => check.status === "PASS"));
 });
 
-test("Titan postflight fails on leaked Docker, libvirt, VM-root, or agentshare resources", () => {
+test("Titan postflight fails on leaked Celld-scoped Docker, libvirt, VM-root, or agentshare resources", () => {
   const preflight = baseline(), snapshot = current(preflight);
-  snapshot.resource_baseline.docker_containers.push("leaked-container");
-  snapshot.resource_baseline.libvirt_domains.push("leaked-domain");
-  snapshot.resource_baseline.vm_root_entries.push("leaked-domain");
+  snapshot.resource_baseline.docker_containers.push("celld-leaked-container");
+  snapshot.resource_baseline.libvirt_domains.push("celld-leaked-domain");
+  snapshot.resource_baseline.vm_root_entries.push("celld-leaked-domain");
   snapshot.resource_baseline.qualification_agentshare_entries.push("agentic-celld-qualification-123");
   const failures = evaluateTitanPostflight(preflight, snapshot, 20).checks.filter((check) => check.status === "FAIL").map((check) => check.id);
   assert.deepEqual(failures, ["resources.docker_containers", "resources.libvirt_domains", "resources.vm_root_entries", "resources.qualification_agentshare_entries"]);
+});
+
+test("Titan postflight records unrelated shared-host resource drift without failing", () => {
+  const preflight = baseline(), snapshot = current(preflight);
+  snapshot.resource_baseline.docker_volumes.push("matric-qualify-20260825020109-890985_qualification_db");
+  const result = evaluateTitanPostflight(preflight, snapshot, 20);
+  assert.equal(result.status, "PASS");
+  const check = result.checks.find((item) => item.id === "resources.docker_volumes");
+  assert.equal(check.status, "PASS");
+  assert.equal(check.observed.external_added.count, 1);
+  assert.deepEqual(check.observed.qualification_added, []);
+});
+
+test("Celld qualification resource predicate is conservative", () => {
+  assert.equal(isCelldQualificationResourceName("celld-s3-123_volume1"), true);
+  assert.equal(isCelldQualificationResourceName("agentic-celld-qualification-123"), true);
+  assert.equal(isCelldQualificationResourceName("titan-44979-node-1"), true);
+  assert.equal(isCelldQualificationResourceName("matric-qualify-20260825020109-890985_qualification_db"), false);
 });
 
 test("Titan postflight fails when retained data exceeds the bounded allowance", () => {

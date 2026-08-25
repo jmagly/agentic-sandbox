@@ -196,12 +196,12 @@ export function runSafeLiveDriver(definition, context, redact = String) {
       kind: "not_run",
       reason: `registered live driver is not installed: ${context.driverId}`,
       cleanup_status: "not_required",
-      command: { argv_redacted: [definition.program, ...args].map(redact), shell: false, started_at: started.toISOString(), ended_at: ended.toISOString(), exit_code: null, signal: null, stdout_sha256: sha256(""), stderr_sha256: sha256(""), stderr_tail: "", redacted: true },
+      command: { argv_redacted: [definition.program, ...args].map(redact), shell: false, started_at: started.toISOString(), ended_at: ended.toISOString(), exit_code: null, signal: null, stdout_sha256: sha256(""), stderr_sha256: sha256(""), stdout_tail: "", stderr_tail: "", redacted: true },
     };
   }
   const outcome = spawnSync(definition.program, args, { cwd: context.repoRoot, encoding: "utf8", env: safeEnvironment(), shell: false, timeout: definition.timeout_ms, maxBuffer: 8 * 1024 * 1024 });
   const ended = new Date();
-  const command = { argv_redacted: [definition.program, ...args].map(redact), shell: false, started_at: started.toISOString(), ended_at: ended.toISOString(), exit_code: outcome.status, signal: outcome.signal, stdout_sha256: sha256(redact(outcome.stdout ?? "")), stderr_sha256: sha256(redact(outcome.stderr ?? "")), stderr_tail: redact(outcome.stderr ?? "").slice(-4096), redacted: true };
+  const command = { argv_redacted: [definition.program, ...args].map(redact), shell: false, started_at: started.toISOString(), ended_at: ended.toISOString(), exit_code: outcome.status, signal: outcome.signal, stdout_sha256: sha256(redact(outcome.stdout ?? "")), stderr_sha256: sha256(redact(outcome.stderr ?? "")), stdout_tail: redact(outcome.stdout ?? "").slice(-4096), stderr_tail: redact(outcome.stderr ?? "").slice(-4096), redacted: true };
   if (outcome.error?.code === "ENOENT") return { kind: "not_run", reason: `registered live driver is not installed: ${context.driverId}`, cleanup_status: "not_required", command };
   if (outcome.error || outcome.status !== 0) {
     const cleanupResidue = outcome.status === 4;

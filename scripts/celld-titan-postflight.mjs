@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { chmodSync, mkdirSync, readFileSync, statfsSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { hostname } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -29,7 +30,56 @@ function positiveInteger(environment, key, fallback) {
   return Number(value);
 }
 
-function same(left, right) { return JSON.stringify(left) === JSON.stringify(right); }
+function sha256(value) {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function setDiff(observed, expected) {
+  const observedSet = new Set(observed ?? []);
+  const expectedSet = new Set(expected ?? []);
+  return {
+    added: [...observedSet].filter((value) => !expectedSet.has(value)).sort(),
+    removed: [...expectedSet].filter((value) => !observedSet.has(value)).sort(),
+  };
+}
+
+function bounded(values, limit = 20) {
+  return values.slice(0, limit);
+}
+
+function resourceListSummary(values) {
+  return {
+    count: values.length,
+    sha256: sha256(JSON.stringify(values)),
+    sample: bounded(values),
+  };
+}
+
+export function isCelldQualificationResourceName(name) {
+  const value = String(name ?? "");
+  return /^agentic-celld-qualification-[0-9]+$/.test(value)
+    || /^titan-[0-9]+(?:$|[_.-])/.test(value)
+    || /(?:^|[_.-])celld(?:$|[_.-])/.test(value);
+}
+
+function resourceDriftCheck(key, observed, expected) {
+  const diff = setDiff(observed, expected);
+  const qualificationAdded = diff.added.filter(isCelldQualificationResourceName);
+  const qualificationRemoved = diff.removed.filter(isCelldQualificationResourceName);
+  const externalAdded = diff.added.filter((value) => !isCelldQualificationResourceName(value));
+  const externalRemoved = diff.removed.filter((value) => !isCelldQualificationResourceName(value));
+  return {
+    id: `resources.${key}`,
+    status: qualificationAdded.length || qualificationRemoved.length ? "FAIL" : "PASS",
+    observed: {
+      qualification_added: bounded(qualificationAdded),
+      qualification_removed: bounded(qualificationRemoved),
+      external_added: resourceListSummary(externalAdded),
+      external_removed: resourceListSummary(externalRemoved),
+    },
+    expected: "no Celld qualification-scoped resource drift",
+  };
+}
 
 export function evaluateTitanPostflight(preflight, current, maxRetainedBytes) {
   if (preflight?.evidence_schema !== "agentic-sandbox.celld-titan-preflight/v1" || preflight.status !== "PASS") throw new Error("postflight requires passing preflight evidence");
@@ -43,10 +93,10 @@ export function evaluateTitanPostflight(preflight, current, maxRetainedBytes) {
     ["storage.build.regression", current.storage.build.free_bytes >= preflight.storage.build.free_bytes - maxRetainedBytes, preflight.storage.build.free_bytes - current.storage.build.free_bytes, `<=${maxRetainedBytes} bytes retained`],
     ["resources.inventory_complete", current.resource_baseline.complete === true, current.resource_baseline.errors, []],
   ];
-  for (const key of ["docker_containers", "docker_networks", "docker_volumes", "libvirt_domains", "vm_root_entries", "qualification_agentshare_entries"]) {
-    checks.push([`resources.${key}`, same(current.resource_baseline[key], preflight.resource_baseline[key]), current.resource_baseline[key], preflight.resource_baseline[key]]);
-  }
   const normalized = checks.map(([id, passed, observed, expected]) => ({ id, status: passed ? "PASS" : "FAIL", observed, expected }));
+  for (const key of ["docker_containers", "docker_networks", "docker_volumes", "libvirt_domains", "vm_root_entries", "qualification_agentshare_entries"]) {
+    normalized.push(resourceDriftCheck(key, current.resource_baseline[key], preflight.resource_baseline[key]));
+  }
   const failed = normalized.filter((check) => check.status === "FAIL");
   return { ...current, baseline_collected_at: preflight.collected_at, max_retained_bytes: maxRetainedBytes, status: failed.length ? "FAIL" : "PASS", reason_code: failed.length ? "titan.postflight_baseline_failed" : "titan.postflight_baseline_restored", checks: normalized };
 }

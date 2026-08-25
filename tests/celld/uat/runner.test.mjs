@@ -204,6 +204,24 @@ test("live protocol distinguishes ordinary driver exit 3 from typed cleanup-resi
   assert.equal(cleanupResidue.command.exit_code, 4);
 });
 
+test("live driver errors preserve bounded redacted stdout and stderr tails", () => {
+  const result = runSafeLiveDriver({
+    program: process.execPath,
+    args: ["tests/celld/uat/fixtures/live-driver-output-exit.mjs", "3"],
+    timeout_ms: 2_000,
+  }, {
+    driverId: "celld-live-orchestration",
+    scenarioId: "UAT-CELLD-003",
+    runId: "live-test",
+    profilePath: "/tmp/profile.json",
+    outputDir: "/tmp/output",
+    repoRoot: process.cwd(),
+  });
+  assert.equal(result.kind, "error");
+  assert.equal(result.command.stdout_tail, "driver stdout marker");
+  assert.equal(result.command.stderr_tail, "driver stderr marker");
+});
+
 test("an absent registered driver is a pre-mutation NOT_RUN", () => {
   const result = runSafeLiveDriver({ program: process.execPath, args: ["scripts/does-not-exist.mjs"], timeout_ms: 20 }, {
     driverId: "celld-live-orchestration", scenarioId: "UAT-CELLD-003", runId: "live-test", profilePath: "/tmp/profile.json", outputDir: "/tmp/output", repoRoot: process.cwd(),

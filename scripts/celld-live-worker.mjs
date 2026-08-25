@@ -86,6 +86,44 @@ export default {
 `.trimStart();
 
 function sha256(value) { return createHash("sha256").update(value).digest("hex"); }
+
+function safeDriverField(value) {
+  if (value === undefined || value === null) return null;
+  const text = String(value);
+  return /^[A-Za-z0-9_.:/-]{1,160}$/.test(text) ? text : `sha256:${sha256(text)}`;
+}
+
+export function driverErrorDocument(error) {
+  const exitCode = [3, 4].includes(error?.exitCode) ? error.exitCode : 3;
+  const document = {
+    schema_version: "agentic-sandbox.celld-live-driver-error/v1",
+    name: safeDriverField(error?.name ?? "Error"),
+    message_sha256: sha256(String(error?.message ?? "")),
+    exit_code: exitCode,
+  };
+  for (const [outputKey, inputKey] of [
+    ["operation", "operation"],
+    ["error_code", "errorCode"],
+    ["node_code", "code"],
+    ["signal", "signal"],
+    ["evidence_sha256", "evidenceSha256"],
+    ["stdout_sha256", "stdoutSha256"],
+    ["stderr_sha256", "stderrSha256"],
+  ]) {
+    const value = safeDriverField(error?.[inputKey]);
+    if (value !== null) document[outputKey] = value;
+  }
+  if (Number.isInteger(error?.exitStatus)) document.exit_status = error.exitStatus;
+  if (error?.timedOut === true) document.timed_out = true;
+  return document;
+}
+
+function emitDriverError(error) {
+  const document = driverErrorDocument(error);
+  process.stderr.write(`CELLD_LIVE_WORKER_ERROR ${JSON.stringify(document)}\n`);
+  process.exitCode = document.exit_code;
+}
+
 function sleep(ms) { return new Promise((resolvePromise) => setTimeout(resolvePromise, ms)); }
 
 function argument(args, name) {
@@ -388,4 +426,4 @@ async function main(args) {
   process.stdout.write(`${JSON.stringify(observation)}\n`);
 }
 
-if (process.argv[1] && SCRIPT_PATH === resolve(process.argv[1])) main(process.argv.slice(2)).catch((error) => { process.stderr.write(`CELLD_LIVE_WORKER_ERROR ${sha256(error.message)}\n`); process.exitCode = 3; });
+if (process.argv[1] && SCRIPT_PATH === resolve(process.argv[1])) main(process.argv.slice(2)).catch(emitDriverError);

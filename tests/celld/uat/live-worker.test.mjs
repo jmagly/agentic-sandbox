@@ -8,6 +8,7 @@ import test from "node:test";
 
 import {
   cleanupWorkerResources,
+  driverErrorDocument as workerDriverErrorDocument,
   excludedCapabilityRejectionEvidence,
   excludedInventoryEffects,
   executeWorkerDriver,
@@ -50,6 +51,26 @@ test("disabled live Worker returns pre-mutation NOT_RUN evidence", async () => {
     assert.equal(observation.mutation_started, false);
     assert.equal(observation.prerequisites[0].reason_code, "CELLD_LIVE_WORKER_DRIVER_DISABLED");
   } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("Worker driver error document keeps classification while redacting message text", () => {
+  const error = new Error("secret token should never appear");
+  error.name = "FleetControllerSubprocessError";
+  error.operation = "docker_exec_diagnose";
+  error.errorCode = "ETIMEDOUT";
+  error.exitStatus = 1;
+  error.stderrSha256 = "a".repeat(64);
+  error.timedOut = true;
+  const document = workerDriverErrorDocument(error);
+  assert.equal(document.schema_version, "agentic-sandbox.celld-live-driver-error/v1");
+  assert.equal(document.name, "FleetControllerSubprocessError");
+  assert.equal(document.operation, "docker_exec_diagnose");
+  assert.equal(document.error_code, "ETIMEDOUT");
+  assert.equal(document.exit_status, 1);
+  assert.equal(document.timed_out, true);
+  assert.equal(document.stderr_sha256, "a".repeat(64));
+  assert.match(document.message_sha256, /^[0-9a-f]{64}$/);
+  assert.equal(JSON.stringify(document).includes("secret token"), false);
 });
 
 test("UAT-009 is typed NOT_RUN before mutation while per-isolate controls are unavailable", async () => {

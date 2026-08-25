@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -12,6 +13,7 @@ import {
   cleanupProbeResources,
   createNetworkAuthInventory,
   directionalPartitionCommands,
+  driverErrorDocument as networkAuthDriverErrorDocument,
   executeNetworkAuthDriver,
   healDirectionalPartition,
   mapBounded,
@@ -38,6 +40,19 @@ import {
   validateTcpProbeResult,
   waitMtlsProxies,
 } from "../../../scripts/celld-live-network-auth.mjs";
+
+test("network/auth driver error document redacts unsafe fields", () => {
+  const error = new Error("private endpoint token should not be logged");
+  error.name = "Unsafe Error Name With Spaces";
+  error.code = "ERR_INVALID_ARG_TYPE";
+  error.signal = "SIGTERM";
+  const document = networkAuthDriverErrorDocument(error);
+  assert.equal(document.name, `sha256:${createHash("sha256").update(error.name).digest("hex")}`);
+  assert.equal(document.node_code, "ERR_INVALID_ARG_TYPE");
+  assert.equal(document.signal, "SIGTERM");
+  assert.match(document.message_sha256, /^[0-9a-f]{64}$/);
+  assert.equal(JSON.stringify(document).includes("private endpoint"), false);
+});
 
 test("provider effects are read from the protected management ledger", () => {
   const directory = mkdtempSync(join(tmpdir(), "celld-provider-counter-test-"));
