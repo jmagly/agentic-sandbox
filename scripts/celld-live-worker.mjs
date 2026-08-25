@@ -12,6 +12,7 @@ import {
   deployFleetQualificationWorker,
   deployFleetWorker,
   diagnoseFleet,
+  openFleetWorkerAccess,
   prepareFleet,
   probeFleetWorker,
   startFleet,
@@ -107,6 +108,45 @@ function run(program, args, options = {}) {
   return result.stdout.trim();
 }
 
+function commandFailureFields(result, errorCode) {
+  const fields = {
+    errorCode,
+    stdoutSha256: sha256(result?.stdout ?? ""),
+    stderrSha256: sha256(result?.stderr ?? ""),
+  };
+  if (Number.isInteger(result?.status)) fields.exitStatus = result.status;
+  if (typeof result?.signal === "string") fields.signal = result.signal;
+  return fields;
+}
+
+function runWorkerCommand(operation, fields, program, args, options = {}, errorCode = "CELLD_LIVE_WORKER_COMMAND_FAILED") {
+  const result = spawnSync(program, args, { encoding: "utf8", shell: false, ...options });
+  if (result.error) {
+    throw driverOperationError(operation, { ...fields, errorCode: result.error.code ?? errorCode }, result.error.message);
+  }
+  if (result.status !== 0) {
+    throw driverOperationError(operation, { ...fields, ...commandFailureFields(result, errorCode) }, `${basename(program)} command failed`);
+  }
+  return result.stdout.trim();
+}
+
+async function withWorkerAccess(operation, errorFields, fleetPath, callback) {
+  const access = await withDriverOperation(operation, errorFields, () => openFleetWorkerAccess(fleetPath));
+  let callbackError = null;
+  try {
+    return await callback(access.endpoint, access);
+  } catch (error) {
+    callbackError = error;
+    throw error;
+  } finally {
+    try {
+      await withDriverOperation(`${operation}.close`, errorFields, () => access.close());
+    } catch (closeError) {
+      if (!callbackError) throw closeError;
+    }
+  }
+}
+
 function protectedJson(path, description) {
   if (!isAbsolute(path) || !existsSync(path)) throw new Error(`${description} is missing`);
   const metadata = lstatSync(path);
@@ -156,13 +196,6 @@ function deployProject(runtime, projectPath, projectDigest, deploymentKind) {
   return deployFleetQualificationWorker(runtime.fleetPath, { projectPath, projectDigest, deploymentKind });
 }
 
-function workerEndpoint(fleet) {
-  const output = run("docker", ["port", fleet.nodes[0].name, "8080/tcp"]);
-  const match = /^127\.0\.0\.1:(\d+)$/.exec(output);
-  if (!match) throw new Error("Worker listener is not published on host loopback only");
-  return `http://127.0.0.1:${match[1]}`;
-}
-
 async function boundedFetch(endpoint, path) {
   const response = await fetch(new URL(path, endpoint), { redirect: "error", signal: AbortSignal.timeout(10_000) });
   const bytes = Buffer.from(await response.arrayBuffer());
@@ -204,11 +237,13 @@ async function capabilityCases(endpoint) {
 async function runCapabilities(runtime, timeline) {
   const errorFields = runtime.errorFields ?? {};
   const operation = (name) => `worker.run-capabilities.${name}`;
-  const endpoint = await withDriverOperation(operation("worker-endpoint"), errorFields, () => workerEndpoint(runtime.fleet));
   const instanceId = `rollback-${sha256(runtime.runId).slice(0, 20)}`, operationId = `rollback-${randomBytes(8).toString("hex")}`, nonce = randomBytes(16).toString("hex");
-  const seed = await withDriverOperation(operation("seed-rollback-marker"), errorFields, () => getWorkerCell({ endpoint, varsFile: runtime.fleet.worker_vars_file_ref, instanceId, operationId, generation: 1, nonce }));
+  const { seed, markerBefore } = await withWorkerAccess(operation("worker-endpoint"), errorFields, runtime.fleetPath, async (endpoint) => {
+    const seedResult = await withDriverOperation(operation("seed-rollback-marker"), errorFields, () => getWorkerCell({ endpoint, varsFile: runtime.fleet.worker_vars_file_ref, instanceId, operationId, generation: 1, nonce }));
+    const markerResult = await withDriverOperation(operation("verify-rollback-marker"), errorFields, () => getWorkerCell({ endpoint, varsFile: runtime.fleet.worker_vars_file_ref, instanceId, operationId, generation: 1, nonce }));
+    return { seed: seedResult, markerBefore: markerResult };
+  });
   if (seed.status !== 404 || seed.body?.error?.code !== "cell.missing") throw driverOperationError(operation("seed-rollback-marker"), errorFields, "reference Worker durable rollback marker was not accepted");
-  const markerBefore = await withDriverOperation(operation("verify-rollback-marker"), errorFields, () => getWorkerCell({ endpoint, varsFile: runtime.fleet.worker_vars_file_ref, instanceId, operationId, generation: 1, nonce }));
   if (markerBefore.status !== 409 || markerBefore.body?.error?.code !== "cell.signature_replayed") throw driverOperationError(operation("verify-rollback-marker"), errorFields, "reference Worker did not persist the rollback marker before deployment");
   const markerIdentity = `sha256:${sha256(`${instanceId}:${operationId}:${nonce}`)}`;
   const stateBefore = `sha256:${sha256(JSON.stringify({ marker_identity: markerIdentity, status: markerBefore.status, code: markerBefore.body.error.code }))}`;
@@ -216,14 +251,17 @@ async function runCapabilities(runtime, timeline) {
   const conformance = await withDriverOperation(operation("prepare-conformance-project"), errorFields, () => prepareWorkerConformanceProject(runtime.root));
   const candidate = await withDriverOperation(operation("deploy-candidate"), errorFields, () => deployProject(runtime, conformance.path, conformance.sha256, "qualification-candidate"));
   if ((await withDriverOperation(operation("start-candidate-fleet"), errorFields, () => startFleet(runtime.fleetPath))).status !== "READY") throw driverOperationError(operation("start-candidate-fleet"), errorFields, "conformance deployment fleet did not become ready");
-  const cases = await withDriverOperation(operation("capability-cases"), errorFields, () => capabilityCases(workerEndpoint(runtime.fleet)));
+  const cases = await withWorkerAccess(operation("candidate-worker-endpoint"), errorFields, runtime.fleetPath, (endpoint) => withDriverOperation(operation("capability-cases"), errorFields, () => capabilityCases(endpoint)));
   await withDriverOperation(operation("stop-fleet-for-restore"), errorFields, () => stopFleetForWorkerDeployment(runtime.fleetPath));
   const approvedProject = join(REPO_ROOT, "runtimes/celld/instance-cell");
   const approvedProjectDigest = await withDriverOperation(operation("digest-approved-reference"), errorFields, () => workerDeploymentProjectDigest(approvedProject, { deploymentKind: "approved-reference" }));
   const restored = await withDriverOperation(operation("deploy-approved-reference"), errorFields, () => deployProject(runtime, approvedProject, approvedProjectDigest, "approved-reference"));
   if ((await withDriverOperation(operation("start-approved-fleet"), errorFields, () => startFleet(runtime.fleetPath))).status !== "READY") throw driverOperationError(operation("start-approved-fleet"), errorFields, "reference deployment rollback did not become ready");
-  const replay = await withDriverOperation(operation("verify-restored-marker"), errorFields, () => getWorkerCell({ endpoint: workerEndpoint(runtime.fleet), varsFile: runtime.fleet.worker_vars_file_ref, instanceId, operationId, generation: 1, nonce }));
-  const probe = await withDriverOperation(operation("probe-restored-worker"), errorFields, () => probeFleetWorker(runtime.fleetPath));
+  const { replay, probe } = await withWorkerAccess(operation("restored-worker-endpoint"), errorFields, runtime.fleetPath, async (endpoint) => {
+    const replayResult = await withDriverOperation(operation("verify-restored-marker"), errorFields, () => getWorkerCell({ endpoint, varsFile: runtime.fleet.worker_vars_file_ref, instanceId, operationId, generation: 1, nonce }));
+    const probeResult = await withDriverOperation(operation("probe-restored-worker"), errorFields, () => probeFleetWorker(runtime.fleetPath, { endpoint }));
+    return { replay: replayResult, probe: probeResult };
+  });
   const stateAfter = `sha256:${sha256(JSON.stringify({ marker_identity: markerIdentity, status: replay.status, code: replay.body?.error?.code }))}`;
   const rollbackPreserved = replay.status === 409 && replay.body?.error?.code === "cell.signature_replayed"
     && stateAfter === stateBefore && probe.status === "READY"
@@ -300,7 +338,7 @@ async function runExcluded(runtime, timeline) {
   const operation = (name) => `worker.run-excluded.${name}`;
   const primary = runtime.fleet.nodes[0].name;
   const negativeRoot = await withDriverOperation(operation("prepare-negative-projects"), errorFields, () => prepareNegativeProjects(runtime.root));
-  await withDriverOperation(operation("copy-negative-projects"), errorFields, () => run("docker", ["cp", negativeRoot, `${primary}:/tmp/celld-negative`], { timeout: 120_000 }));
+  await runWorkerCommand(operation("copy-negative-projects"), errorFields, "docker", ["cp", negativeRoot, `${primary}:/tmp/celld-negative`], { timeout: 120_000 }, "CELLD_LIVE_WORKER_COPY_NEGATIVE_PROJECTS_FAILED");
   const before = await withDriverOperation(operation("inventory-before"), errorFields, () => inventorySnapshot(runtime));
   let typedRejections = 0, silentSuccesses = 0;
   const codes = {};

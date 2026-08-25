@@ -29,6 +29,7 @@ import {
   cleanupFleet,
   deployFleetWorker,
   diagnoseFleet,
+  openFleetWorkerAccess,
   prepareFleet,
   startCallbackRelays,
   startFleet,
@@ -2819,6 +2820,7 @@ export async function executeOrchestrationDriver({ scenarioId, runId, liveProfil
   let fixture = null;
   let fleet = null;
   let fleetPath = null;
+  let workerAccess = null;
   let management = null;
   let runtime = null;
   let cleanupStatus = "failed";
@@ -2838,12 +2840,13 @@ export async function executeOrchestrationDriver({ scenarioId, runId, liveProfil
     const diagnosis = await withDriverOperation("orchestration.start-fleet", errorFields, () => startFleet(fleetPath));
     if (diagnosis.status !== "READY") throw driverOperationError("orchestration.start-fleet", errorFields, "three-node Celld fleet is not ready");
     const managementHost = await withDriverOperation("orchestration.resolve-storage-gateway", errorFields, () => storageGateway(fleet));
-    management = await withDriverOperation("orchestration.launch-management", errorFields, () => launchManagement(config, fleet, managementHost));
+    workerAccess = await withDriverOperation("orchestration.open-worker-access", errorFields, () => openFleetWorkerAccess(fleetPath));
+    management = await withDriverOperation("orchestration.launch-management", errorFields, () => launchManagement(config, fleet, managementHost, { celldEndpoint: workerAccess.endpoint }));
     await withDriverOperation("orchestration.wait-management", errorFields, () => waitManagement(management, fleet));
     await withDriverOperation("orchestration.start-callback-relays", errorFields, () => startCallbackRelays(fleetPath, { relayBinaryPath: config.callback_relay_binary_path, enableFaultSignal: ["UAT-CELLD-005"].includes(scenarioId) }));
     const activeResources = orchestrationInventory.resources.filter((resource) => resource.status !== "removed").map((resource) => [resource.instance_id, { instanceId: resource.instance_id, name: resource.name, substrate: resource.substrate }]);
     runtime = {
-      config, fleet, fleetPath, management, managementHost, workerEndpoint: workerEndpoint(fleet), runId, scenarioId,
+      config, fleet, fleetPath, management, managementHost, workerEndpoint: workerAccess.endpoint, runId, scenarioId,
       orchestrationInventory, providerResources: new Map(activeResources),
       persistedJournalHeadSha256: orchestrationInventory.journal_head_sha256,
       persistInventory: dependencies.persistInventory,
@@ -2868,6 +2871,7 @@ export async function executeOrchestrationDriver({ scenarioId, runId, liveProfil
         : new OrchestrationCleanupResidueError(`${kind} cleanup failed`, { cause: error }), { operation: `orchestration.cleanup-${kind}`, scenarioId }));
     };
     try { await stopManagementAndWait(runtime?.management ?? management, "SIGKILL"); cleanupAssertions.push("management process terminated"); } catch (error) { retainCleanupError("management", error); }
+    try { if (workerAccess) { await workerAccess.close(); cleanupAssertions.push("Worker loopback access closed"); } } catch (error) { retainCleanupError("worker-access", error); }
     try { cleanupAssertions.push(...await cleanupOwnedProviderResources(runtime)); } catch (error) { retainCleanupError("provider", error); }
     try { if (fleetPath && existsSync(fleetPath)) cleanupFleet(fleetPath); cleanupAssertions.push("exact fleet containers and protected fleet state removed"); } catch (error) { retainCleanupError("fleet", error); }
     try { if (fixture) cleanupFixture(fixture); cleanupAssertions.push("exact storage services, network, volumes, and run directory removed"); } catch (error) { retainCleanupError("storage", error); }

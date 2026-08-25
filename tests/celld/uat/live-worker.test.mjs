@@ -156,9 +156,12 @@ test("Worker driver fixes the evaluator-owned matrices and does not claim UAT-00
   assert.match(source, /attempts: 800/);
   assert.match(source, /attempt_records: attempts/);
   assert.match(source, /markerBefore\.status !== 409/);
+  assert.match(source, /openFleetWorkerAccess/);
+  assert.match(source, /withWorkerAccess\(operation\("worker-endpoint"\)/);
   assert.match(source, /operation\("deploy-candidate"\)/);
   assert.match(source, /operation\("capability-cases"\)/);
   assert.match(source, /operation\("copy-negative-projects"\)/);
+  assert.match(source, /CELLD_LIVE_WORKER_COPY_NEGATIVE_PROJECTS_FAILED/);
   assert.match(source, /operation\(`dry-run-\$\{capability\}`\)/);
   assert.doesNotMatch(source, /proofHash/);
   assert.doesNotMatch(source, /AWS_SHARED_CREDENTIALS_FILE/);

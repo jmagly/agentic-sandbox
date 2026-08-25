@@ -355,6 +355,43 @@ test("mTLS proxy controller persists before creation and removes only the exact 
   assert.deepEqual(cleanupCalls.find((args) => args[0] === "rm"), ["rm", "--force", "--volumes", proxy.name]);
 });
 
+test("mTLS proxy startup failures retain safe command evidence fields", () => {
+  const inventory = createNetworkAuthInventory({ runId: "titan-765", runRoot: "/dev/shm/celld-qualification/titan-765", host: "titan" });
+  registerNetworkNamespace(inventory, { container: "celld-fleet-node-1", pid: 3, inode: 44, runLabel: "titan-765" });
+  const proxy = planMtlsProxy(inventory, {
+    nodeContainer: "celld-fleet-node-1", listenAddress: "172.30.0.20", binarySha256: "7".repeat(64), imageRef: `sha256:${"6".repeat(64)}`,
+  });
+  const stderr = "secret docker create stderr";
+  let failure;
+  assert.throws(
+    () => startMtlsProxy(inventory, proxy, {
+      binaryPath: "/repo/target/agentic-celld-mtls-proxy",
+      verifyMaterial: () => {},
+      persist: () => {},
+      executor: (_program, args) => {
+        if (args[0] === "info") return { status: 0, stdout: "27.0.0", stderr: "" };
+        if (args[0] === "container" && args[1] === "inspect") return { status: 1, stdout: "", stderr: "missing" };
+        if (args[0] === "create") return { status: 125, stdout: "container-id", stderr };
+        return { status: 0, stdout: "", stderr: "" };
+      },
+    }),
+    (error) => {
+      failure = error;
+      return true;
+    },
+  );
+  assert.equal(failure.operation, "network-auth.start-mtls-proxy.create-container");
+  assert.equal(failure.errorCode, "CELLD_MTLS_PROXY_CREATE_FAILED");
+  assert.equal(failure.exitStatus, 125);
+  assert.equal(failure.stdoutSha256, createHash("sha256").update("container-id").digest("hex"));
+  assert.equal(failure.stderrSha256, createHash("sha256").update(stderr).digest("hex"));
+  const document = networkAuthDriverErrorDocument(failure);
+  assert.equal(document.operation, "network-auth.start-mtls-proxy.create-container");
+  assert.equal(document.error_code, "CELLD_MTLS_PROXY_CREATE_FAILED");
+  assert.equal(document.exit_status, 125);
+  assert.equal(JSON.stringify(document).includes(stderr), false);
+});
+
 test("mTLS proxy cleanup refuses a foreign same-name container", () => {
   const inventory = createNetworkAuthInventory({ runId: "titan-765", runRoot: "/dev/shm/celld-qualification/titan-765", host: "titan" });
   registerNetworkNamespace(inventory, { container: "celld-fleet-node-1", pid: 3, inode: 44, runLabel: "titan-765" });

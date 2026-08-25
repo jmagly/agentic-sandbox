@@ -454,11 +454,14 @@ export function startMtlsProxy(inventory, proxy, {
   verifyMaterial(proxy, binaryPath);
   persist(inventory);
   const daemon = executor("docker", ["info", "--format", "{{.ServerVersion}}"], { timeout: 30_000 });
-  if (daemon.status !== 0) throw new Error("Docker is unavailable before mTLS proxy mutation");
+  if (daemon.status !== 0) throw commandResultError("network-auth.start-mtls-proxy.docker-info", "CELLD_MTLS_PROXY_DOCKER_UNAVAILABLE", daemon, "Docker is unavailable before mTLS proxy mutation");
   const existing = executor("docker", ["container", "inspect", proxy.name], { timeout: 30_000 });
-  if (existing.status === 0) throw new Error("refusing to replace an existing mTLS proxy container");
+  if (existing.status === 0) throw annotateDriverError(new Error("refusing to replace an existing mTLS proxy container"), {
+    operation: "network-auth.start-mtls-proxy.inspect-existing",
+    errorCode: "CELLD_MTLS_PROXY_CONTAINER_EXISTS",
+  });
   const created = executor("docker", args, { timeout: 120_000 });
-  if (created.status !== 0) throw new Error(`mTLS proxy creation failed: ${sha256(created.stderr ?? "")}`);
+  if (created.status !== 0) throw commandResultError("network-auth.start-mtls-proxy.create-container", "CELLD_MTLS_PROXY_CREATE_FAILED", created, "mTLS proxy creation failed");
   const createdAt = now().toISOString();
   proxy.status = "created";
   proxy.created_at = createdAt;
@@ -466,13 +469,16 @@ export function startMtlsProxy(inventory, proxy, {
   inventory.updated_at = createdAt;
   persist(inventory);
   const started = executor("docker", ["start", proxy.name], { timeout: 120_000 });
-  if (started.status !== 0) throw new Error(`mTLS proxy start failed: ${sha256(started.stderr ?? "")}`);
+  if (started.status !== 0) throw commandResultError("network-auth.start-mtls-proxy.start-container", "CELLD_MTLS_PROXY_START_FAILED", started, "mTLS proxy start failed");
   const inspected = executor("docker", ["container", "inspect", proxy.name], { timeout: 30_000 });
-  if (inspected.status !== 0) throw new Error("mTLS proxy disappeared after start");
+  if (inspected.status !== 0) throw commandResultError("network-auth.start-mtls-proxy.inspect-started", "CELLD_MTLS_PROXY_INSPECT_FAILED", inspected, "mTLS proxy disappeared after start");
   let document;
   try { document = JSON.parse(inspected.stdout); } catch { throw new Error("mTLS proxy inspection is not bounded JSON"); }
   const observed = assertOwnedMtlsProxy(document, inventory, proxy);
-  if (observed.State?.Running !== true) throw new Error("mTLS proxy did not remain running");
+  if (observed.State?.Running !== true) throw annotateDriverError(new Error("mTLS proxy did not remain running"), {
+    operation: "network-auth.start-mtls-proxy.verify-running",
+    errorCode: "CELLD_MTLS_PROXY_NOT_RUNNING",
+  });
   const startedAt = now().toISOString();
   proxy.status = "started";
   proxy.started_at = startedAt;
@@ -609,6 +615,13 @@ function commandFailureFields(result, errorCode) {
   if (Number.isInteger(result?.status)) fields.exitStatus = result.status;
   if (typeof result?.signal === "string") fields.signal = result.signal;
   return fields;
+}
+
+function commandResultError(operation, errorCode, result, message) {
+  return annotateDriverError(new Error(message), {
+    operation,
+    ...commandFailureFields(result, errorCode),
+  });
 }
 
 function listenerGuardApplyStep(index, peerCount) {

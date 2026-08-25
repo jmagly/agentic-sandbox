@@ -189,6 +189,13 @@ test("management environment reports worker endpoint failures before state mutat
   }
 });
 
+test("orchestration driver uses fixture-managed Worker access for live management transport", () => {
+  assert.match(orchestrationSource, /openFleetWorkerAccess\(fleetPath\)/);
+  assert.match(orchestrationSource, /celldEndpoint: workerAccess\.endpoint/);
+  assert.match(orchestrationSource, /workerEndpoint: workerAccess\.endpoint/);
+  assert.match(orchestrationSource, /workerAccess\.close\(\)/);
+});
+
 test("management launch annotates spawn failures before readiness polling", () => {
   const directory = mkdtempSync(join(tmpdir(), "celld-management-launch-spawn-test-"));
   try {
