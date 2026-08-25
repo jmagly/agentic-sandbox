@@ -100,7 +100,10 @@ git push origin main
 git push github main
 ```
 
-Wait for CI on `main` to complete and turn green. The pre-release gate (`prerelease-gate` job in `ci.yaml`) is skipped on branch pushes, so this is a normal CI run. Watch for any test or lint regressions.
+Wait for CI on `main` to complete and turn green. Branch CI lives in
+`ci.yaml` and does not enqueue release publication jobs; release-only gates live
+in the tag-triggered `release.yml` workflow. Watch for any test or lint
+regressions before tagging.
 
 ## Step 5 — Tag and push
 
@@ -118,16 +121,16 @@ printing the push commands. Do not substitute a raw `git tag` command.
 
 ## Step 6 — Verify the release pipeline
 
-Pushing the tag triggers two workflows (post Phase 1 of `release-pipeline-audit.md`):
+Pushing the tag triggers the release workflow (post Phase 1 of
+`release-pipeline-audit.md`):
 
-1. **`ci.yaml`** runs in tag context. Watch for:
+1. **`release.yml`** runs in tag context. Watch for:
    - `prerelease-gate` job passes (verifies Cargo + CHANGELOG match the tag)
    - `docker` job tags images `:latest`, `:<sha>`, AND `:v<version>` on the internal registry
-   - All other jobs green
-2. **`gitea-release.yaml`** triggers via `workflow_run` after CI completes. Watch for:
-   - Conclusion check (only fires if CI succeeded and ref starts with `v`)
-   - Defense-in-depth version + CHANGELOG re-verification
-   - Release record published
+   - `release-attach` creates or reuses the Gitea release and attaches assets
+   - Publication/mirror/signing jobs run or fail closed according to the
+     configured release surface secrets
+   - All required release jobs green
 
 Check the registry for the new tag:
 
@@ -370,7 +373,9 @@ Recovery is bounded and non-destructive:
    requires checkout to complete and the repository commands to run; a
    different commit is not equivalent evidence.
 
-The post-#312 E2E cooldown is complete as of the #316 follow-up: `ci.yaml` no longer keeps E2E tag-only. Branch and main pushes now exercise the VM-backed E2E gate before release tags depend on it, while release publication jobs still require successful tag-context E2E.
+The post-#312 E2E cooldown is complete as of the #316 follow-up: `ci.yaml`
+exercises the VM-backed E2E gate on branch/main pushes, and `release.yml`
+repeats the release-gating E2E evidence in tag context before publication.
 
 ### Docker lane runner exec recovery (#335)
 
@@ -380,12 +385,15 @@ Recovery path:
 
 1. Check whether the same commit already passed PR CI and whether another run on the same commit passes the Docker job.
 2. Inspect the Docker lane preflight in successful starts for host identity, runner labels, `/usr/bin/bash` metadata, Docker version, and Cargo version.
-3. Re-run `ci.yaml` with `workflow_dispatch` against the same ref after the runner service has recovered or been restarted by an operator.
+3. Re-run `ci.yaml` with `workflow_dispatch` against the same ref after the runner service has recovered or been restarted by an operator. For release tags, push a replacement reviewed tag only if the original tag was never published; otherwise follow the release recovery procedure for a new version.
 4. Treat repeated bash exec failures on the same host as runner infrastructure work: remove the runner from the `titan` label pool or repair the act_runner service before using the result as release evidence.
 
 ## Required secrets
 
-The Phase 2/3 release jobs in `ci.yaml` and `docsite-deploy.yml` are wired to fail closed for required release surfaces and skip-with-warning only for optional surfaces. Provision these in **Repo Settings → Actions → Secrets** before cutting a production tag:
+The Phase 2/3 release jobs in `release.yml` and `docsite-deploy.yml` are wired
+to fail closed for required release surfaces and skip-with-warning only for
+optional surfaces. Provision these in **Repo Settings → Actions → Secrets**
+before cutting a production tag:
 
 | Secret(s) | Activates | Notes |
 |---|---|---|
@@ -460,6 +468,6 @@ Releases that ship without secrets configured must include the "Source-only rele
 
 - `docs/architecture/release-pipeline-audit.md` — full audit of what CI does and doesn't do per release
 - `.claude/rules/versioning.md` — CalVer format rules
-- `.gitea/workflows/ci.yaml` — Phase 1 release-pipeline integration
-- `.gitea/workflows/gitea-release.yaml` — workflow_run-triggered release creation
+- `.gitea/workflows/ci.yaml` — branch/manual validation pipeline
+- `.gitea/workflows/release.yml` — tag-triggered release pipeline
 - `scripts/bump-version.sh` — the version-bump script invoked in Step 1

@@ -146,7 +146,8 @@ Resolution path for #311 (committed):
 
 ### Phase 3 — supply chain + multi-target (P1/P2) — **wired 2026-05-19**
 
-Implemented (job surface in `ci.yaml`; gated on operator-provided secrets):
+Implemented (job surface now lives in the tag-triggered `release.yml`;
+gated on operator-provided secrets):
 
 - [#296](https://github.com/jmagly/agentic-sandbox/issues/296) — `cargo-publish` job. `cargo publish --dry-run` then real publish in dep order. Skip-with-warning when `CARGO_REGISTRY_TOKEN` not set.
 - [#299](https://github.com/jmagly/agentic-sandbox/issues/299) / [#478](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/478) — `multi-registry-push` job. Mirrors the release-tagged runtime image set (`agentic-mgmt`, `agent-client`, `agent`, `claude`, `codex`, `opencode`, `automation-control`) to public package names under `ghcr.io/<owner>/agentic-sandbox-*` and optional Quay equivalents. GHCR is release-blocking; after the authenticated push and digest capture, the workflow logs out of `ghcr.io` and smoke-pulls the management and agent-client images anonymously so the gate proves public user access, not only credentialed publication. Optional mirrors skip only when explicitly documented.
@@ -158,7 +159,7 @@ After this: crates.io install path, multi-registry container availability, end-t
 
 Implemented:
 
-- [#306](https://github.com/jmagly/agentic-sandbox/issues/306) — `github-release-sync` job in `ci.yaml`. Idempotent `gh release create`/`edit` against `jmagly/agentic-sandbox` after Gitea release lands; mirrors notes + tarballs + checksums. Skip-with-warning when `GITHUB_MIRROR_TOKEN` not set.
+- [#306](https://github.com/jmagly/agentic-sandbox/issues/306) — `github-release-sync` job in `release.yml`. Idempotent `gh release create`/`edit` against `jmagly/agentic-sandbox` after Gitea release lands; mirrors notes + tarballs + checksums. Skip-with-warning when `GITHUB_MIRROR_TOKEN` not set.
 - [#307](https://github.com/jmagly/agentic-sandbox/issues/307) — `docsite-deploy.yml` `push.tags: ['v*']` trigger re-enabled. Job now guards on the deploy-stack secrets and skips with warning when not configured.
 - [#308](https://github.com/jmagly/agentic-sandbox/issues/308) — `executor-build.yml` deleted; `Makefile test-unit` updated to `cargo test --workspace` so executor-crate coverage flows through normal CI.
 
