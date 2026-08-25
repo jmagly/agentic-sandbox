@@ -333,13 +333,37 @@ function prepareNegativeProjects(root) {
   return negativeRoot;
 }
 
+function containerNegativeProjectPath(capability, filename) {
+  if (!EXCLUDED.includes(capability) || !["worker.mjs", "wrangler.json"].includes(filename)) throw new Error("negative project path is outside the excluded capability fixture");
+  return `/tmp/celld-negative/${capability}/${filename}`;
+}
+
+function copyNegativeProjectsToContainer(primary, negativeRoot, operation, errorFields) {
+  for (const capability of EXCLUDED) {
+    for (const filename of ["worker.mjs", "wrangler.json"]) {
+      const sourcePath = join(negativeRoot, capability, filename);
+      const targetPath = containerNegativeProjectPath(capability, filename);
+      const targetDirectory = dirname(targetPath);
+      const shortName = filename === "worker.mjs" ? "worker" : "wrangler";
+      runWorkerCommand(
+        operation(`copy-negative-${capability}-${shortName}`),
+        errorFields,
+        "docker",
+        ["exec", "-i", primary, "sh", "-c", `mkdir -p ${targetDirectory} && cat > ${targetPath}`],
+        { timeout: 120_000, input: readFileSync(sourcePath, "utf8") },
+        "CELLD_LIVE_WORKER_COPY_NEGATIVE_PROJECTS_FAILED",
+      );
+    }
+  }
+}
+
 async function runExcluded(runtime, timeline) {
   const errorFields = runtime.errorFields ?? {};
   const operation = (name) => `worker.run-excluded.${name}`;
   const primary = runtime.fleet.nodes[0].name;
   const negativeRoot = await withDriverOperation(operation("prepare-negative-projects"), errorFields, () => prepareNegativeProjects(runtime.root));
   await runWorkerCommand(operation("reset-negative-projects"), errorFields, "docker", ["exec", primary, "sh", "-c", "rm -rf /tmp/celld-negative && mkdir -p /tmp/celld-negative"], { timeout: 120_000 }, "CELLD_LIVE_WORKER_RESET_NEGATIVE_PROJECTS_FAILED");
-  await runWorkerCommand(operation("copy-negative-projects"), errorFields, "docker", ["cp", `${negativeRoot}/.`, `${primary}:/tmp/celld-negative/`], { timeout: 120_000 }, "CELLD_LIVE_WORKER_COPY_NEGATIVE_PROJECTS_FAILED");
+  await withDriverOperation(operation("copy-negative-projects"), errorFields, () => copyNegativeProjectsToContainer(primary, negativeRoot, operation, errorFields));
   const before = await withDriverOperation(operation("inventory-before"), errorFields, () => inventorySnapshot(runtime));
   let typedRejections = 0, silentSuccesses = 0;
   const codes = {};

@@ -38,6 +38,7 @@ import {
   validateNetworkAuthInventory,
   validateDirectionalRouteMatrices,
   validateTcpProbeResult,
+  waitManagementProviderLedger,
   waitMtlsProxies,
 } from "../../../scripts/celld-live-network-auth.mjs";
 
@@ -78,6 +79,27 @@ test("provider effects are read from the protected management ledger", () => {
     assert.throws(() => readManagementProviderCounter({ fleet: { callback: { effect_ledger_file_ref: ledger } } }, {
       runner: () => { throw new Error("insecure ledger must fail before sqlite"); },
     }), /not protected/);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("provider ledger readiness waits for management startup to create the ledger", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "celld-provider-ledger-wait-test-"));
+  try {
+    const ledger = join(directory, "effect-ledger.sqlite");
+    let calls = 0;
+    setTimeout(() => writeFileSync(ledger, "fixture", { mode: 0o600 }), 10);
+    const value = await waitManagementProviderLedger({ fleet: { callback: { effect_ledger_file_ref: ledger } } }, {
+      timeoutMs: 1_000,
+      intervalMs: 1,
+      runner: () => {
+        calls += 1;
+        return "23\n";
+      },
+    });
+    assert.equal(value, 23);
+    assert.equal(calls, 1);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -788,6 +810,8 @@ test("network/auth source fixes the qualified sample sizes and pins the probe im
   assert.match(source, /mapBounded\(Array\.from\(\{ length: 1_000 \}/);
   assert.match(source, /String\(PROBE_CONCURRENCY\)/);
   assert.match(source, /readManagementProviderCounter/);
+  assert.match(source, /waitManagementProviderLedger/);
+  assert.match(source, /network-auth\.wait-provider-ledger/);
   assert.match(source, /const route = privateCelldRoute\(runtime\.networkInventory\)/);
   assert.match(source, /role: kind === "public_route" \? "public" : "cross-fleet"/);
   assert.doesNotMatch(source, /provider_effects:\s*0/);

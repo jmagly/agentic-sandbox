@@ -974,6 +974,22 @@ export function readManagementProviderCounter(runtime, { runner = run } = {}) {
   return value;
 }
 
+export async function waitManagementProviderLedger(runtime, { runner = run, timeoutMs = 120_000, intervalMs = 250 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  let latest = null;
+  do {
+    try {
+      return readManagementProviderCounter(runtime, { runner });
+    } catch (error) {
+      latest = error;
+      if (/not protected|invalid value|safe evidence range/.test(String(error.message))) throw error;
+      if (Date.now() >= deadline) break;
+      await sleep(intervalMs);
+    }
+  } while (Date.now() < deadline);
+  throw latest ?? new Error("management provider counter ledger is unavailable");
+}
+
 function providerCounter(runtime) {
   return runtime.readProviderCounter?.() ?? readManagementProviderCounter(runtime);
 }
@@ -987,6 +1003,10 @@ function run(program, args, options = {}) {
   const result = spawnSync(program, args, { encoding: "utf8", shell: false, ...options });
   if (result.error || result.status !== 0) throw new Error(`${basename(program)} failed: ${(result.error?.message ?? result.stderr ?? "").trim()}`);
   return result.stdout.trim();
+}
+
+function sleep(ms) {
+  return new Promise((resolvePromise) => setTimeout(resolvePromise, ms));
 }
 
 function protectedJson(path, description) {
@@ -1604,6 +1624,7 @@ export async function executeNetworkAuthDriver({ scenarioId, runId, liveProfileP
       tlsIdentityFile: networkInventory.proxies[0].management_client_identity_file_ref,
     }));
     await withDriverOperation("network-auth.wait-management", errorFields, () => waitManagement(management, fleet));
+    await withDriverOperation("network-auth.wait-provider-ledger", errorFields, () => waitManagementProviderLedger({ fleet }));
     await withDriverOperation("network-auth.start-callback-relays", errorFields, () => startCallbackRelays(fleetPath, { relayBinaryPath: config.callback_relay_binary_path }));
     const runtime = { config, storage, fleet, fleetPath, runId, management, managementHost, networkInventory };
     campaign = await withDriverOperation(scenarioId === "UAT-CELLD-010" ? "network-auth.run-isolation" : "network-auth.run-authentication", errorFields, () => (dependencies.runScenario ?? (scenarioId === "UAT-CELLD-010" ? runIsolation : runAuthentication))(runtime, timeline));
