@@ -57,6 +57,7 @@ test("Worker driver error document keeps classification while redacting message 
   const error = new Error("secret token should never appear");
   error.name = "FleetControllerSubprocessError";
   error.operation = "docker_exec_diagnose";
+  error.scenarioId = "UAT-CELLD-007";
   error.errorCode = "ETIMEDOUT";
   error.exitStatus = 1;
   error.stderrSha256 = "a".repeat(64);
@@ -65,6 +66,7 @@ test("Worker driver error document keeps classification while redacting message 
   assert.equal(document.schema_version, "agentic-sandbox.celld-live-driver-error/v1");
   assert.equal(document.name, "FleetControllerSubprocessError");
   assert.equal(document.operation, "docker_exec_diagnose");
+  assert.equal(document.scenario_id, "UAT-CELLD-007");
   assert.equal(document.error_code, "ETIMEDOUT");
   assert.equal(document.exit_status, 1);
   assert.equal(document.timed_out, true);

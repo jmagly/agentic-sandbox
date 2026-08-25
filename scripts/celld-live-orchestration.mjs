@@ -39,6 +39,7 @@ import {
   prepareFixture,
   startFixture,
 } from "./celld-seaweedfs-fixture.mjs";
+import { annotateDriverError, driverErrorDocument, driverOperationError, emitDriverError as emitLiveDriverError, withDriverOperation } from "./celld-live-driver-error.mjs";
 import {
   acquireOrchestrationInventoryLifecycle,
   commitOrchestrationInventory,
@@ -55,6 +56,7 @@ import {
 } from "./celld-orchestration-inventory.mjs";
 import { getWorkerCell, sendWorkerCommand } from "./celld-worker-client.mjs";
 import { validateLiveProfile } from "./celld-uat-live-protocol.mjs";
+export { driverErrorDocument };
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const REPO_ROOT = resolve(dirname(SCRIPT_PATH), "..");
@@ -2725,21 +2727,23 @@ function prerequisiteReason(config) {
 
 export async function executeOrchestrationDriver({ scenarioId, runId, liveProfilePath, artifactDir }, dependencies = {}) {
   const startedAt = new Date().toISOString();
-  const profile = protectedJson(liveProfilePath, "live profile");
-  const profileErrors = validateLiveProfile(profile);
-  if (profileErrors.length) throw new Error(profileErrors.join("; "));
+  const errorFields = { scenarioId };
+  const profile = await withDriverOperation("orchestration.load-profile", errorFields, () => protectedJson(liveProfilePath, "live profile"));
+  const profileErrors = await withDriverOperation("orchestration.validate-profile", errorFields, () => validateLiveProfile(profile));
+  if (profileErrors.length) throw driverOperationError("orchestration.validate-profile", errorFields, profileErrors.join("; "));
   const entry = profile.drivers?.[DRIVER_ID];
   if (!entry?.enabled) return unavailable({ scenarioId, runId, profile, startedAt, reasonCode: "CELLD_ORCHESTRATION_DRIVER_DISABLED" });
-  if (!SCENARIOS.has(scenarioId) || profile.run_id !== runId || profile.expected_sandbox_git !== (dependencies.gitCommit?.() ?? run("git", ["rev-parse", "HEAD"]))) throw new Error("live orchestration identity does not match the requested run");
-  const observedHostSha256 = sha256(dependencies.hostname?.() ?? hostname());
-  if (profile.environment.host_sha256 !== observedHostSha256) throw new Error("live orchestration host identity does not match the protected profile");
-  const config = protectedJson(entry.config_path, "orchestration config");
-  const configErrors = validateOrchestrationConfig(config);
-  if (configErrors.length) throw new Error(configErrors.join("; "));
-  if (config.run_id !== runId) throw new Error("orchestration config run identity does not match the live profile");
+  const git = await withDriverOperation("orchestration.git-identity", errorFields, () => dependencies.gitCommit?.() ?? run("git", ["rev-parse", "HEAD"]));
+  if (!SCENARIOS.has(scenarioId) || profile.run_id !== runId || profile.expected_sandbox_git !== git) throw driverOperationError("orchestration.validate-identity", errorFields, "live orchestration identity does not match the requested run");
+  const observedHostSha256 = sha256(await withDriverOperation("orchestration.host-identity", errorFields, () => dependencies.hostname?.() ?? hostname()));
+  if (profile.environment.host_sha256 !== observedHostSha256) throw driverOperationError("orchestration.validate-host-identity", errorFields, "live orchestration host identity does not match the protected profile");
+  const config = await withDriverOperation("orchestration.load-config", errorFields, () => protectedJson(entry.config_path, "orchestration config"));
+  const configErrors = await withDriverOperation("orchestration.validate-config", errorFields, () => validateOrchestrationConfig(config));
+  if (configErrors.length) throw driverOperationError("orchestration.validate-config", errorFields, configErrors.join("; "));
+  if (config.run_id !== runId) throw driverOperationError("orchestration.validate-config", errorFields, "orchestration config run identity does not match the live profile");
   if (!profile.authorization.destructive_faults || profile.authorization.exact_run_owner !== profile.run_id) return unavailable({ scenarioId, runId, profile, startedAt, reasonCode: "CELLD_DESTRUCTIVE_AUTHORIZATION_REQUIRED" });
-  const orchestrationInventory = loadAuthorizedOrchestrationInventory(profile, config, observedHostSha256);
-  const reason = dependencies.prerequisiteReason ? dependencies.prerequisiteReason(config, scenarioId, profile) : prerequisiteReason(config);
+  const orchestrationInventory = await withDriverOperation("orchestration.load-authorized-inventory", errorFields, () => loadAuthorizedOrchestrationInventory(profile, config, observedHostSha256));
+  const reason = await withDriverOperation("orchestration.check-prerequisites", errorFields, () => dependencies.prerequisiteReason ? dependencies.prerequisiteReason(config, scenarioId, profile) : prerequisiteReason(config));
   if (reason) return unavailable({ scenarioId, runId, profile, startedAt, reasonCode: reason });
 
   mkdirSync(artifactDir, { recursive: true, mode: 0o700 });
@@ -2757,19 +2761,19 @@ export async function executeOrchestrationDriver({ scenarioId, runId, liveProfil
   let campaign;
   try {
     const scenarioRoot = join(config.working_root, scenarioId.toLowerCase(), runId);
-    fixture = prepareFixture({ fixtureProfile: "titan-single-host-storage", runId, root: scenarioRoot });
-    startFixture(fixture);
-    fleet = prepareFleet({ storageConfigPath: join(scenarioRoot, "fixture.json") });
+    fixture = await withDriverOperation("orchestration.prepare-storage-fixture", errorFields, () => prepareFixture({ fixtureProfile: "titan-single-host-storage", runId, root: scenarioRoot }));
+    await withDriverOperation("orchestration.start-storage-fixture", errorFields, () => startFixture(fixture));
+    fleet = await withDriverOperation("orchestration.prepare-fleet", errorFields, () => prepareFleet({ storageConfigPath: join(scenarioRoot, "fixture.json") }));
     fleetPath = join(scenarioRoot, "fleet.json");
-    const fleetErrors = validateFleetConfig(fleet);
-    if (fleetErrors.length) throw new Error(fleetErrors.join("; "));
-    await deployFleetWorker(fleetPath);
-    const diagnosis = startFleet(fleetPath);
-    if (diagnosis.status !== "READY") throw new Error("three-node Celld fleet is not ready");
-    const managementHost = storageGateway(fleet);
-    management = launchManagement(config, fleet, managementHost);
-    await waitManagement(management, fleet);
-    startCallbackRelays(fleetPath, { relayBinaryPath: config.callback_relay_binary_path, enableFaultSignal: ["UAT-CELLD-005"].includes(scenarioId) });
+    const fleetErrors = await withDriverOperation("orchestration.validate-fleet", errorFields, () => validateFleetConfig(fleet));
+    if (fleetErrors.length) throw driverOperationError("orchestration.validate-fleet", errorFields, fleetErrors.join("; "));
+    await withDriverOperation("orchestration.deploy-worker", errorFields, () => deployFleetWorker(fleetPath));
+    const diagnosis = await withDriverOperation("orchestration.start-fleet", errorFields, () => startFleet(fleetPath));
+    if (diagnosis.status !== "READY") throw driverOperationError("orchestration.start-fleet", errorFields, "three-node Celld fleet is not ready");
+    const managementHost = await withDriverOperation("orchestration.resolve-storage-gateway", errorFields, () => storageGateway(fleet));
+    management = await withDriverOperation("orchestration.launch-management", errorFields, () => launchManagement(config, fleet, managementHost));
+    await withDriverOperation("orchestration.wait-management", errorFields, () => waitManagement(management, fleet));
+    await withDriverOperation("orchestration.start-callback-relays", errorFields, () => startCallbackRelays(fleetPath, { relayBinaryPath: config.callback_relay_binary_path, enableFaultSignal: ["UAT-CELLD-005"].includes(scenarioId) }));
     const activeResources = orchestrationInventory.resources.filter((resource) => resource.status !== "removed").map((resource) => [resource.instance_id, { instanceId: resource.instance_id, name: resource.name, substrate: resource.substrate }]);
     runtime = {
       config, fleet, fleetPath, management, managementHost, workerEndpoint: workerEndpoint(fleet), runId, scenarioId,
@@ -2785,16 +2789,16 @@ export async function executeOrchestrationDriver({ scenarioId, runId, liveProfil
       "UAT-CELLD-003": runUat003, "UAT-CELLD-004": runUat004,
       "UAT-CELLD-005": runUat005, "UAT-CELLD-006": runUat006,
     })[scenarioId];
-    campaign = await runner(runtime, timeline);
+    campaign = await withDriverOperation(`orchestration.run-${scenarioId.toLowerCase()}`, errorFields, () => runner(runtime, timeline));
     management = runtime.management;
   } catch (error) {
     campaignError = error;
   } finally {
     const retainCleanupError = (kind, error) => {
       cleanupAssertions.push(`${kind} cleanup digest ${sha256(error.message)}`);
-      cleanupErrors.push(error instanceof OrchestrationCleanupResidueError
+      cleanupErrors.push(annotateDriverError(error instanceof OrchestrationCleanupResidueError
         ? error
-        : new OrchestrationCleanupResidueError(`${kind} cleanup failed`, { cause: error }));
+        : new OrchestrationCleanupResidueError(`${kind} cleanup failed`, { cause: error }), { operation: `orchestration.cleanup-${kind}`, scenarioId }));
     };
     try { await stopManagementAndWait(runtime?.management ?? management, "SIGKILL"); cleanupAssertions.push("management process terminated"); } catch (error) { retainCleanupError("management", error); }
     try { cleanupAssertions.push(...await cleanupOwnedProviderResources(runtime)); } catch (error) { retainCleanupError("provider", error); }
@@ -2804,7 +2808,7 @@ export async function executeOrchestrationDriver({ scenarioId, runId, liveProfil
   }
   const selectedFailure = selectOrchestrationRunFailure({ campaignError, cleanupErrors });
   if (selectedFailure) throw selectedFailure;
-  if (!campaign) throw new Error("orchestration campaign produced no measurements");
+  if (!campaign) throw driverOperationError("orchestration.run-campaign", errorFields, "orchestration campaign produced no measurements");
 
   const evidence = { schema_version: "agentic-sandbox.celld-orchestration-evidence/v1", run_id: runId, scenario_id: scenarioId, measurements: Object.fromEntries(campaign.assertions.map((item) => [item.id, item.measurements])), faults: campaign.faults, timeline_sha256: sha256(timeline.map((row) => JSON.stringify(row)).join("\n")) };
   const suffix = scenarioId.toLowerCase();
@@ -2997,7 +3001,7 @@ async function main(args) {
 
 if (process.argv[1] && SCRIPT_PATH === resolve(process.argv[1])) {
   main(process.argv.slice(2)).catch((error) => {
-    process.stderr.write(`CELLD_ORCHESTRATION_DRIVER_ERROR ${sha256(error.message)}\n`);
-    process.exitCode = error instanceof OrchestrationCleanupResidueError || error?.exitCode === 4 ? 4 : 3;
+    if (error instanceof OrchestrationCleanupResidueError || error?.exitCode === 4) error.exitCode = 4;
+    emitLiveDriverError("CELLD_ORCHESTRATION_DRIVER_ERROR", error);
   });
 }

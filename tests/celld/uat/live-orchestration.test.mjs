@@ -49,6 +49,22 @@ function config(overrides = {}) {
   };
 }
 
+test("orchestration driver error document exposes safe phase fields only", () => {
+  const error = new Error("secret callback bearer token should not be logged");
+  error.name = "OrchestrationPhaseError";
+  error.operation = "orchestration.run-uat-celld-003";
+  error.scenarioId = "UAT-CELLD-003";
+  error.exitCode = 4;
+  const document = liveOrchestration.driverErrorDocument(error);
+  assert.equal(document.schema_version, "agentic-sandbox.celld-live-driver-error/v1");
+  assert.equal(document.name, "OrchestrationPhaseError");
+  assert.equal(document.operation, "orchestration.run-uat-celld-003");
+  assert.equal(document.scenario_id, "UAT-CELLD-003");
+  assert.equal(document.exit_code, 4);
+  assert.match(document.message_sha256, /^[0-9a-f]{64}$/);
+  assert.equal(JSON.stringify(document).includes("bearer token"), false);
+});
+
 test("orchestration config confines exact-run mutation targets and immutable inputs", () => {
   assert.deepEqual(validateOrchestrationConfig(config(), { repoRoot: "/repo" }), []);
   assert.match(validateOrchestrationConfig(config({ working_root: "/tmp/titan-123" }), { repoRoot: "/repo" }).join(";"), /below \/dev\/shm/);

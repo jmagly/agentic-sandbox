@@ -19,9 +19,11 @@ import {
   workerDeploymentProjectDigest,
 } from "./celld-fleet-fixture.mjs";
 import { cleanupFixture, prepareFixture, startFixture } from "./celld-seaweedfs-fixture.mjs";
+import { driverErrorDocument, driverOperationError, emitDriverError as emitLiveDriverError, withDriverOperation } from "./celld-live-driver-error.mjs";
 import { getWorkerCell } from "./celld-worker-client.mjs";
 import { validateOrchestrationConfig } from "./celld-live-orchestration.mjs";
 import { validateLiveProfile } from "./celld-uat-live-protocol.mjs";
+export { driverErrorDocument };
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const REPO_ROOT = resolve(dirname(SCRIPT_PATH), "..");
@@ -87,41 +89,8 @@ export default {
 
 function sha256(value) { return createHash("sha256").update(value).digest("hex"); }
 
-function safeDriverField(value) {
-  if (value === undefined || value === null) return null;
-  const text = String(value);
-  return /^[A-Za-z0-9_.:/-]{1,160}$/.test(text) ? text : `sha256:${sha256(text)}`;
-}
-
-export function driverErrorDocument(error) {
-  const exitCode = [3, 4].includes(error?.exitCode) ? error.exitCode : 3;
-  const document = {
-    schema_version: "agentic-sandbox.celld-live-driver-error/v1",
-    name: safeDriverField(error?.name ?? "Error"),
-    message_sha256: sha256(String(error?.message ?? "")),
-    exit_code: exitCode,
-  };
-  for (const [outputKey, inputKey] of [
-    ["operation", "operation"],
-    ["error_code", "errorCode"],
-    ["node_code", "code"],
-    ["signal", "signal"],
-    ["evidence_sha256", "evidenceSha256"],
-    ["stdout_sha256", "stdoutSha256"],
-    ["stderr_sha256", "stderrSha256"],
-  ]) {
-    const value = safeDriverField(error?.[inputKey]);
-    if (value !== null) document[outputKey] = value;
-  }
-  if (Number.isInteger(error?.exitStatus)) document.exit_status = error.exitStatus;
-  if (error?.timedOut === true) document.timed_out = true;
-  return document;
-}
-
 function emitDriverError(error) {
-  const document = driverErrorDocument(error);
-  process.stderr.write(`CELLD_LIVE_WORKER_ERROR ${JSON.stringify(document)}\n`);
-  process.exitCode = document.exit_code;
+  emitLiveDriverError("CELLD_LIVE_WORKER_ERROR", error);
 }
 
 function sleep(ms) { return new Promise((resolvePromise) => setTimeout(resolvePromise, ms)); }
@@ -367,17 +336,18 @@ function unavailable(profile, scenarioId, runId, startedAt, reasonCode) {
 
 export async function executeWorkerDriver({ scenarioId, runId, liveProfilePath, artifactDir }, dependencies = {}) {
   const startedAt = new Date().toISOString();
-  const profile = protectedJson(liveProfilePath, "live profile");
-  const profileErrors = validateLiveProfile(profile);
-  if (profileErrors.length) throw new Error(profileErrors.join("; "));
+  const errorFields = { scenarioId };
+  const profile = await withDriverOperation("worker.load-profile", errorFields, () => protectedJson(liveProfilePath, "live profile"));
+  const profileErrors = await withDriverOperation("worker.validate-profile", errorFields, () => validateLiveProfile(profile));
+  if (profileErrors.length) throw driverOperationError("worker.validate-profile", errorFields, profileErrors.join("; "));
   const entry = profile.drivers?.[DRIVER_ID];
   if (!entry?.enabled) return unavailable(profile, scenarioId, runId, startedAt, "CELLD_LIVE_WORKER_DRIVER_DISABLED");
-  const git = dependencies.gitCommit?.() ?? run("git", ["rev-parse", "HEAD"]);
-  const host = dependencies.hostname?.() ?? hostname();
-  if (!SCENARIOS.has(scenarioId) || profile.run_id !== runId || profile.expected_sandbox_git !== git || profile.environment.host_sha256 !== sha256(host)) throw new Error("Worker live identity does not match the requested run");
-  const config = protectedJson(entry.config_path, "orchestration config");
-  const configErrors = validateOrchestrationConfig(config);
-  if (configErrors.length || config.run_id !== runId) throw new Error([...configErrors, "config run identity mismatch"].join("; "));
+  const git = await withDriverOperation("worker.git-identity", errorFields, () => dependencies.gitCommit?.() ?? run("git", ["rev-parse", "HEAD"]));
+  const host = await withDriverOperation("worker.host-identity", errorFields, () => dependencies.hostname?.() ?? hostname());
+  if (!SCENARIOS.has(scenarioId) || profile.run_id !== runId || profile.expected_sandbox_git !== git || profile.environment.host_sha256 !== sha256(host)) throw driverOperationError("worker.validate-identity", errorFields, "Worker live identity does not match the requested run");
+  const config = await withDriverOperation("worker.load-config", errorFields, () => protectedJson(entry.config_path, "orchestration config"));
+  const configErrors = await withDriverOperation("worker.validate-config", errorFields, () => validateOrchestrationConfig(config));
+  if (configErrors.length || config.run_id !== runId) throw driverOperationError("worker.validate-config", errorFields, [...configErrors, "config run identity mismatch"].join("; "));
   if (scenarioId === "UAT-CELLD-009") return unavailable(profile, scenarioId, runId, startedAt, "CELLD_PER_ISOLATE_RESOURCE_ENFORCEMENT_UNAVAILABLE");
   if (process.platform !== "linux") return unavailable(profile, scenarioId, runId, startedAt, "CELLD_LIVE_WORKER_LINUX_REQUIRED");
 
@@ -388,21 +358,21 @@ export async function executeWorkerDriver({ scenarioId, runId, liveProfilePath, 
   let cleanupStatus = "failed";
   try {
     const root = join(config.working_root, `${scenarioId.toLowerCase()}-worker`, runId);
-    storage = prepareFixture({ fixtureProfile: "titan-single-host-storage", runId, root });
-    startFixture(storage);
-    fleet = prepareFleet({ storageConfigPath: join(root, "fixture.json") });
+    storage = await withDriverOperation("worker.prepare-storage-fixture", errorFields, () => prepareFixture({ fixtureProfile: "titan-single-host-storage", runId, root }));
+    await withDriverOperation("worker.start-storage-fixture", errorFields, () => startFixture(storage));
+    fleet = await withDriverOperation("worker.prepare-fleet", errorFields, () => prepareFleet({ storageConfigPath: join(root, "fixture.json") }));
     fleetPath = join(root, "fleet.json");
-    const initialDeployment = await deployFleetWorker(fleetPath);
-    if (startFleet(fleetPath).status !== "READY") throw new Error("Worker qualification fleet is not ready");
+    const initialDeployment = await withDriverOperation("worker.deploy-initial-worker", errorFields, () => deployFleetWorker(fleetPath));
+    if ((await withDriverOperation("worker.start-fleet", errorFields, () => startFleet(fleetPath))).status !== "READY") throw driverOperationError("worker.start-fleet", errorFields, "Worker qualification fleet is not ready");
     const runtime = { config, storage, fleet, fleetPath, runId, root, initialDeployment };
-    campaign = await (dependencies.runScenario ?? (scenarioId === "UAT-CELLD-007" ? runCapabilities : runExcluded))(runtime, timeline);
+    campaign = await withDriverOperation(scenarioId === "UAT-CELLD-007" ? "worker.run-capabilities" : "worker.run-excluded", errorFields, () => (dependencies.runScenario ?? (scenarioId === "UAT-CELLD-007" ? runCapabilities : runExcluded))(runtime, timeline));
   } finally {
     try { cleanupWorkerResources(runId); cleanupAssertions.push("exact Worker deployer removed"); } catch (error) { cleanupAssertions.push(`Worker deployer cleanup digest ${sha256(error.message)}`); }
     try { if (fleetPath && existsSync(fleetPath)) cleanupFleet(fleetPath); cleanupAssertions.push("exact Worker fleet removed"); } catch (error) { cleanupAssertions.push(`fleet cleanup digest ${sha256(error.message)}`); }
     try { if (storage) cleanupFixture(storage); cleanupAssertions.push("exact Worker storage fixture removed"); } catch (error) { cleanupAssertions.push(`storage cleanup digest ${sha256(error.message)}`); }
     cleanupStatus = cleanupAssertions.some((value) => value.includes("digest")) ? "failed" : "passed";
   }
-  if (!campaign) throw new Error("Worker campaign produced no measurements");
+  if (!campaign) throw driverOperationError("worker.run-campaign", errorFields, "Worker campaign produced no measurements");
   const suffix = scenarioId.toLowerCase(), evidenceName = `worker-evidence-${suffix}.json`, timelineName = `worker-timeline-${suffix}.jsonl`;
   const evidencePath = join(artifactDir, evidenceName), timelinePath = join(artifactDir, timelineName);
   const timelineBytes = timeline.map((row) => JSON.stringify(row)).join("\n");

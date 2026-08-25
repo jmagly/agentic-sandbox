@@ -12,10 +12,12 @@ import { fileURLToPath } from "node:url";
 
 import { cleanupFleet, deployFleetWorker, diagnoseFleet, prepareFleet, startCallbackRelays, startFleet } from "./celld-fleet-fixture.mjs";
 import { cleanupFixture, prepareFixture, startFixture } from "./celld-seaweedfs-fixture.mjs";
+import { driverErrorDocument, driverOperationError, emitDriverError as emitLiveDriverError, withDriverOperation } from "./celld-live-driver-error.mjs";
 import { openStorageGatewayAccess } from "./celld-storage-gateway-access.mjs";
 import { S3V1Client, STORAGE_PROFILE_SCHEMA } from "./celld-storage-qualifier.mjs";
 import { launchManagement, stopManagementAndWait, storageGateway, validateOrchestrationConfig, waitManagement } from "./celld-live-orchestration.mjs";
 import { validateLiveProfile } from "./celld-uat-live-protocol.mjs";
+export { driverErrorDocument };
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const REPO_ROOT = resolve(dirname(SCRIPT_PATH), "..");
@@ -41,41 +43,8 @@ const SHA256 = /^[0-9a-f]{64}$/;
 
 function sha256(value) { return createHash("sha256").update(value).digest("hex"); }
 
-function safeDriverField(value) {
-  if (value === undefined || value === null) return null;
-  const text = String(value);
-  return /^[A-Za-z0-9_.:/-]{1,160}$/.test(text) ? text : `sha256:${sha256(text)}`;
-}
-
-export function driverErrorDocument(error) {
-  const exitCode = [3, 4].includes(error?.exitCode) ? error.exitCode : 3;
-  const document = {
-    schema_version: "agentic-sandbox.celld-live-driver-error/v1",
-    name: safeDriverField(error?.name ?? "Error"),
-    message_sha256: sha256(String(error?.message ?? "")),
-    exit_code: exitCode,
-  };
-  for (const [outputKey, inputKey] of [
-    ["operation", "operation"],
-    ["error_code", "errorCode"],
-    ["node_code", "code"],
-    ["signal", "signal"],
-    ["evidence_sha256", "evidenceSha256"],
-    ["stdout_sha256", "stdoutSha256"],
-    ["stderr_sha256", "stderrSha256"],
-  ]) {
-    const value = safeDriverField(error?.[inputKey]);
-    if (value !== null) document[outputKey] = value;
-  }
-  if (Number.isInteger(error?.exitStatus)) document.exit_status = error.exitStatus;
-  if (error?.timedOut === true) document.timed_out = true;
-  return document;
-}
-
 function emitDriverError(error) {
-  const document = driverErrorDocument(error);
-  process.stderr.write(`CELLD_NETWORK_AUTH_DRIVER_ERROR ${JSON.stringify(document)}\n`);
-  process.exitCode = document.exit_code;
+  emitLiveDriverError("CELLD_NETWORK_AUTH_DRIVER_ERROR", error);
 }
 
 function validTimestamp(value) {
@@ -1407,17 +1376,18 @@ function unavailable(profile, scenarioId, runId, startedAt, reasonCode) {
 
 export async function executeNetworkAuthDriver({ scenarioId, runId, liveProfilePath, artifactDir }, dependencies = {}) {
   const startedAt = new Date().toISOString();
-  const profile = protectedJson(liveProfilePath, "live profile");
-  const profileErrors = validateLiveProfile(profile);
-  if (profileErrors.length) throw new Error(profileErrors.join("; "));
+  const errorFields = { scenarioId };
+  const profile = await withDriverOperation("network-auth.load-profile", errorFields, () => protectedJson(liveProfilePath, "live profile"));
+  const profileErrors = await withDriverOperation("network-auth.validate-profile", errorFields, () => validateLiveProfile(profile));
+  if (profileErrors.length) throw driverOperationError("network-auth.validate-profile", errorFields, profileErrors.join("; "));
   const entry = profile.drivers?.[DRIVER_ID];
   if (!entry?.enabled) return unavailable(profile, scenarioId, runId, startedAt, "CELLD_NETWORK_AUTH_DRIVER_DISABLED");
-  const git = dependencies.gitCommit?.() ?? run("git", ["rev-parse", "HEAD"]);
-  const host = dependencies.hostname?.() ?? (await import("node:os")).hostname();
-  if (!SCENARIOS.has(scenarioId) || profile.run_id !== runId || profile.expected_sandbox_git !== git || profile.environment.host_sha256 !== sha256(host)) throw new Error("network/auth live identity does not match the requested run");
-  const config = protectedJson(entry.config_path, "orchestration config");
-  const configErrors = validateOrchestrationConfig(config);
-  if (configErrors.length || config.run_id !== runId) throw new Error([...configErrors, "config run identity mismatch"].join("; "));
+  const git = await withDriverOperation("network-auth.git-identity", errorFields, () => dependencies.gitCommit?.() ?? run("git", ["rev-parse", "HEAD"]));
+  const host = await withDriverOperation("network-auth.host-identity", errorFields, async () => dependencies.hostname?.() ?? (await import("node:os")).hostname());
+  if (!SCENARIOS.has(scenarioId) || profile.run_id !== runId || profile.expected_sandbox_git !== git || profile.environment.host_sha256 !== sha256(host)) throw driverOperationError("network-auth.validate-identity", errorFields, "network/auth live identity does not match the requested run");
+  const config = await withDriverOperation("network-auth.load-config", errorFields, () => protectedJson(entry.config_path, "orchestration config"));
+  const configErrors = await withDriverOperation("network-auth.validate-config", errorFields, () => validateOrchestrationConfig(config));
+  if (configErrors.length || config.run_id !== runId) throw driverOperationError("network-auth.validate-config", errorFields, [...configErrors, "config run identity mismatch"].join("; "));
   if (process.platform !== "linux") return unavailable(profile, scenarioId, runId, startedAt, "CELLD_NETWORK_AUTH_LINUX_REQUIRED");
   if (spawnSync("docker", ["image", "inspect", NODE_PROBE_IMAGE], { encoding: "utf8", shell: false }).status !== 0) return unavailable(profile, scenarioId, runId, startedAt, "CELLD_NETWORK_PROBE_IMAGE_UNAVAILABLE");
 
@@ -1428,46 +1398,46 @@ export async function executeNetworkAuthDriver({ scenarioId, runId, liveProfileP
   const cleanupAssertions = [];
   try {
     const root = join(config.working_root, `${scenarioId.toLowerCase()}-network`, runId);
-    storage = prepareFixture({ fixtureProfile: "titan-single-host-storage", runId, root });
-    startFixture(storage);
-    fleet = prepareFleet({ storageConfigPath: join(root, "fixture.json") });
+    storage = await withDriverOperation("network-auth.prepare-storage-fixture", errorFields, () => prepareFixture({ fixtureProfile: "titan-single-host-storage", runId, root }));
+    await withDriverOperation("network-auth.start-storage-fixture", errorFields, () => startFixture(storage));
+    fleet = await withDriverOperation("network-auth.prepare-fleet", errorFields, () => prepareFleet({ storageConfigPath: join(root, "fixture.json") }));
     fleetPath = join(root, "fleet.json");
-    await deployFleetWorker(fleetPath);
-    if (startFleet(fleetPath).status !== "READY") throw new Error("network/auth fleet is not ready");
-    networkInventory = createNetworkAuthInventory({ runId, runRoot: root, host });
-    const namespaces = observeFleetNetworkNamespaces(networkInventory, fleet);
+    await withDriverOperation("network-auth.deploy-worker", errorFields, () => deployFleetWorker(fleetPath));
+    if ((await withDriverOperation("network-auth.start-fleet", errorFields, () => startFleet(fleetPath))).status !== "READY") throw driverOperationError("network-auth.start-fleet", errorFields, "network/auth fleet is not ready");
+    networkInventory = await withDriverOperation("network-auth.create-inventory", errorFields, () => createNetworkAuthInventory({ runId, runRoot: root, host }));
+    const namespaces = await withDriverOperation("network-auth.observe-namespaces", errorFields, () => observeFleetNetworkNamespaces(networkInventory, fleet));
     const fleetAddresses = namespaces.map((namespace) => namespace.address);
     for (const namespace of namespaces) {
-      planListenerGuard(networkInventory, { sourceContainer: namespace.container, sourceNamespaceInode: namespace.inode, sameFleetAddresses: fleetAddresses });
+      await withDriverOperation("network-auth.plan-listener-guard", errorFields, () => planListenerGuard(networkInventory, { sourceContainer: namespace.container, sourceNamespaceInode: namespace.inode, sameFleetAddresses: fleetAddresses }));
     }
-    persistNetworkAuthInventory(networkInventory);
-    for (const guard of networkInventory.guards) applyListenerGuard(networkInventory, guard);
+    await withDriverOperation("network-auth.persist-guard-plan", errorFields, () => persistNetworkAuthInventory(networkInventory));
+    for (const guard of networkInventory.guards) await withDriverOperation("network-auth.apply-listener-guard", errorFields, () => applyListenerGuard(networkInventory, guard));
     const proxyBinaryPath = join(dirname(config.callback_relay_binary_path), "agentic-celld-mtls-proxy");
-    const proxyBinary = lstatSync(proxyBinaryPath);
-    if (!proxyBinary.isFile() || proxyBinary.isSymbolicLink() || (proxyBinary.mode & 0o111) === 0) throw new Error("network/auth mTLS proxy executable is unavailable");
-    const proxyBinarySha256 = sha256(readFileSync(proxyBinaryPath));
+    const proxyBinary = await withDriverOperation("network-auth.inspect-mtls-proxy-binary", errorFields, () => lstatSync(proxyBinaryPath));
+    if (!proxyBinary.isFile() || proxyBinary.isSymbolicLink() || (proxyBinary.mode & 0o111) === 0) throw driverOperationError("network-auth.inspect-mtls-proxy-binary", errorFields, "network/auth mTLS proxy executable is unavailable");
+    const proxyBinarySha256 = await withDriverOperation("network-auth.hash-mtls-proxy-binary", errorFields, () => sha256(readFileSync(proxyBinaryPath)));
     for (const namespace of namespaces) {
-      planMtlsProxy(networkInventory, {
+      await withDriverOperation("network-auth.plan-mtls-proxy", errorFields, () => planMtlsProxy(networkInventory, {
         nodeContainer: namespace.container,
         listenAddress: namespace.address,
         binarySha256: proxyBinarySha256,
         imageRef: config.docker_image_ref,
-      });
+      }));
     }
-    persistNetworkAuthInventory(networkInventory);
-    prepareMtlsProxyCertificates(networkInventory);
-    for (const proxy of networkInventory.proxies) startMtlsProxy(networkInventory, proxy, { binaryPath: proxyBinaryPath });
-    await waitMtlsProxies(networkInventory);
-    const managementHost = storageGateway(fleet);
-    management = launchManagement(config, fleet, managementHost, {
+    await withDriverOperation("network-auth.persist-proxy-plan", errorFields, () => persistNetworkAuthInventory(networkInventory));
+    await withDriverOperation("network-auth.prepare-mtls-certificates", errorFields, () => prepareMtlsProxyCertificates(networkInventory));
+    for (const proxy of networkInventory.proxies) await withDriverOperation("network-auth.start-mtls-proxy", errorFields, () => startMtlsProxy(networkInventory, proxy, { binaryPath: proxyBinaryPath }));
+    await withDriverOperation("network-auth.wait-mtls-proxies", errorFields, () => waitMtlsProxies(networkInventory));
+    const managementHost = await withDriverOperation("network-auth.resolve-storage-gateway", errorFields, () => storageGateway(fleet));
+    management = await withDriverOperation("network-auth.launch-management", errorFields, () => launchManagement(config, fleet, managementHost, {
       celldEndpoint: `https://${networkInventory.proxies[0].listen_address}:${networkInventory.proxies[0].listen_port}`,
       tlsCaFile: networkInventory.proxies[0].ca_file_ref,
       tlsIdentityFile: networkInventory.proxies[0].management_client_identity_file_ref,
-    });
-    await waitManagement(management, fleet);
-    startCallbackRelays(fleetPath, { relayBinaryPath: config.callback_relay_binary_path });
+    }));
+    await withDriverOperation("network-auth.wait-management", errorFields, () => waitManagement(management, fleet));
+    await withDriverOperation("network-auth.start-callback-relays", errorFields, () => startCallbackRelays(fleetPath, { relayBinaryPath: config.callback_relay_binary_path }));
     const runtime = { config, storage, fleet, fleetPath, runId, management, managementHost, networkInventory };
-    campaign = await (dependencies.runScenario ?? (scenarioId === "UAT-CELLD-010" ? runIsolation : runAuthentication))(runtime, timeline);
+    campaign = await withDriverOperation(scenarioId === "UAT-CELLD-010" ? "network-auth.run-isolation" : "network-auth.run-authentication", errorFields, () => (dependencies.runScenario ?? (scenarioId === "UAT-CELLD-010" ? runIsolation : runAuthentication))(runtime, timeline));
   } finally {
     try { cleanupProbeResources(runId); cleanupAssertions.push("exact network probe container and network removed"); } catch (error) { cleanupAssertions.push(`network probe cleanup digest ${sha256(error.message)}`); }
     try { await stopManagementAndWait(management, "SIGKILL"); cleanupAssertions.push("network/auth management process terminated"); } catch (error) { cleanupAssertions.push(`management cleanup digest ${sha256(error.message)}`); }
@@ -1476,7 +1446,7 @@ export async function executeNetworkAuthDriver({ scenarioId, runId, liveProfileP
     try { if (storage) cleanupFixture(storage); cleanupAssertions.push("exact network/auth storage fixture removed"); } catch (error) { cleanupAssertions.push(`storage cleanup digest ${sha256(error.message)}`); }
     cleanupStatus = cleanupAssertions.some((value) => value.includes("digest")) ? "failed" : "passed";
   }
-  if (!campaign) throw new Error("network/auth campaign produced no measurements");
+  if (!campaign) throw driverOperationError("network-auth.run-campaign", errorFields, "network/auth campaign produced no measurements");
   if (scenarioId === "UAT-CELLD-012") campaign.assertions.find((assertion) => assertion.id === "CELLD.012.VALID").measurements.identity_removed = !existsSync(fleet.worker_vars_file_ref);
   const suffix = scenarioId.toLowerCase(), evidenceName = `network-auth-evidence-${suffix}.json`, timelineName = `network-auth-timeline-${suffix}.jsonl`;
   const evidencePath = join(artifactDir, evidenceName), timelinePath = join(artifactDir, timelineName);

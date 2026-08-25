@@ -44,10 +44,14 @@ import {
 test("network/auth driver error document redacts unsafe fields", () => {
   const error = new Error("private endpoint token should not be logged");
   error.name = "Unsafe Error Name With Spaces";
+  error.operation = "network-auth.run-authentication";
+  error.scenarioId = "UAT-CELLD-012";
   error.code = "ERR_INVALID_ARG_TYPE";
   error.signal = "SIGTERM";
   const document = networkAuthDriverErrorDocument(error);
   assert.equal(document.name, `sha256:${createHash("sha256").update(error.name).digest("hex")}`);
+  assert.equal(document.operation, "network-auth.run-authentication");
+  assert.equal(document.scenario_id, "UAT-CELLD-012");
   assert.equal(document.node_code, "ERR_INVALID_ARG_TYPE");
   assert.equal(document.signal, "SIGTERM");
   assert.match(document.message_sha256, /^[0-9a-f]{64}$/);
