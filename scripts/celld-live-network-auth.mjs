@@ -576,6 +576,10 @@ function exactNamespace(inventory, fault, { dockerRunner = run, namespaceInode =
   return namespace;
 }
 
+function nftStringLiteral(value) {
+  return `"${String(value).replaceAll("\\", "\\\\").replaceAll("\"", "\\\"")}"`;
+}
+
 export function listenerGuardCommands(inventory, guard) {
   const errors = validateNetworkAuthInventory(inventory);
   if (errors.length || !inventory.guards.includes(guard) || guard.status === "removed") throw new Error("listener guard command target is not exact-run active inventory");
@@ -587,9 +591,9 @@ export function listenerGuardCommands(inventory, guard) {
     apply: [
       [...prefix, "add", "table", guard.nft_family, guard.nft_table],
       [...prefix, "add", "chain", guard.nft_family, guard.nft_table, guard.nft_chain, "{", "type", "filter", "hook", "input", "priority", "-200", ";", "policy", "accept", ";", "}"],
-      [...prefix, "add", "rule", guard.nft_family, guard.nft_table, guard.nft_chain, "iifname", "lo", "tcp", "dport", String(guard.protected_port), "counter", "accept", "comment", guard.nft_comment],
-      ...guard.same_fleet_addresses.map((address) => [...prefix, "add", "rule", guard.nft_family, guard.nft_table, guard.nft_chain, "ip", "saddr", address, "tcp", "dport", String(guard.protected_port), "counter", "accept", "comment", guard.nft_comment]),
-      [...prefix, "add", "rule", guard.nft_family, guard.nft_table, guard.nft_chain, "tcp", "dport", String(guard.protected_port), "counter", "drop", "comment", guard.nft_comment],
+      [...prefix, "add", "rule", guard.nft_family, guard.nft_table, guard.nft_chain, "iifname", nftStringLiteral("lo"), "tcp", "dport", String(guard.protected_port), "counter", "accept", "comment", nftStringLiteral(guard.nft_comment)],
+      ...guard.same_fleet_addresses.map((address) => [...prefix, "add", "rule", guard.nft_family, guard.nft_table, guard.nft_chain, "ip", "saddr", address, "tcp", "dport", String(guard.protected_port), "counter", "accept", "comment", nftStringLiteral(guard.nft_comment)]),
+      [...prefix, "add", "rule", guard.nft_family, guard.nft_table, guard.nft_chain, "tcp", "dport", String(guard.protected_port), "counter", "drop", "comment", nftStringLiteral(guard.nft_comment)],
     ],
     remove: [...prefix, "delete", "table", guard.nft_family, guard.nft_table],
     verify_absent: [...prefix, "list", "tables"],
@@ -616,13 +620,13 @@ function listenerGuardApplyStep(index, peerCount) {
   return `apply-${index}`;
 }
 
-function executeListenerGuardCommand(executor, operation, args) {
+function executeNetworkAuthCommand(executor, operation, args, errorCode) {
   try {
     return executor("sudo", ["-n", "nsenter", ...args], { timeout: 30_000 });
   } catch (error) {
     throw annotateDriverError(error, {
       operation,
-      errorCode: "CELLD_LISTENER_GUARD_COMMAND_UNAVAILABLE",
+      errorCode,
     });
   }
 }
@@ -654,13 +658,13 @@ export function applyListenerGuard(inventory, guard, { executor = rawCommand, pe
       errorCode: "CELLD_LISTENER_GUARD_COMMAND_PLAN_INVALID",
     });
   }
-  const existing = executeListenerGuardCommand(executor, "network-auth.apply-listener-guard.inspect-existing", commands.inspect);
+  const existing = executeNetworkAuthCommand(executor, "network-auth.apply-listener-guard.inspect-existing", commands.inspect, "CELLD_LISTENER_GUARD_COMMAND_UNAVAILABLE");
   if (existing.status === 0) {
     throw driverOperationError("network-auth.apply-listener-guard.inspect-existing", commandFailureFields(existing, "CELLD_LISTENER_GUARD_TABLE_EXISTS"), "refusing to replace an existing listener guard table");
   }
   for (const [index, args] of commands.apply.entries()) {
     const operation = `network-auth.apply-listener-guard.${listenerGuardApplyStep(index, guard.same_fleet_addresses.length)}`;
-    const result = executeListenerGuardCommand(executor, operation, args);
+    const result = executeNetworkAuthCommand(executor, operation, args, "CELLD_LISTENER_GUARD_COMMAND_UNAVAILABLE");
     if (result.status !== 0) {
       throw driverOperationError(operation, commandFailureFields(result, "CELLD_LISTENER_GUARD_APPLY_FAILED"), "listener guard apply command failed");
     }
@@ -711,47 +715,115 @@ export function directionalPartitionCommands(inventory, fault) {
     apply: [
       [...prefix, "add", "table", fault.nft_family, fault.nft_table],
       [...prefix, "add", "chain", fault.nft_family, fault.nft_table, fault.nft_chain, "{", "type", "filter", "hook", input ? "input" : "output", "priority", "-150", ";", "policy", "accept", ";", "}"],
-      [...prefix, "add", "rule", fault.nft_family, fault.nft_table, fault.nft_chain, addressFamily, "daddr", fault.destination_address, "tcp", "dport", String(fault.destination_port), "counter", "drop", "comment", fault.nft_comment],
+      [...prefix, "add", "rule", fault.nft_family, fault.nft_table, fault.nft_chain, addressFamily, "daddr", fault.destination_address, "tcp", "dport", String(fault.destination_port), "counter", "drop", "comment", nftStringLiteral(fault.nft_comment)],
     ],
     heal: [...prefix, "delete", "table", fault.nft_family, fault.nft_table],
     verify_absent: [...prefix, "list", "tables"],
   };
 }
 
+function directionalPartitionApplyStep(index) {
+  if (index === 0) return "add-table";
+  if (index === 1) return "add-chain";
+  if (index === 2) return "add-drop";
+  return `apply-${index}`;
+}
+
 export function applyDirectionalPartition(inventory, fault, { executor = rawCommand, persist = persistNetworkAuthInventory, dockerRunner = run, namespaceInode, now = new Date() } = {}) {
   if (fault.status !== "planned") throw new Error("only a planned directional partition can be applied");
-  exactNamespace(inventory, fault, { dockerRunner, namespaceInode });
-  persist(inventory);
-  const commands = directionalPartitionCommands(inventory, fault);
-  const existing = executor("sudo", ["-n", "nsenter", ...commands.inspect], { timeout: 30_000 });
-  if (existing.status === 0) throw new Error("refusing to replace an existing exact-name nftables table");
-  for (const args of commands.apply) {
-    const result = executor("sudo", ["-n", "nsenter", ...args], { timeout: 30_000 });
-    if (result.status !== 0) throw new Error(`directional partition apply failed: ${sha256(result.stderr ?? "")}`);
+  try {
+    exactNamespace(inventory, fault, { dockerRunner, namespaceInode });
+  } catch (error) {
+    throw annotateDriverError(error, {
+      operation: "network-auth.apply-directional-partition.exact-namespace",
+      errorCode: "CELLD_DIRECTIONAL_PARTITION_NAMESPACE_INVALID",
+    });
+  }
+  try {
+    persist(inventory);
+  } catch (error) {
+    throw annotateDriverError(error, {
+      operation: "network-auth.apply-directional-partition.persist-planned",
+      errorCode: "CELLD_DIRECTIONAL_PARTITION_PERSIST_FAILED",
+    });
+  }
+  let commands;
+  try {
+    commands = directionalPartitionCommands(inventory, fault);
+  } catch (error) {
+    throw annotateDriverError(error, {
+      operation: "network-auth.apply-directional-partition.plan-commands",
+      errorCode: "CELLD_DIRECTIONAL_PARTITION_COMMAND_PLAN_INVALID",
+    });
+  }
+  const existing = executeNetworkAuthCommand(executor, "network-auth.apply-directional-partition.inspect-existing", commands.inspect, "CELLD_DIRECTIONAL_PARTITION_COMMAND_UNAVAILABLE");
+  if (existing.status === 0) {
+    throw driverOperationError("network-auth.apply-directional-partition.inspect-existing", commandFailureFields(existing, "CELLD_DIRECTIONAL_PARTITION_TABLE_EXISTS"), "refusing to replace an existing exact-name nftables table");
+  }
+  for (const [index, args] of commands.apply.entries()) {
+    const operation = `network-auth.apply-directional-partition.${directionalPartitionApplyStep(index)}`;
+    const result = executeNetworkAuthCommand(executor, operation, args, "CELLD_DIRECTIONAL_PARTITION_COMMAND_UNAVAILABLE");
+    if (result.status !== 0) {
+      throw driverOperationError(operation, commandFailureFields(result, "CELLD_DIRECTIONAL_PARTITION_APPLY_FAILED"), "directional partition apply command failed");
+    }
   }
   const timestamp = now.toISOString();
   fault.status = "applied";
   fault.applied_at = timestamp;
   fault.updated_at = timestamp;
   inventory.updated_at = timestamp;
-  persist(inventory);
+  try {
+    persist(inventory);
+  } catch (error) {
+    throw annotateDriverError(error, {
+      operation: "network-auth.apply-directional-partition.persist-applied",
+      errorCode: "CELLD_DIRECTIONAL_PARTITION_PERSIST_FAILED",
+    });
+  }
   return fault;
 }
 
 export function healDirectionalPartition(inventory, fault, { executor = rawCommand, persist = persistNetworkAuthInventory, dockerRunner = run, namespaceInode, now = new Date() } = {}) {
   if (!["planned", "applied"].includes(fault.status)) throw new Error("only a planned or applied directional partition can be healed");
-  exactNamespace(inventory, fault, { dockerRunner, namespaceInode });
-  const commands = directionalPartitionCommands(inventory, fault);
-  const deletion = executor("sudo", ["-n", "nsenter", ...commands.heal], { timeout: 30_000 });
-  const remaining = executor("sudo", ["-n", "nsenter", ...commands.verify_absent], { timeout: 30_000 });
-  if (remaining.status !== 0 || new RegExp(`\\b${fault.nft_family}\\s+${fault.nft_table}\\b`).test(remaining.stdout ?? "")) throw new Error(`directional partition heal failed: ${sha256(`${deletion.stderr ?? ""}\n${remaining.stderr ?? ""}`)}`);
+  try {
+    exactNamespace(inventory, fault, { dockerRunner, namespaceInode });
+  } catch (error) {
+    throw annotateDriverError(error, {
+      operation: "network-auth.heal-directional-partition.exact-namespace",
+      errorCode: "CELLD_DIRECTIONAL_PARTITION_NAMESPACE_INVALID",
+    });
+  }
+  let commands;
+  try {
+    commands = directionalPartitionCommands(inventory, fault);
+  } catch (error) {
+    throw annotateDriverError(error, {
+      operation: "network-auth.heal-directional-partition.plan-commands",
+      errorCode: "CELLD_DIRECTIONAL_PARTITION_COMMAND_PLAN_INVALID",
+    });
+  }
+  const deletion = executeNetworkAuthCommand(executor, "network-auth.heal-directional-partition.delete-table", commands.heal, "CELLD_DIRECTIONAL_PARTITION_COMMAND_UNAVAILABLE");
+  const remaining = executeNetworkAuthCommand(executor, "network-auth.heal-directional-partition.verify-absent", commands.verify_absent, "CELLD_DIRECTIONAL_PARTITION_COMMAND_UNAVAILABLE");
+  if (remaining.status !== 0 || new RegExp(`\\b${fault.nft_family}\\s+${fault.nft_table}\\b`).test(remaining.stdout ?? "")) {
+    throw driverOperationError("network-auth.heal-directional-partition.verify-absent", {
+      ...commandFailureFields(remaining, "CELLD_DIRECTIONAL_PARTITION_HEAL_FAILED"),
+      deletionStderrSha256: sha256(deletion.stderr ?? ""),
+    }, "directional partition heal command failed");
+  }
   const timestamp = now.toISOString();
   fault.status = "healed";
   fault.healed_at = timestamp;
   fault.updated_at = timestamp;
   inventory.updated_at = timestamp;
   inventory.state = inventory.faults.every((entry) => entry.status === "healed") && inventory.guards.every((entry) => entry.status === "removed") && inventory.proxies.every((entry) => entry.status === "removed") ? "clean" : "active";
-  persist(inventory);
+  try {
+    persist(inventory);
+  } catch (error) {
+    throw annotateDriverError(error, {
+      operation: "network-auth.heal-directional-partition.persist-healed",
+      errorCode: "CELLD_DIRECTIONAL_PARTITION_PERSIST_FAILED",
+    });
+  }
   return fault;
 }
 

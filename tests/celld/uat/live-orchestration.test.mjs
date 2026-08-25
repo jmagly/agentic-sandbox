@@ -146,13 +146,44 @@ test("management launch annotates protected environment failures", () => {
         return true;
       },
     );
-    assert.equal(failure.operation, "orchestration.launch-management.environment");
-    assert.equal(failure.errorCode, "CELLD_MANAGEMENT_ENVIRONMENT_INVALID");
+    assert.equal(failure.operation, "orchestration.launch-management.environment.worker-key");
+    assert.equal(failure.errorCode, "CELLD_MANAGEMENT_WORKER_KEY_INVALID");
     assert.equal(failure.code, "ENOENT");
     const document = liveOrchestration.driverErrorDocument(failure);
-    assert.equal(document.operation, "orchestration.launch-management.environment");
-    assert.equal(document.error_code, "CELLD_MANAGEMENT_ENVIRONMENT_INVALID");
+    assert.equal(document.operation, "orchestration.launch-management.environment.worker-key");
+    assert.equal(document.error_code, "CELLD_MANAGEMENT_WORKER_KEY_INVALID");
     assert.equal(document.node_code, "ENOENT");
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("management environment reports worker endpoint failures before state mutation", () => {
+  const directory = mkdtempSync(join(tmpdir(), "celld-management-endpoint-test-"));
+  try {
+    const workerVars = join(directory, "worker-vars");
+    writeFileSync(workerVars, "CELL_AUTH_KEY_ID=run-key\nCELL_AUTH_KEY=this-is-a-long-enough-qualification-key\n", { mode: 0o600 });
+    const fleet = {
+      run_root: directory,
+      worker_vars_file_ref: workerVars,
+      nodes: [{ name: "celld-fleet-node-1" }],
+      callback: {
+        management_server_cert_file_ref: join(directory, "management.crt"), management_server_key_file_ref: join(directory, "management.key"),
+        ca_file_ref: join(directory, "ca.crt"), management_auth_key_file_ref: join(directory, "management-auth-key"),
+        effect_ledger_file_ref: join(directory, "effect-ledger.sqlite"), client_cn: "agentic-celld-worker-callback",
+      },
+      pins: { celld: { version: "v0.2.1", commit: "1".repeat(40) } },
+    };
+    let failure;
+    assert.throws(
+      () => managementEnvironment(config({ management_binary_path: join(directory, "agentic-mgmt") }), fleet, "127.0.0.1"),
+      (error) => {
+        failure = error;
+        return true;
+      },
+    );
+    assert.equal(failure.operation, "orchestration.launch-management.environment.worker-endpoint");
+    assert.equal(failure.errorCode, "CELLD_MANAGEMENT_WORKER_ENDPOINT_INVALID");
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

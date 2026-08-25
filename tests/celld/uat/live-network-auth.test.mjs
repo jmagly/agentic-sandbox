@@ -179,6 +179,8 @@ test("directional partition planner binds typed nft identities to an exact names
   const inboundCommands = directionalPartitionCommands(inventory, inbound);
   assert.equal(inboundCommands.apply[1].includes("input"), true);
   assert.equal(inboundCommands.apply[1].includes("output"), false);
+  const inboundDrop = inboundCommands.apply[2];
+  assert.equal(inboundDrop[inboundDrop.indexOf("comment") + 1], `"${inbound.nft_comment}"`);
 });
 
 test("network inventory validation rejects substituted rule and namespace identities", () => {
@@ -205,8 +207,14 @@ test("listener guard allows loopback and exact peers while dropping every bypass
   }, new Date("2026-08-23T08:00:01Z"));
   assert.deepEqual(guard.same_fleet_addresses, ["172.30.0.20", "172.30.0.21"]);
   const commands = listenerGuardCommands(inventory, guard);
-  assert.equal(commands.apply.some((args) => args.includes("iifname") && args.includes("lo") && args.includes("accept")), true);
+  const loopbackAccept = commands.apply[2];
+  assert.equal(loopbackAccept[loopbackAccept.indexOf("iifname") + 1], "\"lo\"");
+  assert.equal(loopbackAccept[loopbackAccept.indexOf("comment") + 1], `"${guard.nft_comment}"`);
+  assert.equal(commands.apply.some((args) => args.includes("iifname") && args.includes("\"lo\"") && args.includes("accept")), true);
   assert.equal(commands.apply.filter((args) => args.includes("saddr") && args.includes("accept")).length, 2);
+  for (const args of commands.apply.filter((args) => args.includes("comment"))) {
+    assert.match(args[args.indexOf("comment") + 1], /^"agentic-sandbox:celld-listener:titan-765:[0-9a-f]{32}"$/);
+  }
   assert.equal(commands.apply.at(-1).includes("drop"), true);
   const events = [];
   applyListenerGuard(inventory, guard, {
@@ -540,7 +548,7 @@ test("partition controller persists before mutation and heals only its exact nft
   const commands = directionalPartitionCommands(inventory, fault);
   assert.deepEqual(commands.heal.slice(-3), ["table", "inet", `as_celld_${"c".repeat(16)}`]);
   assert.equal(commands.apply[2].includes("drop"), true);
-  assert.equal(commands.apply[2].at(-1), `agentic-sandbox:celld-network:titan-765:${"c".repeat(32)}`);
+  assert.equal(commands.apply[2].at(-1), `"agentic-sandbox:celld-network:titan-765:${"c".repeat(32)}"`);
 
   calls.length = 0;
   healDirectionalPartition(inventory, fault, {
@@ -563,6 +571,7 @@ test("partially applied partition remains planned and exact cleanup is recoverab
     destinationAddress: "172.30.0.1", destinationPort: 8122, faultId: "d".repeat(32),
   });
   let calls = 0;
+  let failure;
   assert.throws(() => applyDirectionalPartition(inventory, fault, {
     executor: (_program, args) => {
       if (args.includes("list")) return { status: 1, stdout: "", stderr: "missing" };
@@ -570,7 +579,14 @@ test("partially applied partition remains planned and exact cleanup is recoverab
       return { status: calls === 2 ? 1 : 0, stdout: "", stderr: "injected" };
     },
     persist: () => {}, dockerRunner: () => "3210|titan-765|celld-qualification", namespaceInode: () => 99,
-  }), /partition apply failed/);
+  }), (error) => {
+    failure = error;
+    return /partition apply command failed/.test(error.message);
+  });
+  assert.equal(failure.operation, "network-auth.apply-directional-partition.add-chain");
+  assert.equal(failure.errorCode, "CELLD_DIRECTIONAL_PARTITION_APPLY_FAILED");
+  assert.equal(failure.exitStatus, 1);
+  assert.equal(failure.stderrSha256, createHash("sha256").update("injected").digest("hex"));
   assert.equal(fault.status, "planned");
   healDirectionalPartition(inventory, fault, {
     executor: (_program, args) => ({ status: args.at(-1) === "tables" ? 0 : args.includes("list") ? 1 : 0, stdout: "", stderr: "" }), persist: () => {},

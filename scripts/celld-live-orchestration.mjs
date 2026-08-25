@@ -517,16 +517,45 @@ function celldOwnershipEvidence(observation) {
 }
 
 export function managementEnvironment(config, fleet, managementHost, { celldEndpoint, tlsCaFile, tlsIdentityFile } = {}) {
-  if ((tlsCaFile === undefined) !== (tlsIdentityFile === undefined)) throw new Error("Celld management TLS requires both CA and client identity files");
-  celldEndpoint ??= workerEndpoint(fleet);
+  if ((tlsCaFile === undefined) !== (tlsIdentityFile === undefined)) {
+    throw annotateDriverError(new Error("Celld management TLS requires both CA and client identity files"), {
+      operation: "orchestration.launch-management.environment.transport",
+      errorCode: "CELLD_MANAGEMENT_TRANSPORT_INVALID",
+    });
+  }
+  if (celldEndpoint === undefined) {
+    try {
+      celldEndpoint = workerEndpoint(fleet);
+    } catch (error) {
+      throw annotateDriverError(error, {
+        operation: "orchestration.launch-management.environment.worker-endpoint",
+        errorCode: "CELLD_MANAGEMENT_WORKER_ENDPOINT_INVALID",
+      });
+    }
+  }
   const stateRoot = join(fleet.run_root, "management-state");
   const secrets = join(stateRoot, "secrets");
   const dispatchGates = join(stateRoot, "dispatch-gates");
-  mkdirSync(secrets, { recursive: true, mode: 0o700 });
-  chmodSync(secrets, 0o700);
-  mkdirSync(dispatchGates, { recursive: true, mode: 0o700 });
-  chmodSync(dispatchGates, 0o700);
-  const workerVars = readWorkerKey(fleet.worker_vars_file_ref);
+  try {
+    mkdirSync(secrets, { recursive: true, mode: 0o700 });
+    chmodSync(secrets, 0o700);
+    mkdirSync(dispatchGates, { recursive: true, mode: 0o700 });
+    chmodSync(dispatchGates, 0o700);
+  } catch (error) {
+    throw annotateDriverError(error, {
+      operation: "orchestration.launch-management.environment.state-root",
+      errorCode: "CELLD_MANAGEMENT_STATE_ROOT_INVALID",
+    });
+  }
+  let workerVars;
+  try {
+    workerVars = readWorkerKey(fleet.worker_vars_file_ref);
+  } catch (error) {
+    throw annotateDriverError(error, {
+      operation: "orchestration.launch-management.environment.worker-key",
+      errorCode: "CELLD_MANAGEMENT_WORKER_KEY_INVALID",
+    });
+  }
   return {
     ...process.env,
     LISTEN_ADDR: `127.0.0.1:${config.management_grpc_port}`,
