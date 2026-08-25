@@ -5,5 +5,5 @@
   "commit": "ae8fac053d79f971bfcb996054bb43eb2f9b05da",
   "source_path": "crates/celld/fleet.rs",
   "conditional_write_line": "ok bucket conditional write (create, reject-create, update, reject-stale)",
-  "signed_direct_peer_line_template": "ok peer {{NODE_ID}} at {{ADDRESS}} (signed direct probe) protocol=1 resident_cells=0 websockets=0 rss_bytes=1048576 in_use_bytes=524288 cpu_percent=0.00 fds=12/1048576 pressured=false shed_cells=0 restoring=0 load_age_ms=0"
+  "signed_direct_peer_line_template": "ok peer {{NODE_ID}} at {{ADDRESS}} (signed direct probe) protocol=2 resident_cells=0 websockets=0 rss_bytes=1048576 in_use_bytes=524288 cpu_percent=0.00 fds=12/1048576 pressured=false shed_cells=0 restoring=0 load_age_ms=0"
 }

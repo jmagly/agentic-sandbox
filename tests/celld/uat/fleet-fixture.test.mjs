@@ -64,7 +64,7 @@ function pinnedCelldDiagnosisOutput(config, {
 function signedDirectDiagnosisOutput(config, {
   includeAt = true,
   fieldEntries = () => [
-    ["protocol", "1"],
+    ["protocol", "2"],
     ["resident_cells", "0"],
     ["websockets", "0"],
     ["rss_bytes", "1048576"],
@@ -1205,7 +1205,7 @@ test("fleet readiness accepts only the exact pinned signed-direct expected-node 
         fieldEntries: () => [
           ["upstream_metric", "not_available"],
           ["load_age_ms", "unknown"],
-          ["protocol", "1"],
+          ["protocol", "2"],
           ["pressured", "unknown"],
           ["fds", "unknown/unknown"],
           ["cpu_percent", "0"],
@@ -1235,10 +1235,10 @@ test("fleet readiness accepts only the exact pinned signed-direct expected-node 
       reasonCode: "CELLD_DIAGNOSIS_SIGNED_PEER_PROOF_REQUIRED",
     },
     {
-      name: "signed-direct IDs with unsupported protocol still fail closed",
+      name: "signed-direct IDs with unsupported old protocol still fail closed",
       output: (config) => signedDirectDiagnosisOutput(config, {
         fieldEntries: () => [
-          ["protocol", "2"],
+          ["protocol", "1"],
           ["resident_cells", "0"],
         ],
       }),
@@ -1249,7 +1249,7 @@ test("fleet readiness accepts only the exact pinned signed-direct expected-node 
       name: "signed-direct IDs with duplicate telemetry still fail closed",
       output: (config) => signedDirectDiagnosisOutput(config, {
         fieldEntries: () => [
-          ["protocol", "1"],
+          ["protocol", "2"],
           ["resident_cells", "0"],
           ["resident_cells", "1"],
         ],
@@ -1261,7 +1261,7 @@ test("fleet readiness accepts only the exact pinned signed-direct expected-node 
       name: "signed-direct IDs with malformed extra telemetry still fail closed",
       output: (config) => [
         PINNED_DIAGNOSIS_OUTPUT.conditional_write_line,
-        ...config.nodes.map((node) => `ok peer ${node.node_id} at ${node.advertise} (signed direct probe) protocol=1 extra=bad;`),
+        ...config.nodes.map((node) => `ok peer ${node.node_id} at ${node.advertise} (signed direct probe) protocol=2 extra=bad;`),
       ].join("\n"),
       status: "NOT_READY",
       reasonCode: "CELLD_DIAGNOSIS_SIGNED_PEER_PROOF_REQUIRED",
