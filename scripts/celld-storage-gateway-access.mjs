@@ -108,8 +108,8 @@ export async function startLoopbackForwarder({ host, port }, {
   }
   if (!["http", "https"].includes(scheme)) throw accessError("gateway", "gateway-forwarder-unavailable");
   const sockets = new Set();
-  let fatalError = null;
-  const markFatal = (error) => { fatalError ??= error instanceof Error ? error : new Error("gateway forwarder failed"); };
+  let listenerError = null;
+  const markListenerError = (error) => { listenerError ??= error instanceof Error ? error : new Error("gateway forwarder failed"); };
   const server = serverFactory((downstream) => {
     const upstream = connectionFactory({ host, port });
     sockets.add(downstream);
@@ -118,7 +118,7 @@ export async function startLoopbackForwarder({ host, port }, {
     upstream.setNoDelay?.(true);
     const destroyPeer = (peer) => { if (!peer.destroyed) peer.destroy(); };
     downstream.on("error", () => destroyPeer(upstream));
-    upstream.on("error", (error) => { markFatal(error); destroyPeer(downstream); });
+    upstream.on("error", () => { destroyPeer(downstream); });
     downstream.on("close", () => { sockets.delete(downstream); destroyPeer(upstream); });
     upstream.on("close", () => { sockets.delete(upstream); destroyPeer(downstream); });
     downstream.pipe(upstream);
@@ -144,7 +144,7 @@ export async function startLoopbackForwarder({ host, port }, {
     throw accessError("gateway", "gateway-forwarder-unavailable");
   }
   server.on("error", (error) => {
-    markFatal(error);
+    markListenerError(error);
     for (const socket of sockets) socket.destroy();
   });
   let closePromise = null;
@@ -159,7 +159,7 @@ export async function startLoopbackForwarder({ host, port }, {
             server.close((error) => { closeError = error ?? null; resolveClose(); });
           });
         }
-        if (fatalError || closeError) throw accessError("gateway", "gateway-forwarder-failed");
+        if (listenerError || closeError) throw accessError("gateway", "gateway-forwarder-failed");
       })();
       return closePromise;
     },

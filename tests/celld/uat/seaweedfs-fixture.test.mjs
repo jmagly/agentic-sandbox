@@ -318,7 +318,7 @@ test("live storage loopback forwarder destroys active downstream and upstream so
   }
 });
 
-test("live storage loopback forwarder records refused upstream and cleanup failures", async () => {
+test("live storage loopback forwarder treats refused upstream as request failure, not cleanup failure", async () => {
   const reservation = createServer();
   await new Promise((resolveListen, reject) => {
     reservation.once("error", reject);
@@ -335,8 +335,8 @@ test("live storage loopback forwarder records refused upstream and cleanup failu
     socket.on("error", () => {});
     socket.on("close", resolveAttempt);
   });
-  await assert.rejects(forwarder.close(), (error) => error.reasonCode === "gateway-forwarder-failed");
-  await assert.rejects(forwarder.close(), (error) => error.reasonCode === "gateway-forwarder-failed");
+  await assert.doesNotReject(forwarder.close());
+  await assert.doesNotReject(forwarder.close());
 
   const order = [];
   await assert.rejects(
