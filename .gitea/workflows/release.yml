@@ -1,0 +1,2285 @@
+name: Release
+
+env:
+  REGISTRY: ${{ vars.REGISTRY_HOST }}
+  MGMT_IMAGE: ${{ vars.REGISTRY_HOST }}/roctinam/agentic-sandbox/agentic-mgmt
+  AGENT_IMAGE: ${{ vars.REGISTRY_HOST }}/roctinam/agentic-sandbox/agent-client
+  VAULT_ADDR: ${{ vars.VAULT_ADDR }}
+  REGISTRY_CREDENTIALS_VAULT_PATH: ${{ vars.REGISTRY_CREDENTIALS_VAULT_PATH }}
+  REGISTRY_USER_VAULT_FIELD: ${{ vars.REGISTRY_USER_VAULT_FIELD }}
+  REGISTRY_TOKEN_VAULT_FIELD: ${{ vars.REGISTRY_TOKEN_VAULT_FIELD }}
+  GHCR_TOKEN_VAULT_PATH: ${{ vars.GHCR_TOKEN_VAULT_PATH }}
+  GHCR_TOKEN_VAULT_FIELD: ${{ vars.GHCR_TOKEN_VAULT_FIELD }}
+  MUTSU_SSH_KEY_VAULT_PATH: ${{ vars.MUTSU_SSH_KEY_VAULT_PATH }}
+  MUTSU_SSH_KEY_VAULT_FIELD: ${{ vars.MUTSU_SSH_KEY_VAULT_FIELD }}
+  MUTSU_SSH_HOST_KEY: ${{ vars.MUTSU_SSH_HOST_KEY }}
+  MUTSU_SSH_HOST_KEY_FINGERPRINT: ${{ vars.MUTSU_SSH_HOST_KEY_FINGERPRINT }}
+  RELEASE_SIGNING_KEY_VAULT_PATH: ${{ vars.RELEASE_SIGNING_KEY_VAULT_PATH }}
+  GH_MIRROR_TOKEN_VAULT_PATH: ${{ vars.GH_MIRROR_TOKEN_VAULT_PATH }}
+  GH_MIRROR_TOKEN_VAULT_FIELD: ${{ vars.GH_MIRROR_TOKEN_VAULT_FIELD }}
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+# Serialize CI runs per ref so overlapping runs do not stack routine work onto
+# the shared Rust runner pool. `cancel-in-progress: false` queues rather than
+# cancelling, so a release (tag) build is never interrupted mid-flight.
+# Runner-level capacity remains the cross-workflow backstop; this guard bounds
+# the in-repo contribution.
+concurrency:
+  group: release-${{ gitea.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # Pre-release validation gate (#295). Only runs on v* tag pushes.
+  # Verifies Cargo.toml versions match the tag base and CHANGELOG.md
+  # has a corresponding `## [<version>]` section. Other CI jobs need
+  # this gate so a tagged commit can't enter the build pipeline with
+  # mismatched version metadata.
+  prerelease-gate:
+    name: Pre-release Validation
+    runs-on: titan
+    if: startsWith(gitea.ref, 'refs/tags/v')
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+
+      - name: Validate tag matches manifests and CHANGELOG
+        run: |
+          set -euo pipefail
+          TAG_VERSION="${GITHUB_REF#refs/tags/v}"
+          # Strip any pre-release suffix (-rc.N, -beta) — Cargo uses the base.
+          BASE="${TAG_VERSION%%-*}"
+          MGMT=$(grep -m1 '^version = ' management/Cargo.toml | cut -d'"' -f2)
+          AGENT=$(grep -m1 '^version = ' agent-rs/Cargo.toml | cut -d'"' -f2)
+          CLI=$(grep -m1 '^version = ' cli/Cargo.toml | cut -d'"' -f2)
+
+          fail=0
+          for v in "$MGMT" "$AGENT" "$CLI"; do
+            if [ "$v" != "$BASE" ]; then
+              echo "::error::Cargo.toml version $v does not match tag base $BASE"
+              echo "  management: $MGMT  |  agent-rs: $AGENT  |  cli: $CLI  |  tag base: $BASE"
+              fail=1
+            fi
+          done
+
+          if ! grep -qE "^## \[${BASE//./\\.}\]" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md is missing a '## [${BASE}]' section"
+            fail=1
+          fi
+
+          [ $fail -eq 0 ] || exit 1
+          echo "Pre-release gate passed for v${TAG_VERSION}"
+
+  lint:
+    name: Lint
+    # Portable validation may run on build01 or Titan.
+    runs-on: rust
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+
+      - name: Check formatting
+        run: |
+          make lint
+          python3 scripts/check-doc-links.py --docs-root docs
+          git diff --exit-code
+
+  test:
+    name: Test
+    runs-on: rust
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+
+      - name: Run unit tests
+        run: bash scripts/ci-heartbeat.sh 60 "make test-unit" make test-unit
+
+      - name: Run script regression tests
+        run: bash scripts/ci-heartbeat.sh 60 "make test-scripts" make test-scripts
+
+  celld-deterministic:
+    name: Celld Deterministic Qualification Support
+    runs-on: titan
+    timeout-minutes: 30
+    concurrency:
+      # Do not overlap ordinary deterministic support with any manual Celld
+      # qualification campaign on the shared Titan host.
+      group: agentic-sandbox-celld-qualification-titan
+      cancel-in-progress: false
+    env:
+      CARGO_BUILD_JOBS: "8"
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_TARGET_DIR: ${{ github.workspace }}/.celld-ci-target
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+
+      - name: Validate structured qualification contracts
+        run: make test-celld-uat-structure
+
+      - name: Run credential-free Celld behavior support
+        run: bash scripts/ci-heartbeat.sh 60 "make test-celld" make test-celld
+
+      - name: Remove job-scoped compiler artifacts
+        if: always()
+        run: |
+          set -euo pipefail
+          target="${CARGO_TARGET_DIR}"
+          test "${target}" = "${GITHUB_WORKSPACE}/.celld-ci-target"
+          du -sh "${target}" 2>/dev/null || true
+          cargo clean --manifest-path management/Cargo.toml --target-dir "${target}"
+
+  build:
+    name: Build
+    runs-on: rust
+    needs: [lint, test, celld-deterministic]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+
+      - name: Build binaries
+        run: make build
+
+  docker:
+    name: Docker Build & Publish
+    # The rust capability is advertised by the two qualified Linux builders,
+    # allowing Docker publication to fail over between build01 and Titan.
+    runs-on: rust
+    needs: [lint, test, celld-deterministic]
+    # Multi-platform publication can spend substantial time under arm64 QEMU.
+    # The daemon probes and the publish step retain hard shell timeouts so a
+    # wedged Docker lane still terminates predictably (#335, #668).
+    timeout-minutes: 180
+    env:
+      # Both qualified Docker runners reserve at least 16 logical CPUs for this
+      # lane. Keep each emulated/native Cargo builder at no more than half.
+      CARGO_DOCKER_BUILD_JOBS: "8"
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+
+      - name: Preflight host shell for Docker lane (#335)
+        run: |
+          set -euo pipefail
+          echo "Docker lane runner preflight"
+          echo "hostname=$(hostname)"
+          echo "runner_name=${RUNNER_NAME:-unknown}"
+          echo "runner_labels=${RUNNER_LABELS:-unknown}"
+          # Keep diagnostics bounded on the host runner. A Docker lane can
+          # wedge on host filesystem or daemon probes; unbounded diagnostics
+          # can block before the Docker self-heal path runs.
+          timeout 10 stat -c 'bash=%n mode=%a owner=%U group=%G size=%s' /usr/bin/bash || true
+          timeout 10 /usr/bin/bash --version | head -1 || true
+          timeout 10 bash -lc 'command -v docker'
+
+          # --- Docker daemon readiness + self-heal (#335) ---------------------
+          # The titan Docker lane intermittently wedges: dockerd stops
+          # responding and every `docker` call blocks forever. With no job
+          # timeout this previously burned ~3.5h before the platform killed the
+          # run. Probe with a hard timeout; if the daemon is unresponsive, try
+          # to restart it in place, then re-probe. Fail fast if unrecoverable
+          # so the lane surfaces a clear error instead of hanging.
+          docker_ready() {
+            timeout 60 docker version \
+              --format 'docker client={{.Client.Version}} server={{.Server.Version}}'
+          }
+          if ! docker_ready; then
+            echo "::warning::Docker daemon on $(hostname) is unresponsive (wedged lane, #335) — attempting self-heal restart"
+            sudo -n systemctl restart docker 2>/dev/null \
+              || sudo -n service docker restart 2>/dev/null \
+              || systemctl --user restart docker 2>/dev/null \
+              || echo "::warning::no privileged restart path succeeded; re-probing in case the daemon recovered"
+            sleep 8
+            if ! docker_ready; then
+              echo "::error::Docker daemon on $(hostname) did not recover after self-heal restart — runner needs manual intervention (#335)"
+              exit 1
+            fi
+            echo "Self-heal succeeded: Docker daemon recovered on $(hostname)"
+          fi
+          # --------------------------------------------------------------------
+
+          # This lane builds exclusively through Docker/Buildx. Shared Linux
+          # runners are required to provide Docker, but not a host Rust
+          # toolchain; Rust compilation happens inside the pinned build image.
+
+      - name: Compute publish context
+        id: pub
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            echo "publish=true"               >> "$GITHUB_OUTPUT"
+            echo "tag_name=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"  # e.g. v2026.5.2
+            echo "is_tag=true"                >> "$GITHUB_OUTPUT"
+          elif [[ "${GITHUB_REF}" == "refs/heads/main" ]]; then
+            echo "publish=true"   >> "$GITHUB_OUTPUT"
+            echo "tag_name="      >> "$GITHUB_OUTPUT"
+            echo "is_tag=false"   >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=false"  >> "$GITHUB_OUTPUT"
+            echo "tag_name="      >> "$GITHUB_OUTPUT"
+            echo "is_tag=false"   >> "$GITHUB_OUTPUT"
+          fi
+          echo "Context: publish=$(cat $GITHUB_OUTPUT | grep ^publish | cut -d= -f2)  is_tag=$(cat $GITHUB_OUTPUT | grep ^is_tag | cut -d= -f2)  tag_name=$(cat $GITHUB_OUTPUT | grep ^tag_name | cut -d= -f2)"
+
+      - name: Set up QEMU for multi-platform agent images
+        if: steps.pub.outputs.publish == 'true'
+        uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392  # v3.6.0
+        with:
+          platforms: arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3.12.0
+
+      - name: Fetch registry credentials from vault
+        if: steps.pub.outputs.publish == 'true'
+        env:
+          VAULT_CI_ROLE_ID: ${{ secrets.VAULT_CI_ROLE_ID }}
+          VAULT_CI_SECRET_ID: ${{ secrets.VAULT_CI_SECRET_ID }}
+        run: |
+          set -euo pipefail
+          ci/vault-fetch.sh <<'SPEC'
+          env REGISTRY_USER  ${REGISTRY_CREDENTIALS_VAULT_PATH} ${REGISTRY_USER_VAULT_FIELD}
+          env REGISTRY_TOKEN ${REGISTRY_CREDENTIALS_VAULT_PATH} ${REGISTRY_TOKEN_VAULT_FIELD}
+          SPEC
+
+      - name: Login to registry
+        if: steps.pub.outputs.publish == 'true'
+        run: echo "${REGISTRY_TOKEN}" | docker login "${REGISTRY}" -u "${REGISTRY_USER}" --password-stdin
+
+      - name: Build management server image
+        env:
+          PUBLISH_IMAGE: ${{ steps.pub.outputs.publish }}
+          RELEASE_TAG: ${{ steps.pub.outputs.tag_name }}
+        run: |
+          set -euo pipefail
+          tags=(
+            --tag "${MGMT_IMAGE}:latest"
+            --tag "${MGMT_IMAGE}:${GITHUB_SHA}"
+          )
+          if [[ -n "${RELEASE_TAG}" ]]; then
+            tags+=(--tag "${MGMT_IMAGE}:${RELEASE_TAG}")
+          fi
+
+          # BuildKit's inline Syft attestation exporter can wedge self-hosted
+          # docker-container builders before the Docker lane reaches its
+          # promised shell timeout boundary (#795). This single-platform image
+          # does not need Buildx; release SBOM/signing evidence remains
+          # generated by the dedicated sign-and-sbom job.
+          timeout --signal=TERM --kill-after=60s 45m \
+            docker build \
+              --file deploy/docker/Dockerfile.management \
+              --build-arg "CARGO_BUILD_JOBS=${CARGO_DOCKER_BUILD_JOBS}" \
+              "${tags[@]}" \
+              .
+          if [[ "${PUBLISH_IMAGE}" == "true" ]]; then
+            for tag in "${tags[@]}"; do
+              [[ "${tag}" == "--tag" ]] && continue
+              timeout --signal=TERM --kill-after=60s 20m docker push "${tag}"
+            done
+          fi
+
+      - name: Build agent client image
+        # act_runner v0.6.1 races its action cache when one host job invokes
+        # the same action twice. Buildx was configured by the pinned setup
+        # action above, so invoke it directly for this second image.
+        env:
+          PUBLISH_IMAGE: ${{ steps.pub.outputs.publish }}
+          RELEASE_TAG: ${{ steps.pub.outputs.tag_name }}
+        run: |
+          set -euo pipefail
+          tags=(
+            --tag "${AGENT_IMAGE}:latest"
+            --tag "${AGENT_IMAGE}:${GITHUB_SHA}"
+          )
+          if [[ -n "${RELEASE_TAG}" ]]; then
+            tags+=(--tag "${AGENT_IMAGE}:${RELEASE_TAG}")
+          fi
+
+          timeout --signal=TERM --kill-after=60s 45m \
+            docker build \
+              --file deploy/docker/Dockerfile.agent-rust \
+              --build-arg "CARGO_BUILD_JOBS=${CARGO_DOCKER_BUILD_JOBS}" \
+              "${tags[@]}" \
+              .
+          if [[ "${PUBLISH_IMAGE}" == "true" ]]; then
+            for tag in "${tags[@]}"; do
+              [[ "${tag}" == "--tag" ]] && continue
+              timeout --signal=TERM --kill-after=60s 20m docker push "${tag}"
+            done
+          fi
+
+      - name: Build sandbox base image
+        run: make docker-base
+
+      - name: Build sandbox test image
+        run: make docker-test
+
+      - name: Smoke-test base image
+        run: |
+          docker run --rm agentic-sandbox-base:latest /bin/sh -c "id agent && echo 'Base image OK'"
+
+      # ----------------------------------------------------------------
+      # Agent container image chain (#181 / #186)
+      # base → dev (toolchain) → claude / codex / opencode / automation-control
+      # The platform images FROM agent:dev (which FROM agent:base), so each
+      # tag must be visible to the next build. buildx's docker-container
+      # driver runs in an isolated buildkit instance that does NOT see images
+      # loaded into the host daemon — so `FROM agentic/agent:base` falls
+      # through to docker.io and fails. Use plain `docker build` for this
+      # chain (host daemon, sees prior images natively). Registry-cache
+      # caching on these is not worth the lost FROM resolution.
+      # ----------------------------------------------------------------
+      - name: Test agent image secure transport entrypoint
+        run: tests/container/test-agent-entrypoint-secure-transport.sh
+
+      - name: Build agent image chain (base → dev → claude/codex/opencode/automation-control)
+        if: steps.pub.outputs.publish != 'true'
+        run: |
+          set -e
+          docker build --build-arg "CARGO_BUILD_JOBS=${CARGO_DOCKER_BUILD_JOBS}" -f images/container/Dockerfile.base -t agentic/agent:base .
+          docker build -f images/container/Dockerfile.dev     -t agentic/agent:dev     .
+          docker build -f images/container/Dockerfile.claude  -t agentic/claude:latest .
+          docker build -f images/container/Dockerfile.codex   -t agentic/codex:latest  .
+          docker build -f images/container/Dockerfile.opencode -t agentic/opencode:latest .
+          docker build -f images/container/Dockerfile.automation-control -t agentic/automation-control:latest .
+
+      - name: Push agent images to registry
+        if: steps.pub.outputs.publish == 'true'
+        env:
+          AGENT_IMAGE_REGISTRY: ${{ env.REGISTRY }}/roctinam/agentic-sandbox
+          AGENT_IMAGE_REVISION: ${{ github.sha }}
+          AGENT_IMAGE_RELEASE_TAG: ${{ steps.pub.outputs.tag_name }}
+          AGENT_IMAGE_EVIDENCE: multiarch-agent-images.jsonl
+        run: |
+          timeout --signal=TERM --kill-after=60s 150m \
+            scripts/build-multiarch-agent-images.sh --registry "$AGENT_IMAGE_REGISTRY"
+
+      - name: Upload multi-platform manifest evidence
+        if: steps.pub.outputs.publish == 'true'
+        uses: actions/upload-artifact@c6a366c94c3e0affe28c06c8df20a878f24da3cf  # v3.2.2
+        with:
+          name: multiarch-agent-images-${{ github.sha }}
+          path: multiarch-agent-images.jsonl
+
+      - name: Smoke-test agent images
+        run: |
+          if [[ "${{ steps.pub.outputs.publish }}" == "true" ]]; then
+            REG="${{ env.REGISTRY }}/roctinam/agentic-sandbox"
+            SHA="${{ github.sha }}"
+            docker pull --platform linux/amd64 "$REG/agent:base-$SHA"
+            docker tag "$REG/agent:base-$SHA" agentic/agent:base
+            docker pull --platform linux/amd64 "$REG/agent:dev-$SHA"
+            docker tag "$REG/agent:dev-$SHA" agentic/agent:dev
+            for image in claude codex opencode automation-control; do
+              docker pull --platform linux/amd64 "$REG/$image:$SHA"
+              docker tag "$REG/$image:$SHA" "agentic/$image:latest"
+            done
+          fi
+          for v in base dev claude codex opencode automation-control; do
+            tests/container/smoke.sh "$v"
+          done
+
+      - name: Verify minimal container security baseline
+        run: AGENTIC_SECURITY_IMAGE=agentic/agent:base ./scripts/verify-container-security.sh
+
+  integration:
+    name: E2E Tests (${{ matrix.backend }})
+    # Both build01 and Titan provide the Rust, KVM/libvirt, and shared-storage
+    # contract required by VM-backed E2E.
+    runs-on: rust
+    env:
+      BASE_IMAGES_DIR: /build/agentic-sandbox/base-images
+      VM_STORAGE_DIR: /build/agentic-sandbox/vms
+      LIBVIRT_DEFAULT_URI: qemu:///system
+      AGENTSHARE_ROOT: /var/tmp/agentic-ci-agentshare-${{ github.run_id }}-${{ matrix.vm_slot }}/mount
+      AGENTSHARE_BACKING_FILE: /var/tmp/agentic-ci-agentshare-${{ github.run_id }}-${{ matrix.vm_slot }}/agentshare.xfs
+    # NOTE: this Gitea act_runner does NOT enforce job-level timeout-minutes
+    # (run #887's E2E ran ~183m past this 90m cap before failing). Kept for
+    # compliant runners; the *effective* backstop is the shell `timeout`
+    # around `make test-e2e` below. The accepted repo-local titan policy from
+    # #363/#367 is serialized E2E, runner preflight evidence, and bounded
+    # release build parallelism rather than host-runner label mutation.
+    timeout-minutes: 90
+    # VM-backed E2E mutates runner-local libvirt state and shared base images.
+    # Keep this repo to one active E2E lane at a time across both backends.
+    concurrency:
+      group: agentic-sandbox-vm-e2e
+      cancel-in-progress: false
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - backend: libvirt
+            vm_slot: 1
+          - backend: cloud-hypervisor
+            vm_slot: 2
+    needs: [build, docker]
+    # E2E gates every push. The post-#312 cooldown completed after the
+    # v2026.5.5+ tag-E2E restoration window and later release-gate repairs;
+    # keep the job unconditional so branch pushes exercise VM substrate before
+    # release tags depend on it.
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+
+      - name: Verify shared VM runner capability contract
+        run: |
+          set -euo pipefail
+          echo "VM E2E runner: $(hostname)"
+          command -v docker
+          command -v virsh
+          test -r /dev/kvm && test -w /dev/kvm
+          virsh --connect "${LIBVIRT_DEFAULT_URI}" uri
+          test -d "${BASE_IMAGES_DIR}"
+          test -r "${BASE_IMAGES_DIR}/ubuntu-server-24.04-agent.qcow2"
+          sudo test -d "${VM_STORAGE_DIR}"
+          sudo test -w "${VM_STORAGE_DIR}"
+          docker version --format 'docker client={{.Client.Version}} server={{.Server.Version}}'
+
+      - name: Reclaim completed Docker build cache
+        # Docker publishing and VM E2E share storage on either eligible runner.
+        # The integration matrix is capacity-one and depends on the completed
+        # Docker job, so no active build can be using this cache here. Keep
+        # /tmp and libvirt writable before provisioning a hardware-backed VM.
+        run: |
+          set -euo pipefail
+          docker builder prune --all --force
+          df -h / /build
+
+      - name: Install secure agentshare filesystem tooling
+        run: |
+          set -euo pipefail
+          if command -v mkfs.xfs >/dev/null 2>&1 \
+            && command -v xfs_quota >/dev/null 2>&1; then
+            echo "xfsprogs already available"
+            exit 0
+          fi
+          command -v apt-get >/dev/null 2>&1 || {
+            echo "::error::xfsprogs is required for quota-backed agentshare storage and this runner has no apt-get"
+            exit 1
+          }
+          sudo apt-get update
+          sudo env DEBIAN_FRONTEND=noninteractive \
+            apt-get install -y --no-install-recommends xfsprogs
+          command -v mkfs.xfs
+          command -v xfs_quota
+
+      - name: Reap stale E2E VMs
+        # Cancelled/killed runs can skip the E2E_CLEANUP_VM trap. Before this
+        # single E2E lane starts provisioning, clear scoped VMs, DHCP
+        # reservations, VM dirs, and IP registry rows left by earlier
+        # non-active runs so they cannot exhaust titan memory/swap or the
+        # static 192.168.122.201-254 allocation range again.
+        run: |
+          set -euo pipefail
+
+          sudo env \
+            AGENTIC_BACKEND="${{ matrix.backend }}" \
+            scripts/reap-e2e-vms.sh \
+              --backend "${{ matrix.backend }}" \
+              --vm-root "${VM_STORAGE_DIR}" \
+              --virsh-uri "${LIBVIRT_DEFAULT_URI}"
+
+      - name: Install Cloud Hypervisor backend
+        if: matrix.backend == 'cloud-hypervisor'
+        run: |
+          set -euo pipefail
+          images/qemu/install-cloud-hypervisor.sh
+          /opt/agentic-sandbox/cloud-hypervisor/current/bin/cloud-hypervisor --version
+          /opt/agentic-sandbox/cloud-hypervisor/current/bin/ch-remote --version
+
+      - name: Bootstrap base-image manifest if missing
+        # The verify gate from images/qemu/lib/verify.sh refuses to create an
+        # overlay disk when /mnt/ops/base-images/manifest.json is absent —
+        # by design, to detect tampering between operations. On a fresh CI
+        # runner (or after the base image is rebuilt out-of-band), the
+        # manifest may not yet exist. Bootstrap it once, idempotently, so
+        # E2E can proceed. The recorded sha then protects subsequent runs.
+        #
+        # This is the operator-blessed bootstrap path quoted directly in
+        # the gate's failure message — NOT AIWG_SKIP_BASE_VERIFY=1, which
+        # the script itself flags as "NOT recommended".
+        run: |
+          set -euo pipefail
+          BASE_DIR="${BASE_IMAGES_DIR:-${AIWG_BASE_IMAGE_DIR:-/mnt/ops/base-images}}"
+          BASE_IMG="${BASE_DIR}/ubuntu-server-24.04-agent.qcow2"
+          MANIFEST="${BASE_DIR}/manifest.json"
+          BASE_NAME="$(basename "${BASE_IMG}")"
+          if [[ ! -f "${BASE_IMG}" ]]; then
+            echo "[bootstrap] base image not found at ${BASE_IMG}; nothing to do"
+            exit 0
+          fi
+          if [[ -f "${MANIFEST}" ]] && command -v jq >/dev/null 2>&1; then
+            expected="$(jq -r --arg name "${BASE_NAME}" '.[$name].sha256 // ""' "${MANIFEST}")"
+            if [[ -n "${expected}" ]]; then
+              actual="$(sha256sum "${BASE_IMG}" | awk '{print $1}')"
+              if [[ "${actual}" != "${expected}" ]]; then
+                echo "::error::Base image manifest is stale for ${BASE_NAME}: expected ${expected}, actual ${actual}. Re-run images/qemu/build-base-image.sh 24.04 on titan or explicitly refresh /mnt/ops/base-images/manifest.json with record_qcow2_manifest after verifying the image provenance."
+                exit 1
+              fi
+              echo "[bootstrap] manifest entry already present and current for ${BASE_NAME}; skipping"
+              exit 0
+            fi
+          fi
+          if [[ -f "${MANIFEST}" ]] && ! command -v jq >/dev/null 2>&1; then
+            echo "::error::jq is required to validate existing base-image manifest ${MANIFEST}"
+            exit 1
+          fi
+          echo "[bootstrap] recording manifest for ${BASE_IMG}"
+          # shellcheck disable=SC1091
+          source images/qemu/lib/verify.sh
+          record_qcow2_manifest "${BASE_IMG}"
+
+      - name: Prepare dedicated quota-backed agentshare
+        run: |
+          set -euo pipefail
+          storage_dir="$(dirname "${AGENTSHARE_ROOT}")"
+          case "$storage_dir" in
+            /var/tmp/agentic-ci-agentshare-[0-9]*-[12]) ;;
+            *) echo "::error::Refusing unexpected CI agentshare path: $storage_dir"; exit 1 ;;
+          esac
+          if mountpoint -q "${AGENTSHARE_ROOT}"; then
+            sudo umount "${AGENTSHARE_ROOT}"
+          fi
+          if [[ -e "${AGENTSHARE_BACKING_FILE}" ]]; then
+            sudo unlink "${AGENTSHARE_BACKING_FILE}"
+          fi
+          sudo rmdir "${AGENTSHARE_ROOT}" "$storage_dir" 2>/dev/null || true
+          sudo \
+            AGENTSHARE_ROOT="${AGENTSHARE_ROOT}" \
+            AGENTSHARE_BACKING_FILE="${AGENTSHARE_BACKING_FILE}" \
+            AGENTSHARE_SIZE_GIB=8 \
+            AGENTSHARE_PERSIST=0 \
+            AGENTSHARE_STORAGE_MODE=loopback \
+            images/qemu/setup-agentshare.sh
+          sudo \
+            AGENTSHARE_ROOT="${AGENTSHARE_ROOT}" \
+            AGENTIC_REQUIRE_DEDICATED_AGENTSHARE=1 \
+            scripts/verify-container-security.sh
+
+      - name: Run E2E tests
+        env:
+          AGENTIC_BACKEND: ${{ matrix.backend }}
+          # Keep backend state and identity material disjoint while retaining
+          # the numeric agentic-e2e-* naming contract used by the reaper.
+          TEST_VM: agentic-e2e-${{ github.run_id }}${{ matrix.vm_slot }}
+          E2E_CLEANUP_VM: "1"
+          E2E_VM_SETUP: "1"
+          E2E_VM_READY_TIMEOUT: "900"
+          E2E_REQUIRE_AGENTSHARE: "1"
+          E2E_REQUIRE_AGENTSHARE_QUOTA: "1"
+          E2E_DISK_QUOTA: "2G"
+          AGENTIC_VM_SSH_WAIT_SECONDS: "900"
+          # Cloud-init may still be installing packages from a slow mirror
+          # after SSH first becomes available.
+          AGENTIC_AGENTSHARE_READY_TIMEOUT_SECONDS: "600"
+          AGENTIC_GRPC_VSOCK_PORT: "8120"
+          AIWG_QCOW2_VERIFY_SHA256: "0"
+        run: |
+          # Job-level `timeout-minutes` is NOT honored by this Gitea act_runner
+          # (run #887's E2E ran ~183m past a 90m cap before failing). Bound the
+          # E2E lane with a real shell timeout instead. SIGTERM first so make's
+          # E2E_CLEANUP_VM trap can tear the VM down, then SIGKILL after grace.
+          #
+          # Redirect the entire VM orchestration tree to a regular file. QEMU,
+          # libvirt, cloud-hypervisor, or a short-lived helper may outlive the
+          # command that spawned it and retain inherited stdout/stderr. If that
+          # descriptor is act_runner's step pipe, the runner waits forever even
+          # after every test passes. A regular file has no pipe EOF dependency;
+          # replay it after make returns so the Actions record stays complete.
+          # Tune only after recording new shared-runner capacity evidence.
+          e2e_log="$(mktemp "${TMPDIR:-/tmp}/agentic-e2e-step.XXXXXX.log")"
+          # Give the complete E2E tree its own session/process group. Some VM
+          # helpers can survive their direct parent after a successful test;
+          # act_runner tracks those descendants and otherwise holds the job
+          # open even though the regular-file log has already replayed. Reap
+          # only this run-scoped group after its leader returns.
+          setsid timeout --signal=TERM --kill-after=180s 75m make test-e2e \
+            >"$e2e_log" 2>&1 &
+          e2e_group=$!
+          set +e
+          wait "$e2e_group"
+          rc=$?
+          set -e
+          if kill -0 -- "-$e2e_group" 2>/dev/null; then
+            echo "[cleanup] Reaping surviving E2E process group $e2e_group" >>"$e2e_log"
+            kill -TERM -- "-$e2e_group" 2>/dev/null || true
+            for _ in {1..20}; do
+              kill -0 -- "-$e2e_group" 2>/dev/null || break
+              sleep 0.25
+            done
+            kill -KILL -- "-$e2e_group" 2>/dev/null || true
+          fi
+          cat "$e2e_log"
+          rm -f "$e2e_log"
+          rc=${rc:-0}
+          if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+            echo "::error::E2E exceeded the 75m shell-timeout backstop on $(hostname) and was terminated. Job-level timeout-minutes is not enforced by this runner; check runner capacity and the serialized E2E lane. Scoped VM agentic-e2e-${GITHUB_RUN_ID:-unknown} may need manual cleanup."
+            exit 1
+          fi
+          exit "$rc"
+
+      - name: Check default-profile libvirt restore latency (#643)
+        if: matrix.backend == 'libvirt'
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          restore_log="$(mktemp "${TMPDIR:-/tmp}/agentic-libvirt-restore.XXXXXX.log")"
+          set +e
+          sudo env \
+            BASE_IMAGES_DIR="${BASE_IMAGES_DIR}" \
+            VM_STORAGE_DIR="${VM_STORAGE_DIR}" \
+            LIBVIRT_RESTORE_LATENCY_BUDGET_MS=10000 \
+            timeout --signal=TERM --kill-after=30s 20m \
+              images/qemu/checkpoint-vm.sh selftest --latency-budget-ms 10000 \
+              >"$restore_log" 2>&1
+          rc=$?
+          set -e
+          output="$(cat "$restore_log")"
+          rm -f "$restore_log"
+          printf '%s\n' "$output"
+          if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+            echo "::error::phase=libvirt-checkpoint-selftest timeout=20m cleanup=script-trap"
+            exit 1
+          fi
+          [ "$rc" -eq 0 ] || exit "$rc"
+          # select(...) fails the step when the predicate is false while
+          # preserving the complete measurement object as retained evidence.
+          printf '%s\n' "$output" | tail -n1 | jq -e \
+            'select(.backend == "libvirt" and .profile == "q35-uefi-2g" and .passed == true and (.restore_duration_ms <= .budget_ms))' \
+            > artifacts/libvirt-restore-latency.json
+
+      - name: Upload libvirt restore-latency evidence
+        if: matrix.backend == 'libvirt' && always()
+        uses: actions/upload-artifact@c6a366c94c3e0affe28c06c8df20a878f24da3cf  # v3.2.2
+        with:
+          name: libvirt-restore-latency-${{ github.run_id }}
+          path: artifacts/libvirt-restore-latency.json
+          retention-days: 30
+
+      - name: Reap this run's E2E VM (always)
+        # The `make test-e2e` E2E_CLEANUP_VM trap tears the VM down on normal or
+        # SIGTERM exit, but a SIGKILL/cancellation skips it, leaking
+        # agentic-e2e-<run_id> (running libvirt domain + root-owned disk under
+        # /var/lib/agentic-sandbox/vms). This always() step reaps this run's VM
+        # on every outcome. E2E is a single serialized lane
+        # (concurrency: agentic-sandbox-vm-e2e, cancel-in-progress: false), so
+        # reaping all agentic-e2e-* here cannot disturb a concurrent run and
+        # also mops up any prior straggler. sudo so root-owned qcow2/xml are
+        # removable. Runner-death leaks (no step runs at all) are caught by the
+        # next run's pre-run "Reap stale E2E VMs" sweep. (#562)
+        if: always()
+        run: |
+          set -euo pipefail
+          sudo env \
+            AGENTIC_BACKEND="${{ matrix.backend }}" \
+            scripts/reap-e2e-vms.sh \
+              --backend "${{ matrix.backend }}" \
+              --vm-root "${VM_STORAGE_DIR}" \
+              --virsh-uri "${LIBVIRT_DEFAULT_URI}"
+
+      - name: Remove dedicated CI agentshare
+        if: always()
+        run: |
+          set -euo pipefail
+          storage_dir="$(dirname "${AGENTSHARE_ROOT}")"
+          case "$storage_dir" in
+            /var/tmp/agentic-ci-agentshare-[0-9]*-[12]) ;;
+            *) echo "::error::Refusing unexpected CI agentshare path: $storage_dir"; exit 1 ;;
+          esac
+          if mountpoint -q "${AGENTSHARE_ROOT}"; then
+            sudo umount "${AGENTSHARE_ROOT}"
+          fi
+          if [[ -e "${AGENTSHARE_BACKING_FILE}" ]]; then
+            sudo unlink "${AGENTSHARE_BACKING_FILE}"
+          fi
+          sudo rmdir "${AGENTSHARE_ROOT}" "$storage_dir" 2>/dev/null || true
+
+  security:
+    name: Security Scan
+    # Security scanning needs host tooling, but no VM substrate.
+    runs-on: rust
+    continue-on-error: true
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+
+      - name: Install Trivy
+        run: |
+          if ! command -v trivy >/dev/null 2>&1; then
+            if ! curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+              | sudo sh -s -- -b /usr/local/bin; then
+              echo "::warning::Trivy install failed; security scan will emit a placeholder SARIF artifact."
+            fi
+          fi
+          if command -v trivy >/dev/null 2>&1; then
+            trivy --version
+          else
+            echo "::warning::Trivy is unavailable after install attempt."
+          fi
+
+      - name: Run Trivy filesystem scan
+        # Trivy occasionally panics inside trivy-db (upstream bug). Job-level
+        # continue-on-error isn't honored by Gitea Actions, so flag at step
+        # level. --exit-code 0 already prevents findings-driven failures;
+        # this guards the binary itself crashing.
+        continue-on-error: true
+        run: |
+          if command -v trivy >/dev/null 2>&1; then
+            trivy fs \
+              --format sarif \
+              --output trivy-results.sarif \
+              --exit-code 0 \
+              --severity HIGH,CRITICAL \
+              . || true
+          else
+            cat > trivy-results.sarif <<'SARIF'
+          {"version":"2.1.0","runs":[{"tool":{"driver":{"name":"Trivy","informationUri":"https://github.com/aquasecurity/trivy","rules":[]}},"results":[]}]}
+          SARIF
+          fi
+
+      - name: Upload Trivy results
+        # Gitea Actions speaks the GHES artifact API — v4+ is rejected
+        # with `GHESNotSupportedError`. Keep v3 until Gitea ships v4.
+        continue-on-error: true
+        uses: actions/upload-artifact@c6a366c94c3e0affe28c06c8df20a878f24da3cf  # v3.2.2
+        with:
+          name: trivy-results
+          path: trivy-results.sarif
+          retention-days: 30
+
+  # -------------------------------------------------------------------------
+  # Release-only jobs (tag pushes only). Phase 2 of the release-pipeline
+  # audit (#297): build versioned binary tarballs with SHA256SUMS and
+  # attach them to the Gitea release.
+  # -------------------------------------------------------------------------
+
+  release-binaries:
+    name: Build release binary tarballs (Linux)
+    runs-on: titan
+    if: startsWith(gitea.ref, 'refs/tags/v')
+    needs: [prerelease-gate, build, test]
+    strategy:
+      fail-fast: false
+      # Keep release CPU pressure bounded on the titan lane while release-E2E
+      # is also scheduled from this workflow (#363).
+      max-parallel: 1
+      matrix:
+        include:
+          # Linux x86_64 — native on the titan build runner.
+          # crates: all three (management has libvirt available natively).
+          - target: x86_64-unknown-linux-gnu
+            crates: "management agent-rs cli"
+          # x86_64-unknown-linux-musl: excludes `management` — `agentic-mgmt`
+          # hard-links to system libvirt via the `virt` FFI crate, and there
+          # is no musl-compatible libvirt sysroot. Same exclusion pattern as
+          # aarch64-unknown-linux-gnu below. The musl tarball ships the in-VM
+          # binaries (agent-client, sandboxctl) only; control-plane stays
+          # x86_64-linux-gnu.
+          - target: x86_64-unknown-linux-musl
+            crates: "agent-rs cli"
+          # Linux aarch64 — cross-compiled on the Linux runner with the GNU
+          # aarch64 toolchain. EXCLUDES `management`: `agentic-mgmt`
+          # hard-links to system libvirt and this release lane only ships the
+          # in-VM binaries for non-x86_64 Linux targets.
+          - target: aarch64-unknown-linux-gnu
+            crates: "agent-rs cli"
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+
+      - name: Install musl target (musl matrix entry only)
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: |
+          rustup target add x86_64-unknown-linux-musl
+          # musl-tools provides the linker. Pre-installed on most runners;
+          # this is defensive in case it's missing.
+          if ! command -v musl-gcc >/dev/null 2>&1; then
+            sudo apt-get update && sudo apt-get install -y musl-tools
+          fi
+
+      - name: Install aarch64 GNU target (aarch64 Linux matrix entry only)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          set -euo pipefail
+          rustup target add aarch64-unknown-linux-gnu
+          if ! command -v aarch64-linux-gnu-gcc >/dev/null 2>&1 || [ ! -d /usr/aarch64-linux-gnu/include ]; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+          fi
+
+      - name: Build ${{ matrix.crates }} for ${{ matrix.target }}
+        env:
+          TARGET: ${{ matrix.target }}
+          CRATES: ${{ matrix.crates }}
+          # roko is capacity:2 + --cpus=8 (two concurrent build jobs, 8 cores
+          # each). Match cargo fan-out to the per-container cap. Two non-E2E
+          # jobs may overlap; the VM-backed E2E job is serialized repo-wide by
+          # its `agentic-sandbox-vm-e2e` concurrency group, so VM tests never
+          # run in parallel. thin-LTO/cgu=16 keeps peak memory in check.
+          CARGO_BUILD_JOBS: "8"
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+        run: |
+          set -euo pipefail
+          for crate in $CRATES; do
+            ( cd "$crate" && cargo build --release --target "$TARGET" )
+          done
+
+      - name: Package tarball + checksum
+        env:
+          TARGET: ${{ matrix.target }}
+          CRATES: ${{ matrix.crates }}
+        run: |
+          set -euo pipefail
+          case "$TARGET" in
+            x86_64-unknown-linux-gnu)    ARCH_LIBC="x86_64-linux-gnu"   ;;
+            x86_64-unknown-linux-musl)   ARCH_LIBC="x86_64-linux-musl"  ;;
+            aarch64-unknown-linux-gnu)   ARCH_LIBC="aarch64-linux-gnu"  ;;
+            *) echo "::error::unknown TARGET $TARGET"; exit 1 ;;
+          esac
+
+          TAG_NAME="${GITHUB_REF_NAME}"
+          PKG="agentic-sandbox-${TAG_NAME}-${ARCH_LIBC}"
+          STAGE="$(mktemp -d)/${PKG}"
+          mkdir -p "$STAGE"
+
+          for crate in $CRATES; do
+            case "$crate" in
+              management) bin=agentic-mgmt ;;
+              agent-rs)   bin=agent-client ;;
+              cli)        bin=sandboxctl   ;;
+              *) echo "::error::unknown crate $crate"; exit 1 ;;
+            esac
+            cp "${crate}/target/${TARGET}/release/${bin}" "$STAGE/"
+            echo "staged: ${bin}"
+            if [ "$crate" = "management" ]; then
+              cp "${crate}/target/${TARGET}/release/vm-event-bridge" "$STAGE/"
+              echo "staged: vm-event-bridge"
+            fi
+          done
+
+          cp README.md "$STAGE/" 2>/dev/null || true
+          cp LICENSE "$STAGE/" 2>/dev/null || true
+          cp CHANGELOG.md "$STAGE/" 2>/dev/null || true
+
+          mkdir -p dist
+          tar -C "$(dirname "$STAGE")" -czf "dist/${PKG}.tar.gz" "${PKG}"
+          ( cd dist && sha256sum "${PKG}.tar.gz" > "${PKG}.tar.gz.sha256" )
+
+          ls -la dist/
+          cat "dist/${PKG}.tar.gz.sha256"
+
+      - name: Upload tarball + checksum as workflow artifact
+        uses: actions/upload-artifact@c6a366c94c3e0affe28c06c8df20a878f24da3cf  # v3.2.2
+        with:
+          name: release-binaries-${{ matrix.target }}
+          path: dist/
+          retention-days: 14
+
+  # -------------------------------------------------------------------------
+  # Apple Silicon host-direct builds via SSH-from-Linux-runner pattern.
+  #
+  # Darwin release artifacts are deferred from the current public release
+  # matrix. Keep the mutsu lane here as disabled implementation history until
+  # macOS support is promoted again; publication and mirror jobs must not depend
+  # on it while deferred.
+  #
+  # Why SSH instead of native runs-on:mutsu: per fortemi/publish-sidecar.yml,
+  # the native act_runner path "has persistently failed task-fetch via gRPC
+  # due to a reverse-proxy issue, causing every sidecar release since
+  # 2026-04-14 to be cancelled mid-build." The SSH-from-ubuntu pattern is
+  # the proven path.
+  #
+  # Optional while deferred: mutsu SSH key (PEM private key for
+  # manitcor@10.0.42.41). Linux aarch64 builds run in the regular Linux release
+  # matrix above.
+  # -------------------------------------------------------------------------
+
+  release-binaries-mutsu:
+    name: Build release binary tarballs (Darwin deferred)
+    # Disabled production release history only. If re-enabled, Titan performs
+    # SSH orchestration and all Darwin compilation runs on mutsu. Teroknor is
+    # not a supported builder or orchestrator for this project (#671).
+    runs-on: titan
+    if: false
+    needs: [prerelease-gate, build, test]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macOS aarch64 — native build on mutsu. Production management
+          # packaging remains deferred even though the no-default-features
+          # validation build is now covered by macos-validation.yml.
+          - target: aarch64-apple-darwin
+            crates: "agent-rs cli"
+            cargo_cmd: build
+    steps:
+      - name: Checkout tagged commit
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+
+      - name: Check mutsu SSH key credential presence
+        id: secret
+        env:
+          # The mutsu SSH key is fetched from vault at runtime.
+          VAULT_ROLE: ${{ secrets.VAULT_CI_ROLE_ID }}
+          VAULT_SID: ${{ secrets.VAULT_CI_SECRET_ID }}
+        run: |
+          if [ -z "${VAULT_ROLE}" ] || [ -z "${VAULT_SID}" ]; then
+            echo "::error::VAULT_CI_ROLE_ID/VAULT_CI_SECRET_ID required to fetch the mutsu SSH key from vault when re-enabling deferred ${{ matrix.target }} builds."
+            exit 1
+          fi
+          echo "available=true" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch mutsu SSH key from vault
+        if: steps.secret.outputs.available == 'true'
+        env:
+          VAULT_CI_ROLE_ID: ${{ secrets.VAULT_CI_ROLE_ID }}
+          VAULT_CI_SECRET_ID: ${{ secrets.VAULT_CI_SECRET_ID }}
+        run: |
+          set -euo pipefail
+          ci/vault-fetch.sh <<'SPEC'
+          keyfile MUTSU_KEY_FILE ${MUTSU_SSH_KEY_VAULT_PATH} ${MUTSU_SSH_KEY_VAULT_FIELD}
+          SPEC
+
+      - name: Set up SSH to mutsu
+        if: steps.secret.outputs.available == 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          # Key was fetched to a mode-600 file in the previous step (never
+          # printed). tr -d '\r' strips any CRLF the key may carry.
+          tr -d '\r' < "$MUTSU_KEY_FILE" > ~/.ssh/mutsu_key
+          rm -f "$MUTSU_KEY_FILE"
+          chmod 600 ~/.ssh/mutsu_key
+          if ! ssh-keygen -y -f ~/.ssh/mutsu_key >/dev/null 2>&1; then
+            echo "::error::mutsu SSH key parses as invalid"
+            ssh-keygen -y -f ~/.ssh/mutsu_key 2>&1 || true
+            exit 1
+          fi
+          timeout 30s ssh-keyscan -T 10 -t ed25519 10.0.42.41 >> ~/.ssh/known_hosts 2>/dev/null || true
+
+      - name: Build ${{ matrix.crates }} for ${{ matrix.target }} on mutsu
+        if: steps.secret.outputs.available == 'true'
+        env:
+          TARGET: ${{ matrix.target }}
+          CRATES: ${{ matrix.crates }}
+          CARGO_CMD: ${{ matrix.cargo_cmd }}
+        run: |
+          set -euo pipefail
+          REPO_URL="https://token:${{ github.token }}@git.integrolabs.net/${{ github.repository }}.git"
+          BRANCH="${GITHUB_HEAD_REF:-${GITHUB_REF_NAME:-main}}"
+          SHA="${GITHUB_SHA}"
+          RUN_ID="${GITHUB_RUN_ID:-$$}"
+          BUILD_DIR="/Volumes/build/agentic-sandbox/builds/run-${RUN_ID}-${TARGET}"
+          SSH_OPTS=(-i ~/.ssh/mutsu_key -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o ConnectTimeout=20 -o ConnectionAttempts=3 -o ServerAliveInterval=30 -o ServerAliveCountMax=8)
+          SSH_TARGET="manitcor@10.0.42.41"
+
+          timeout --signal=TERM --kill-after=60s 70m ssh "${SSH_OPTS[@]}" "$SSH_TARGET" bash -s <<REMOTE
+          set -euo pipefail
+          ROOT=/Volumes/build/agentic-sandbox
+          export RUSTUP_HOME="\$ROOT/rustup"
+          export CARGO_HOME="\$ROOT/cargo"
+          export CARGO_TARGET_DIR="\$ROOT/target"
+          export PROTOC="\$ROOT/bin/protoc"
+          export PATH="\$ROOT/cargo/bin:\$HOME/.cargo/bin:\$ROOT/bin:\$ROOT/rustup/toolchains/stable-aarch64-apple-darwin/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+
+          echo "remote rust tooling:"
+          command -v rustup || true
+          command -v cargo || true
+          command -v rustc || true
+          rustc --version || true
+          cargo --version || true
+
+          mkdir -p "${BUILD_DIR}"
+          cd "${BUILD_DIR}"
+
+          if [ -d .git ]; then
+            git fetch --depth 1 origin "${SHA}"
+            git checkout "${SHA}"
+          else
+            git clone --depth 1 --branch "${BRANCH}" "${REPO_URL}" .
+            git checkout "${SHA}"
+          fi
+
+          # Defensive: ensure the rust std target for this triple exists.
+          if command -v rustup >/dev/null 2>&1; then
+            rustup target add "${TARGET}"
+          elif ! rustc --print target-libdir --target "${TARGET}" >/dev/null 2>&1; then
+            echo "::error::rustup is unavailable and rustc cannot resolve target ${TARGET}"
+            echo "::error::Install rustup in \$ROOT/cargo/bin or \$HOME/.cargo/bin on mutsu, or preinstall the ${TARGET} standard library."
+            exit 1
+          else
+            echo "rustup unavailable; target ${TARGET} already resolves via rustc"
+          fi
+
+          for crate in ${CRATES}; do
+            echo ">>> cargo ${CARGO_CMD} --release --target ${TARGET} (\${crate})"
+            ( cd "\${crate}" && cargo ${CARGO_CMD} --release --target "${TARGET}" )
+          done
+
+          # Stage binaries to a per-target scratch dir for scp pickup.
+          OUT=/tmp/agentic-sandbox-build-${RUN_ID}-${TARGET}
+          rm -rf "\$OUT" && mkdir -p "\$OUT"
+          for crate in ${CRATES}; do
+            case "\${crate}" in
+              management) bin=agentic-mgmt ;;
+              agent-rs)   bin=agent-client ;;
+              cli)        bin=sandboxctl   ;;
+              *) echo "::error::unknown crate \${crate}"; exit 1 ;;
+            esac
+            cp "\$CARGO_TARGET_DIR/${TARGET}/release/\${bin}" "\$OUT/\${bin}"
+            file "\$OUT/\${bin}"
+          done
+
+          if [ "${TARGET}" = "aarch64-apple-darwin" ]; then
+            "\$OUT/sandboxctl" --version
+            file "\$OUT/sandboxctl" | grep -E 'Mach-O.*arm64'
+            file "\$OUT/agent-client" | grep -E 'Mach-O.*arm64'
+          fi
+
+          # Also stage README/LICENSE/CHANGELOG so the tarball matches the linux flow.
+          cp README.md LICENSE CHANGELOG.md "\$OUT/" 2>/dev/null || true
+          echo "\$OUT" > /tmp/agentic-sandbox-build-${RUN_ID}-${TARGET}.outdir
+          REMOTE
+
+          # Pull the staged binaries back to the linux runner.
+          OUTDIR_REMOTE="/tmp/agentic-sandbox-build-${RUN_ID}-${TARGET}"
+          mkdir -p "build-staging/${TARGET}"
+          timeout --signal=TERM --kill-after=30s 10m scp "${SSH_OPTS[@]}" -r \
+            "${SSH_TARGET}:${OUTDIR_REMOTE}/*" \
+            "build-staging/${TARGET}/"
+          ls -la "build-staging/${TARGET}/"
+
+      - name: Package tarball + checksum
+        if: steps.secret.outputs.available == 'true'
+        env:
+          TARGET: ${{ matrix.target }}
+          CRATES: ${{ matrix.crates }}
+        run: |
+          set -euo pipefail
+          case "$TARGET" in
+            aarch64-apple-darwin)      ARCH_LIBC="aarch64-darwin"    ;;
+            aarch64-unknown-linux-gnu) ARCH_LIBC="aarch64-linux-gnu" ;;
+            *) echo "::error::unknown TARGET $TARGET"; exit 1 ;;
+          esac
+
+          TAG_NAME="${GITHUB_REF_NAME}"
+          PKG="agentic-sandbox-${TAG_NAME}-${ARCH_LIBC}"
+          STAGE="$(mktemp -d)/${PKG}"
+          mkdir -p "$STAGE"
+
+          cp -v build-staging/${TARGET}/* "$STAGE/"
+
+          # MGMT_EXCLUDED notice for management binaries (no libvirt sysroot).
+          if ! echo " $CRATES " | grep -q " management "; then
+            {
+              printf '%s\n' 'This archive does NOT include agentic-mgmt or vm-event-bridge.'
+              printf '%s\n' ''
+              printf '%s\n' 'The management binaries hard-link to the system libvirt C library and no'
+              printf '%s\n' 'aarch64-linux libvirt sysroot is available on the build host. The in-VM'
+              printf '%s\n' 'binaries (agent-client, sandboxctl) ship here; for the control plane use'
+              printf '%s\n' 'the x86_64-linux-gnu archive on an x86_64 host.'
+            } > "$STAGE/MGMT_EXCLUDED.txt"
+          fi
+
+          mkdir -p dist
+          tar -C "$(dirname "$STAGE")" -czf "dist/${PKG}.tar.gz" "${PKG}"
+          ( cd dist && sha256sum "${PKG}.tar.gz" > "${PKG}.tar.gz.sha256" )
+          ls -la dist/
+          cat "dist/${PKG}.tar.gz.sha256"
+
+      - name: Verify Apple Silicon host-direct tarball contents
+        if: steps.secret.outputs.available == 'true' && matrix.target == 'aarch64-apple-darwin'
+        run: |
+          set -euo pipefail
+          TARBALL=$(find dist -maxdepth 1 -name '*-aarch64-darwin.tar.gz' | head -1)
+          [ -n "$TARBALL" ]
+          TMP="$(mktemp -d)"
+          trap 'rm -rf "$TMP"' EXIT
+          tar -xzf "$TARBALL" -C "$TMP"
+          ROOT="$(find "$TMP" -maxdepth 1 -type d -name 'agentic-sandbox-*' | head -1)"
+          test -x "$ROOT/sandboxctl"
+          test -x "$ROOT/agent-client"
+          test -f "$ROOT/MGMT_EXCLUDED.txt"
+          file "$ROOT/sandboxctl" | grep -E 'Mach-O.*arm64'
+          file "$ROOT/agent-client" | grep -E 'Mach-O.*arm64'
+
+      # Non-blocking sidecar publish (mirrors fortemi/publish-sidecar.yml):
+      # attach the macOS tarball directly to the release instead of going
+      # through actions/upload-artifact + the release-attach `needs` gate.
+      # This is the step that previously hung the titan act_runner in its
+      # upload-artifact finalization; doing a plain curl attach here lands the
+      # asset before any post-step stall, and release-attach no longer waits on
+      # this job. Create-or-reuse mirrors release-attach so whichever job wins
+      # the race owns creation; the other reuses it.
+      - name: Attach Apple Silicon tarball to release
+        if: steps.secret.outputs.available == 'true' && startsWith(gitea.ref, 'refs/tags/v')
+        env:
+          GITEA_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO_FULL: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          BASE="${VERSION%%-*}"
+
+          # Recover REPO_FULL if Gitea masked it.
+          if [[ "$REPO_FULL" == *"***"* || -z "$REPO_FULL" ]]; then
+            REPO_URL=$(git remote get-url origin 2>/dev/null || echo "")
+            REPO_FULL="${REPO_URL#*://*/}"; REPO_FULL="${REPO_FULL%.git}"
+          fi
+          API="${{ github.server_url }}/api/v1/repos/${REPO_FULL}/releases"
+
+          TARBALL=$(find dist -maxdepth 1 -name '*-aarch64-darwin.tar.gz' | head -1)
+          [ -n "$TARBALL" ] || { echo "::error::no aarch64-darwin tarball in dist/"; exit 1; }
+
+          # Poll briefly for the release (release-attach may still be in the
+          # E2E gate). If it never appears, create it ourselves (create-or-reuse).
+          REL_ID=""
+          for i in $(seq 1 6); do
+            REL_ID=$(curl -sS -H "Authorization: token ${GITEA_TOKEN}" \
+              "${API}/tags/v${VERSION}" 2>/dev/null | jq -r '.id // empty')
+            [ -n "$REL_ID" ] && { echo "Found release v${VERSION} (id=$REL_ID)"; break; }
+            echo "Release v${VERSION} not present yet ($i/6)…"; sleep 10
+          done
+
+          if [ -z "$REL_ID" ]; then
+            echo "Release not found after polling — creating it (sidecar owns creation)."
+            BODY=$(awk -v v="$BASE" '
+              $0 ~ "^## \\[" v "\\]" { capture=1; next }
+              capture && $0 ~ /^## \[/ { exit }
+              capture { print }' CHANGELOG.md)
+            [ -n "$BODY" ] || BODY="Release v${VERSION} — see CHANGELOG.md."
+            PRERELEASE=false; [ "$VERSION" != "$BASE" ] && PRERELEASE=true
+            PAYLOAD=$(jq -nc --arg tag "v$VERSION" --arg name "v$VERSION" \
+              --arg body "$BODY" --argjson prerelease "$PRERELEASE" \
+              '{tag_name:$tag,name:$name,body:$body,draft:false,prerelease:$prerelease}')
+            HTTP=$(curl -sS -o /tmp/rel.json -w '%{http_code}' \
+              -X POST -H "Authorization: token ${GITEA_TOKEN}" \
+              -H "Content-Type: application/json" "$API" -d "$PAYLOAD")
+            case "$HTTP" in
+              201|409|422) : ;;
+              *) echo "::error::sidecar release create HTTP $HTTP"; cat /tmp/rel.json; exit 1 ;;
+            esac
+            REL_ID=$(curl -sS -H "Authorization: token ${GITEA_TOKEN}" \
+              "${API}/tags/v${VERSION}" | jq -r '.id // empty')
+            [ -n "$REL_ID" ] || { echo "::error::could not resolve release id"; exit 1; }
+          fi
+
+          ASSET_API="${{ github.server_url }}/api/v1/repos/${REPO_FULL}/releases/${REL_ID}/assets"
+          RELEASE_API="${{ github.server_url }}/api/v1/repos/${REPO_FULL}/releases/${REL_ID}"
+          for asset in "$TARBALL" "${TARBALL}.sha256"; do
+            [ -f "$asset" ] || continue
+            name=$(basename "$asset")
+            echo "Uploading $name …"
+            HTTP=$(curl -sS -o /tmp/asset.json -w '%{http_code}' \
+              -X POST -H "Authorization: token ${GITEA_TOKEN}" \
+              -F "attachment=@${asset}" "${ASSET_API}?name=${name}")
+            case "$HTTP" in
+              201) echo "  ✓ uploaded $name" ;;
+              409)
+                existing_url="$(
+                  curl -fsSL -H "Authorization: token ${GITEA_TOKEN}" "$RELEASE_API" |
+                    jq -er --arg name "$name" '
+                      [.assets[] | select(.name == $name)] |
+                      if length == 1 then .[0].browser_download_url else error("asset lookup") end
+                    '
+                )"
+                existing="$(mktemp)"
+                curl -fsSL -H "Authorization: token ${GITEA_TOKEN}" \
+                  "$existing_url" -o "$existing"
+                [[ "$(sha256sum "$existing" | awk '{print $1}')" == \
+                  "$(sha256sum "$asset" | awk '{print $1}')" ]] \
+                  || { rm -f "$existing"; echo "::error::existing asset digest mismatch: $name"; exit 1; }
+                rm -f "$existing"
+                echo "  = $name already attached with identical digest"
+                ;;
+              *) echo "::error::upload $name HTTP $HTTP"; cat /tmp/asset.json; exit 1 ;;
+            esac
+          done
+          echo "Apple Silicon tarball attached to release v${VERSION}."
+
+      - name: Cleanup remote build dir
+        if: always() && steps.secret.outputs.available == 'true'
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          RUN_ID="${GITHUB_RUN_ID:-$$}"
+          SSH_OPTS=(-i ~/.ssh/mutsu_key -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o ConnectTimeout=20 -o ConnectionAttempts=3 -o ServerAliveInterval=30 -o ServerAliveCountMax=8)
+          timeout --signal=TERM --kill-after=60s 5m ssh "${SSH_OPTS[@]}" manitcor@10.0.42.41 \
+            "rm -rf /Volumes/build/agentic-sandbox/builds/run-${RUN_ID}-${TARGET} /tmp/agentic-sandbox-build-${RUN_ID}-${TARGET}" \
+            || true
+
+      - name: Cleanup SSH key
+        if: always()
+        run: rm -f ~/.ssh/mutsu_key
+
+  release-linux-packages:
+    name: Build release Linux packages (deb/rpm)
+    runs-on: titan
+    if: startsWith(gitea.ref, 'refs/tags/v')
+    # Serialized AFTER release-binaries (not just build/test) so the two heavy
+    # x86_64 management/package builds never run concurrently on `titan` — the
+    # exact "killed without logs" saturation documented on the release-binaries
+    # job. release-attach already waits on both, so this only reshapes ordering.
+    needs: [prerelease-gate, build, test, release-binaries]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+
+      - name: Install package tooling
+        run: |
+          set -euo pipefail
+          if ! command -v rpmbuild >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends rpm
+          fi
+          command -v dpkg-deb
+          command -v rpmbuild
+
+      - name: Build x86_64 Linux package binaries
+        env:
+          TARGET: x86_64-unknown-linux-gnu
+          # roko is capacity:2 + --cpus=8; match cargo fan-out to the per-job
+          # cap. thin-LTO/cgu=16 keeps peak memory low even with two build jobs
+          # overlapping. VM-backed E2E stays serialized by its concurrency group.
+          CARGO_BUILD_JOBS: "8"
+        run: |
+          set -euo pipefail
+          for crate in management agent-rs cli; do
+            ( cd "$crate" && cargo build --release --target "$TARGET" )
+          done
+          (
+            cd tools/celld-callback-relay
+            cargo build --release --target "$TARGET"
+          )
+
+      - name: Build .deb and .rpm packages
+        run: |
+          set -euo pipefail
+          scripts/package-linux.sh --version "${GITHUB_REF_NAME}"
+
+      - name: Validate Linux installer script
+        run: |
+          set -euo pipefail
+          DEB=$(find dist/packages -maxdepth 1 -name '*.deb' | head -1)
+          RPM=$(find dist/packages -maxdepth 1 -name '*.rpm' | head -1)
+          bash -n scripts/install.sh
+          tests/package/test-install-script.sh
+          scripts/install.sh --local-package "$DEB" --dry-run
+          scripts/install.sh --local-package "$RPM" --dry-run
+
+      - name: Validate package metadata
+        run: |
+          set -euo pipefail
+          DEB=$(find dist/packages -maxdepth 1 -name '*.deb' | head -1)
+          RPM=$(find dist/packages -maxdepth 1 -name '*.rpm' | head -1)
+          [ -n "$DEB" ] && [ -n "$RPM" ]
+          dpkg-deb --info "$DEB"
+          dpkg-deb --contents "$DEB" | grep -E '/usr/bin/(agentic-mgmt|agent-client|sandboxctl|vm-event-bridge|agentic-host-runtime-daemon)$'
+          dpkg-deb --contents "$DEB" | grep -E '/usr/bin/agentic-sandbox( -> sandboxctl)?$'
+          dpkg-deb --contents "$DEB" | grep -E '/usr/libexec/agentic-sandbox/agentic-celld-qemu-cleanup-helper$'
+          RPMDB="$(pwd)/dist/packages/rpmdb"
+          mkdir -p "$RPMDB"
+          rpm --dbpath "$RPMDB" -qip "$RPM"
+          rpm --dbpath "$RPMDB" -qlp "$RPM" | grep -E '^/usr/bin/(agentic-mgmt|agent-client|sandboxctl|agentic-sandbox|vm-event-bridge|agentic-host-runtime-daemon)$'
+          rpm --dbpath "$RPMDB" -qlp "$RPM" | grep -E '^/usr/libexec/agentic-sandbox/agentic-celld-qemu-cleanup-helper$'
+          test -f deploy/packaging/systemd/agentic-mgmt.service
+          test -f deploy/packaging/systemd/agent-client.service
+
+      - name: Smoke-test package install/uninstall
+        run: |
+          set -euo pipefail
+          tests/package/smoke-linux-packages.sh --required
+
+      - name: Upload Linux packages as workflow artifact
+        uses: actions/upload-artifact@c6a366c94c3e0affe28c06c8df20a878f24da3cf  # v3.2.2
+        with:
+          name: release-linux-packages
+          path: dist/packages/
+          retention-days: 14
+
+  release-macos-promote:
+    name: Promote immutable unsigned macOS developer package
+    runs-on: titan
+    if: startsWith(gitea.ref, 'refs/tags/v')
+    # Until Developer ID identities are provisioned, every tag must have an
+    # exact credential-free prepare bundle staged on mutsu. The published
+    # package is deliberately renamed developer-unsigned and is never
+    # represented as signed, notarized, stapled, or production-trusted.
+    needs: [prerelease-gate, release-linux-packages]
+    steps:
+      - name: Checkout tagged commit
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+
+      - name: Fetch mutsu SSH key from Vault
+        env:
+          VAULT_CI_ROLE_ID: ${{ secrets.VAULT_CI_ROLE_ID }}
+          VAULT_CI_SECRET_ID: ${{ secrets.VAULT_CI_SECRET_ID }}
+        run: |
+          set -euo pipefail
+          ci/vault-fetch.sh <<'SPEC'
+          keyfile MUTSU_KEY_FILE ${MUTSU_SSH_KEY_VAULT_PATH} ${MUTSU_SSH_KEY_VAULT_FIELD}
+          SPEC
+
+      - name: Prepare pinned SSH transport
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          tr -d '\r' < "$MUTSU_KEY_FILE" > ~/.ssh/mutsu_key
+          rm -f "$MUTSU_KEY_FILE"
+          chmod 600 ~/.ssh/mutsu_key
+          ssh-keygen -y -f ~/.ssh/mutsu_key >/dev/null
+          [[ -n "$MUTSU_SSH_HOST_KEY" && -n "$MUTSU_SSH_HOST_KEY_FINGERPRINT" ]]
+          read -r host key_type key_material extra <<<"$MUTSU_SSH_HOST_KEY"
+          [[ "$host" == "10.0.42.41" && "$key_type" == "ssh-ed25519" && -z "${extra:-}" ]]
+          [[ "$key_material" =~ ^[A-Za-z0-9+/]+={0,2}$ ]]
+          [[ "$MUTSU_SSH_HOST_KEY_FINGERPRINT" =~ ^SHA256:[A-Za-z0-9+/]{43}$ ]]
+          printf '%s\n' "$MUTSU_SSH_HOST_KEY" > ~/.ssh/mutsu_known_hosts
+          chmod 600 ~/.ssh/mutsu_known_hosts
+          observed_fingerprint="$(
+            ssh-keygen -lf ~/.ssh/mutsu_known_hosts -E sha256 | awk 'NR == 1 {print $2}'
+          )"
+          [[ "$observed_fingerprint" == "$MUTSU_SSH_HOST_KEY_FINGERPRINT" ]]
+
+      - name: Fetch exact immutable developer bundle from mutsu
+        env:
+          DEVELOPER_RELEASE_TAG: ${{ vars.MACOS_DEVELOPER_RELEASE_TAG }}
+          DEVELOPER_PACKAGE_SHA256: ${{ vars.MACOS_DEVELOPER_PACKAGE_SHA256 }}
+          DEVELOPER_MANIFEST_SHA256: ${{ vars.MACOS_DEVELOPER_MANIFEST_SHA256 }}
+        run: |
+          set -euo pipefail
+          [[ "$DEVELOPER_RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$DEVELOPER_RELEASE_TAG" == "$GITHUB_REF_NAME" ]]
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$DEVELOPER_PACKAGE_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$DEVELOPER_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          SSH_TARGET="manitcor@10.0.42.41"
+          SSH_OPTS=(-i ~/.ssh/mutsu_key -o BatchMode=yes -o IdentitiesOnly=yes -o UserKnownHostsFile=~/.ssh/mutsu_known_hosts -o StrictHostKeyChecking=yes -o ConnectTimeout=20 -o ServerAliveInterval=30 -o ServerAliveCountMax=6)
+          BUNDLE="/Volumes/build/agentic-sandbox/macos-ceremony/prepared/${GITHUB_REF_NAME}/${GITHUB_SHA}/${DEVELOPER_MANIFEST_SHA256}/${DEVELOPER_PACKAGE_SHA256}"
+          mkdir -p developer-staging
+          scp -r "${SSH_OPTS[@]}" "${SSH_TARGET}:${BUNDLE}" developer-staging/
+
+      - name: Verify tag binding, immutable evidence, and every payload digest
+        env:
+          DEVELOPER_PACKAGE_SHA256: ${{ vars.MACOS_DEVELOPER_PACKAGE_SHA256 }}
+          DEVELOPER_MANIFEST_SHA256: ${{ vars.MACOS_DEVELOPER_MANIFEST_SHA256 }}
+        run: |
+          set -euo pipefail
+          [[ "$(git rev-parse "refs/tags/${GITHUB_REF_NAME}^{commit}")" == "$GITHUB_SHA" ]]
+          scripts/verify-macos-developer-bundle.sh \
+            --bundle-dir "developer-staging/${DEVELOPER_PACKAGE_SHA256}" \
+            --expected-package-sha256 "$DEVELOPER_PACKAGE_SHA256" \
+            --expected-manifest-sha256 "$DEVELOPER_MANIFEST_SHA256" \
+            --source-commit "$GITHUB_SHA" \
+            --release-tag "$GITHUB_REF_NAME" \
+            --output-dir dist/macos
+
+      - name: Upload exact unsigned developer package
+        uses: actions/upload-artifact@c6a366c94c3e0affe28c06c8df20a878f24da3cf  # v3.2.2
+        with:
+          name: release-macos-developer-unsigned
+          path: dist/macos/
+          retention-days: 14
+
+      - name: Remove local SSH material
+        if: always()
+        run: |
+          set -euo pipefail
+          rm -f ~/.ssh/mutsu_key ~/.ssh/mutsu_known_hosts
+          ci/vault-fetch.sh --cleanup
+
+  release-attach:
+    name: Create Gitea release + attach binaries
+    runs-on: titan
+    # Keep this as a plain tag/ref gate instead of `always() && ...`.
+    # Gitea 1.25 queues downstream `always()` jobs on non-tag branch/manual CI
+    # before resolving the tag predicate, which leaves green branch validation
+    # runs non-terminal behind no-op release publication jobs (#794).
+    # Tag pushes still require every release prerequisite to pass before
+    # publication.
+    #
+    # A skipped or failed immutable macOS developer bundle blocks release
+    # creation and every downstream mirror. New tags cannot silently omit the
+    # explicitly documented Apple Silicon developer package.
+    if: >
+      startsWith(gitea.ref, 'refs/tags/v') &&
+      needs.release-binaries.result == 'success' &&
+      needs.release-linux-packages.result == 'success' &&
+      needs.release-macos-promote.result == 'success' &&
+      needs.docker.result == 'success' &&
+      needs.integration.result == 'success'
+    # Wait for binary builds, container builds, and the E2E gate. Security scan
+    # is excluded (continue-on-error: true above). Publication must not run
+    # unless release-blocking substrate validation passes.
+    needs: [release-binaries, release-linux-packages, release-macos-promote, docker, integration]
+    steps:
+      - name: Checkout tagged commit
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+
+      - name: Download release-binaries artifacts
+        uses: actions/download-artifact@9bc31d5ccc31df68ecc42ccf4149144866c47d8a  # v3.0.2
+        with:
+          # No `name:` → downloads all artifacts from this run.
+          path: dist-staging/
+
+      - name: Flatten artifacts + aggregate checksums
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          # Matrix entries upload dist/ or dist/packages/ below their artifact names.
+          find dist-staging -type f \( \
+              -name '*.tar.gz' -o -name '*.tar.gz.sha256' \
+              -o -name '*.deb' -o -name '*.deb.sha256' \
+              -o -name '*.rpm' -o -name '*.rpm.sha256' \
+              -o -name '*.pkg' -o -name '*.dmg' -o -name '*.sha256' \
+              -o -name '*.release-evidence.json' -o -name '*.evidence.json' \
+              -o -name '*.payload-manifest.tsv' \
+              -o -name 'handoff.json' \
+              -o -name 'agentic-sandbox-install.sh' -o -name 'agentic-sandbox-install.sh.sha256' \
+              -o -name 'SHA256SUMS-linux-packages' -o -name 'SHA256SUMS-macos' \
+              -o -name 'SHA256SUMS-macos-developer' \
+            \) \
+            -exec cp -v {} dist/ \;
+          # Aggregate SHA256SUMS — one canonical file for the whole release.
+          ( cd dist && sha256sum *.tar.gz *.deb *.rpm agentic-sandbox-install.sh > SHA256SUMS )
+          ls -la dist/
+          echo "---"
+          cat dist/SHA256SUMS
+
+      - name: Resolve version + verify against tag (defense in depth)
+        id: version
+        run: |
+          set -euo pipefail
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          BASE="${TAG_VERSION%%-*}"
+          for f in management/Cargo.toml agent-rs/Cargo.toml cli/Cargo.toml; do
+            v=$(grep -m1 '^version = ' "$f" | cut -d'"' -f2)
+            if [ "$v" != "$BASE" ]; then
+              echo "::error::$f version $v ≠ tag base $BASE"; exit 1
+            fi
+          done
+          if ! grep -qE "^## \[${BASE//./\\.}\]" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md missing ## [${BASE}] section"; exit 1
+          fi
+          echo "version=$TAG_VERSION" >> "$GITHUB_OUTPUT"
+          [ "$TAG_VERSION" != "$BASE" ] \
+            && echo "prerelease=true"  >> "$GITHUB_OUTPUT" \
+            || echo "prerelease=false" >> "$GITHUB_OUTPUT"
+
+      - name: Extract release notes from CHANGELOG
+        id: notes
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.version.outputs.version }}"
+          BODY=$(awk -v v="$VERSION" '
+            $0 ~ "^## \\[" v "\\]" { capture=1; next }
+            capture && $0 ~ /^## \[/ { exit }
+            capture { print }
+          ' CHANGELOG.md)
+          [ -n "$BODY" ] || BODY="Release $VERSION — see CHANGELOG.md for details."
+          {
+            echo 'body<<RELEASE_NOTES_EOF'
+            echo "$BODY"
+            echo 'RELEASE_NOTES_EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create or reuse Gitea release
+        id: release
+        env:
+          GITEA_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO_FULL: ${{ github.repository }}
+        run: |
+          set -e
+          VERSION="${{ steps.version.outputs.version }}"
+          PRERELEASE="${{ steps.version.outputs.prerelease }}"
+
+          # Recover REPO_FULL if Gitea masked it.
+          if [[ "$REPO_FULL" == *"***"* || -z "$REPO_FULL" ]]; then
+            REPO_URL=$(git remote get-url origin)
+            REPO_FULL="${REPO_URL#*://*/}"
+            REPO_FULL="${REPO_FULL%.git}"
+          fi
+          echo "repo=$REPO_FULL" >> "$GITHUB_OUTPUT"
+
+          BODY=$(cat <<'CHANGELOG_BODY'
+          ${{ steps.notes.outputs.body }}
+          CHANGELOG_BODY
+          )
+          PAYLOAD=$(jq -nc \
+            --arg tag "v$VERSION" --arg name "v$VERSION" --arg body "$BODY" \
+            --argjson prerelease "$PRERELEASE" \
+            '{tag_name: $tag, name: $name, body: $body, draft: false, prerelease: $prerelease}')
+
+          API="${{ github.server_url }}/api/v1/repos/${REPO_FULL}/releases"
+          HTTP=$(curl -sS -o /tmp/rel.json -w '%{http_code}' \
+            -X POST -H "Authorization: token ${GITEA_TOKEN}" \
+            -H "Content-Type: application/json" "$API" -d "$PAYLOAD")
+          case "$HTTP" in
+            201) echo "Created release v$VERSION" ;;
+            409|422) echo "Release v$VERSION already exists — reusing" ;;
+            *) echo "::error::release create HTTP $HTTP"; cat /tmp/rel.json; exit 1 ;;
+          esac
+
+          # Resolve the release ID for the asset-upload step.
+          REL_ID=$(curl -sS -H "Authorization: token ${GITEA_TOKEN}" \
+            "${API}/tags/v${VERSION}" | jq -r '.id')
+          [ -n "$REL_ID" ] && [ "$REL_ID" != "null" ] \
+            || { echo "::error::could not resolve release id"; exit 1; }
+          echo "release_id=$REL_ID" >> "$GITHUB_OUTPUT"
+          echo "Release id: $REL_ID"
+
+      - name: Attach binary tarballs + SHA256SUMS to release
+        env:
+          GITEA_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          REPO="${{ steps.release.outputs.repo }}"
+          REL_ID="${{ steps.release.outputs.release_id }}"
+          ASSET_API="${{ github.server_url }}/api/v1/repos/${REPO}/releases/${REL_ID}/assets"
+          RELEASE_API="${{ github.server_url }}/api/v1/repos/${REPO}/releases/${REL_ID}"
+
+          for asset in dist/*; do
+            [ -f "$asset" ] || continue
+            name=$(basename "$asset")
+            echo "Uploading $name ..."
+            HTTP=$(curl -sS -o /tmp/asset.json -w '%{http_code}' \
+              -X POST -H "Authorization: token ${GITEA_TOKEN}" \
+              -F "attachment=@${asset}" \
+              "${ASSET_API}?name=${name}")
+            case "$HTTP" in
+              201) echo "  ✓ uploaded $name" ;;
+              409)
+                existing_url="$(
+                  curl -fsSL -H "Authorization: token ${GITEA_TOKEN}" "$RELEASE_API" |
+                    jq -er --arg name "$name" '
+                      [.assets[] | select(.name == $name)] |
+                      if length == 1 then .[0].browser_download_url else error("asset lookup") end
+                    '
+                )"
+                existing="$(mktemp)"
+                curl -fsSL -H "Authorization: token ${GITEA_TOKEN}" \
+                  "$existing_url" -o "$existing"
+                [[ "$(sha256sum "$existing" | awk '{print $1}')" == \
+                  "$(sha256sum "$asset" | awk '{print $1}')" ]] \
+                  || { rm -f "$existing"; echo "::error::existing asset digest mismatch: $name"; exit 1; }
+                rm -f "$existing"
+                echo "  = $name already attached with identical digest"
+                ;;
+              *)   echo "::error::upload $name HTTP $HTTP"; cat /tmp/asset.json; exit 1 ;;
+            esac
+          done
+
+          echo ""
+          echo "Release v${{ steps.version.outputs.version }} attached assets:"
+          curl -sS -H "Authorization: token ${GITEA_TOKEN}" \
+            "${{ github.server_url }}/api/v1/repos/${REPO}/releases/${REL_ID}" \
+            | jq -r '.assets[].name' | sort
+
+  # -------------------------------------------------------------------------
+  # Phase 3 release-pipeline jobs (audit § 6 Phase 3). Tag-only.
+  # Each guards on the required secret being present and skips with a clear
+  # log message when not configured, so the workflow surface is in place
+  # before operator secret provisioning happens.
+  # -------------------------------------------------------------------------
+
+  cargo-publish:
+    name: Publish crates to crates.io (#296)
+    runs-on: titan
+    if: >
+      startsWith(gitea.ref, 'refs/tags/v') &&
+      needs.release-attach.result == 'success'
+    needs: [release-attach]
+    steps:
+      - name: Checkout tagged commit
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+
+      - name: Check CARGO_REGISTRY_TOKEN presence
+        id: secret
+        env:
+          TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          if [ -z "${TOKEN}" ]; then
+            echo "::warning::CARGO_REGISTRY_TOKEN not configured — skipping cargo publish (see docs/releases/runbook.md)"
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=true"  >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Dry-run publish each crate
+        if: steps.secret.outputs.available == 'true'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Dep order: agent-rs (independent), then management + cli.
+          # Each `cargo publish --dry-run` validates packaging; real publish runs
+          # in the next step.
+          for crate in agent-rs management cli; do
+            ( cd "$crate" && cargo publish --dry-run --token "$CARGO_REGISTRY_TOKEN" )
+          done
+
+      - name: Publish to crates.io
+        if: steps.secret.outputs.available == 'true'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          for crate in agent-rs management cli; do
+            ( cd "$crate" && cargo publish --token "$CARGO_REGISTRY_TOKEN" )
+            # crates.io needs a moment between publishes for index propagation.
+            sleep 30
+          done
+          echo "All three crates published to crates.io"
+
+  multi-registry-push:
+    name: Mirror container images to public registries (#299/#478)
+    runs-on: titan
+    if: >
+      startsWith(gitea.ref, 'refs/tags/v') &&
+      needs.docker.result == 'success' &&
+      needs.integration.result == 'success'
+    # Public registry mirrors are release publication and must wait for tag E2E.
+    needs: [docker, integration]
+    steps:
+      # Needed so ci/vault-fetch.sh (GHCR token fetch) is on disk — this job
+      # otherwise only re-tags/pushes prebuilt images and wouldn't check out.
+      - name: Checkout repo
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+
+      - name: Check secrets presence
+        id: secret
+        env:
+          # GHCR_TOKEN is fetched from vault at runtime. QUAY is still a Gitea secret.
+          VAULT_ROLE: ${{ secrets.VAULT_CI_ROLE_ID }}
+          VAULT_SID: ${{ secrets.VAULT_CI_SECRET_ID }}
+          QUAY_U: ${{ secrets.QUAY_USERNAME }}
+          QUAY_P: ${{ secrets.QUAY_PASSWORD }}
+        run: |
+          if [ -z "${VAULT_ROLE}" ] || [ -z "${VAULT_SID}" ]; then
+            echo "::error::VAULT_CI_ROLE_ID/VAULT_CI_SECRET_ID required to fetch the GHCR token from vault for public release publication (#478)."
+            exit 1
+          fi
+          echo "ghcr=true" >> "$GITHUB_OUTPUT"
+          [ -n "${QUAY_U}" ] && [ -n "${QUAY_P}" ] \
+            && echo "quay=true"  >> "$GITHUB_OUTPUT" \
+            || echo "quay=false" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch GHCR token from vault
+        env:
+          VAULT_CI_ROLE_ID: ${{ secrets.VAULT_CI_ROLE_ID }}
+          VAULT_CI_SECRET_ID: ${{ secrets.VAULT_CI_SECRET_ID }}
+        run: |
+          set -euo pipefail
+          ci/vault-fetch.sh <<'SPEC'
+          env GHCR_TOKEN ${GHCR_TOKEN_VAULT_PATH} ${GHCR_TOKEN_VAULT_FIELD}
+          SPEC
+
+      - name: Login to GHCR
+        env:
+          GHCR_OWNER: ${{ vars.GHCR_OWNER }}
+        run: |
+          set -euo pipefail
+          owner="${GHCR_OWNER:-jmagly}"
+          echo "${GHCR_TOKEN}" | docker login ghcr.io -u "${owner}" --password-stdin
+
+      - name: Login to Quay
+        if: steps.secret.outputs.quay == 'true'
+        run: echo "${{ secrets.QUAY_PASSWORD }}" | docker login quay.io -u "${{ secrets.QUAY_USERNAME }}" --password-stdin
+
+      - name: Mirror release-tagged images
+        env:
+          INTERNAL_REG: git.integrolabs.net/roctinam/agentic-sandbox
+          TAG_NAME: ${{ github.ref_name }}
+          GHCR_OWNER: ${{ vars.GHCR_OWNER }}
+          QUAY_REPO: quay.io/${{ secrets.QUAY_USERNAME }}
+        run: |
+          set -euo pipefail
+          GHCR_REPO="ghcr.io/${GHCR_OWNER:-jmagly}"
+          # Public release matrix. The first column is the internal image name
+          # pushed by the docker job; the second is the user-facing package
+          # name on GHCR/Quay.
+          IMAGE_MATRIX='
+          agentic-mgmt|agentic-sandbox-mgmt
+          agent-client|agentic-sandbox-agent-client
+          agent|agentic-sandbox-agent
+          claude|agentic-sandbox-claude
+          codex|agentic-sandbox-codex
+          opencode|agentic-sandbox-opencode
+          automation-control|agentic-sandbox-automation-control
+          '
+
+          : > public-image-digests.jsonl
+
+          echo "$IMAGE_MATRIX" | while IFS='|' read -r internal public; do
+            [ -n "${internal}" ] || continue
+            SRC="${INTERNAL_REG}/${internal}:${TAG_NAME}"
+            echo "--- mirror $SRC"
+            platform_args=()
+            case "$internal" in
+              agentic-mgmt|agent-client) ;;
+              *) platform_args=(
+                --required-platform linux/amd64
+                --required-platform linux/arm64
+              ) ;;
+            esac
+
+            for tag in "${TAG_NAME}" latest; do
+              DST="${GHCR_REPO}/${public}:${tag}"
+              scripts/mirror-oci-index.sh \
+                --source "$SRC" \
+                --destination "$DST" \
+                --evidence public-image-digests.jsonl \
+                "${platform_args[@]}"
+
+              if [ "${{ steps.secret.outputs.quay }}" = "true" ]; then
+                QUAY_DST="${QUAY_REPO}/${public}:${tag}"
+                scripts/mirror-oci-index.sh \
+                  --source "$SRC" \
+                  --destination "$QUAY_DST" \
+                  --evidence public-image-digests.jsonl \
+                  "${platform_args[@]}"
+              fi
+            done
+          done
+
+          echo "Published release image digests:"
+          jq -sS 'sort_by(.destination)' public-image-digests.jsonl
+
+      - name: Smoke-test public GHCR release images
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+          GHCR_OWNER: ${{ vars.GHCR_OWNER }}
+        run: |
+          set -euo pipefail
+          GHCR_REPO="ghcr.io/${GHCR_OWNER:-jmagly}"
+          MGMT_REF="${GHCR_REPO}/agentic-sandbox-mgmt:${TAG_NAME}"
+          AGENT_REF="${GHCR_REPO}/agentic-sandbox-agent-client:${TAG_NAME}"
+          docker logout ghcr.io || true
+          docker pull "$MGMT_REF"
+          docker pull "$AGENT_REF"
+          docker run --rm --entrypoint /bin/sh "$MGMT_REF" \
+            -lc 'command -v agentic-mgmt >/dev/null && test -x "$(command -v agentic-mgmt)"'
+          docker run --rm --entrypoint /usr/local/bin/agent-client "$AGENT_REF" --help >/dev/null
+
+  sign-and-sbom:
+    name: Sign artifacts + generate SBOM (#300)
+    runs-on: titan
+    if: >
+      startsWith(gitea.ref, 'refs/tags/v') &&
+      needs.release-attach.result == 'success' &&
+      needs.multi-registry-push.result == 'success'
+    needs: [release-attach, multi-registry-push]
+    steps:
+      - name: Checkout tagged commit
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+
+      - name: Check signing secrets presence
+        id: secret
+        env:
+          COSIGN: ${{ secrets.COSIGN_KEY }}
+          # The GPG release key lives in vault, not in a Gitea secret. CI holds only its "secret zero" — the
+          # ci-agentic-sandbox AppRole role-id + secret-id. Both present ⇒
+          # vault-sourced GPG signing is enabled. (cosign is unchanged; no
+          # cosign key has been migrated to the vault.)
+          VAULT_CI_ROLE_ID: ${{ secrets.VAULT_CI_ROLE_ID }}
+          VAULT_CI_SECRET_ID: ${{ secrets.VAULT_CI_SECRET_ID }}
+        run: |
+          GPG_VAULT=false
+          if [ -n "${VAULT_CI_ROLE_ID}" ] && [ -n "${VAULT_CI_SECRET_ID}" ]; then
+            GPG_VAULT=true
+          fi
+          if [ -z "${COSIGN}" ] && [ "${GPG_VAULT}" = "false" ]; then
+            echo "::warning::No COSIGN_KEY and no vault CI AppRole (VAULT_CI_ROLE_ID/VAULT_CI_SECRET_ID) — skipping signatures; SBOM generation still runs"
+          fi
+          [ -n "${COSIGN}" ] && echo "cosign=true" >> "$GITHUB_OUTPUT" || echo "cosign=false" >> "$GITHUB_OUTPUT"
+          echo "gpg=${GPG_VAULT}" >> "$GITHUB_OUTPUT"
+          # SBOM generation needs no secret; gate on syft availability instead.
+          echo "syft=true" >> "$GITHUB_OUTPUT"
+
+      - name: Install cosign + syft (if needed)
+        if: steps.secret.outputs.cosign == 'true' || steps.secret.outputs.syft == 'true'
+        run: |
+          set -euo pipefail
+          TOOL_BIN="${PWD}/.tools/bin"
+          mkdir -p "$TOOL_BIN"
+          echo "$TOOL_BIN" >> "$GITHUB_PATH"
+          export PATH="$TOOL_BIN:$PATH"
+          if ! command -v cosign >/dev/null && [ "${{ steps.secret.outputs.cosign }}" = "true" ]; then
+            COSIGN_VERSION="v2.4.0"
+            curl -fsSL "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-amd64" \
+              -o "${TOOL_BIN}/cosign" && chmod +x "${TOOL_BIN}/cosign"
+          fi
+          if ! command -v syft >/dev/null && [ "${{ steps.secret.outputs.syft }}" = "true" ]; then
+            # syft installer pins the version + verifies SHA per supply-chain rule.
+            SYFT_VERSION="v1.18.0"
+            EXPECTED_SHA=""  # populate after first run; logs `observed` SHA for pinning
+            SCRIPT=$(curl -fsSL "https://raw.githubusercontent.com/anchore/syft/${SYFT_VERSION}/install.sh")
+            OBSERVED=$(printf '%s' "$SCRIPT" | sha256sum | awk '{print $1}')
+            echo "observed syft install-script SHA: ${OBSERVED}"
+            if [ -n "$EXPECTED_SHA" ] && [ "$OBSERVED" != "$EXPECTED_SHA" ]; then
+              echo "::error::syft install-script SHA drift"; exit 1
+            fi
+            printf '%s' "$SCRIPT" | sh -s -- -b "$TOOL_BIN" "$SYFT_VERSION"
+          fi
+
+      - name: Download release-binaries artifacts
+        if: steps.secret.outputs.gpg == 'true' || steps.secret.outputs.syft == 'true'
+        uses: actions/download-artifact@9bc31d5ccc31df68ecc42ccf4149144866c47d8a  # v3.0.2
+        with:
+          path: dist-staging/
+
+      - name: Stage tarballs locally
+        if: steps.secret.outputs.gpg == 'true' || steps.secret.outputs.syft == 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          find dist-staging -name '*.tar.gz' -exec cp -v {} dist/ \;
+          ls -la dist/
+
+      - name: Fetch registry credentials from vault
+        if: steps.secret.outputs.cosign == 'true' || steps.secret.outputs.syft == 'true'
+        env:
+          VAULT_CI_ROLE_ID: ${{ secrets.VAULT_CI_ROLE_ID }}
+          VAULT_CI_SECRET_ID: ${{ secrets.VAULT_CI_SECRET_ID }}
+        run: |
+          set -euo pipefail
+          ci/vault-fetch.sh <<'SPEC'
+          env REGISTRY_USER  ${REGISTRY_CREDENTIALS_VAULT_PATH} ${REGISTRY_USER_VAULT_FIELD}
+          env REGISTRY_TOKEN ${REGISTRY_CREDENTIALS_VAULT_PATH} ${REGISTRY_TOKEN_VAULT_FIELD}
+          env GHCR_TOKEN     ${GHCR_TOKEN_VAULT_PATH} ${GHCR_TOKEN_VAULT_FIELD}
+          SPEC
+
+      - name: Login to registries for image signing and SBOMs
+        if: steps.secret.outputs.cosign == 'true' || steps.secret.outputs.syft == 'true'
+        env:
+          GHCR_OWNER: ${{ vars.GHCR_OWNER }}
+        run: |
+          set -euo pipefail
+          echo "${REGISTRY_TOKEN}" | docker login "${REGISTRY}" -u "${REGISTRY_USER}" --password-stdin
+          echo "${GHCR_TOKEN}" | docker login ghcr.io -u "${GHCR_OWNER:-jmagly}" --password-stdin
+
+      - name: GPG-sign binary tarballs (key from vault)
+        if: steps.secret.outputs.gpg == 'true'
+        env:
+          VAULT_CI_ROLE_ID: ${{ secrets.VAULT_CI_ROLE_ID }}
+          VAULT_CI_SECRET_ID: ${{ secrets.VAULT_CI_SECRET_ID }}
+          VAULT_SECRET_PATH: ${{ vars.RELEASE_SIGNING_KEY_VAULT_PATH }}
+          # Non-secret release-key identity (from the secret's custom_metadata
+          # `scope`). Signing pins this key and asserts the fingerprint, so a
+          # wrong or rotated key fails the release loudly instead of silently
+          # producing signatures under an unexpected identity.
+          RELEASE_KEY_FPR: 9292EFCBB0EA41BECEEFDAFA9C1B8CE0E0E09C33
+          RELEASE_KEY_ID: 9C1B8CE0E0E09C33
+        run: |
+          set -euo pipefail
+
+          # Isolated, ephemeral keyring — never touch the runner's real
+          # GNUPGHOME, and scrub unconditionally on exit.
+          GNUPGHOME="$(mktemp -d)"; export GNUPGHOME
+          chmod 700 "$GNUPGHOME"
+          cleanup() { gpgconf --kill all 2>/dev/null || true; rm -rf "$GNUPGHOME"; }
+          trap cleanup EXIT
+          # Headless runner: never let gpg fall back to an interactive pinentry
+          # (that fails with "Screen or window too small"). Force loopback so a
+          # passphrase-less key signs directly, and a passphrase key fails with a
+          # clear "No passphrase given" instead of a pinentry error.
+          printf 'allow-loopback-pinentry\n' > "$GNUPGHOME/gpg-agent.conf"
+          printf 'pinentry-mode loopback\nbatch\nno-tty\n' > "$GNUPGHOME/gpg.conf"
+          gpgconf --kill gpg-agent 2>/dev/null || true
+
+          # 1) AppRole login (the only stored secret) → short-lived token.
+          #    role-id/secret-id go in the POST body via stdin, never on argv
+          #    (argv is visible in the process list); token stays unprinted.
+          VAULT_TOKEN="$(
+            jq -nc --arg r "$VAULT_CI_ROLE_ID" --arg s "$VAULT_CI_SECRET_ID" \
+              '{role_id:$r, secret_id:$s}' \
+            | curl -sk --max-time 15 -X POST --data @- \
+                "$VAULT_ADDR/v1/auth/approle/login" \
+            | jq -r '.auth.client_token // empty'
+          )"
+          [ -n "$VAULT_TOKEN" ] || { echo "::error::vault AppRole login failed"; exit 1; }
+
+          # 2) Read the release-signing-key secret (whole object; never printed),
+          #    then immediately revoke the token — we hold the material now.
+          SECRET_JSON="$(curl -sk --max-time 15 \
+            -H "X-Vault-Token: $VAULT_TOKEN" "$VAULT_ADDR/v1/$VAULT_SECRET_PATH")"
+          curl -sk --max-time 10 -H "X-Vault-Token: $VAULT_TOKEN" \
+            -X POST "$VAULT_ADDR/v1/auth/token/revoke-self" >/dev/null 2>&1 || true
+          VAULT_TOKEN=""
+          if [ "$(printf '%s' "$SECRET_JSON" | jq -r 'has("data")')" != "true" ]; then
+            echo "::error::could not read release signing key — check the CI AppRole policy scope"
+            exit 1
+          fi
+
+          # 3) Resolve the armored key + optional passphrase across the common
+          #    KV field names so this does not hard-depend on one induction
+          #    convention. Values only ever live in shell vars, never printed.
+          ARMORED="$(printf '%s' "$SECRET_JSON" \
+            | jq -r '.data.data.private_key // .data.data.armored_key // .data.data.armored_private_key // .data.data.key // empty')"
+          PASSPHRASE="$(printf '%s' "$SECRET_JSON" \
+            | jq -r '.data.data.passphrase // .data.data.password // empty')"
+          SECRET_JSON=""
+          [ -n "$ARMORED" ] || { echo "::error::no armored private key field in release signing key"; exit 1; }
+
+          # 4) Import via stdin (never on disk) and assert the expected key.
+          printf '%s' "$ARMORED" | gpg --batch --import
+          ARMORED=""
+          gpg --batch --list-secret-keys "$RELEASE_KEY_FPR" >/dev/null 2>&1 \
+            || { echo "::error::imported key lacks expected release fingerprint $RELEASE_KEY_FPR"; exit 1; }
+
+          # 5) Detach-sign each tarball with the pinned release key.
+          for f in dist/*.tar.gz; do
+            [ -f "$f" ] || continue
+            if [ -n "$PASSPHRASE" ]; then
+              printf '%s' "$PASSPHRASE" | gpg --batch --yes --pinentry-mode loopback \
+                --passphrase-fd 0 --local-user "$RELEASE_KEY_ID" \
+                --detach-sign --armor --output "${f}.asc" "$f"
+            else
+              gpg --batch --yes --local-user "$RELEASE_KEY_ID" \
+                --detach-sign --armor --output "${f}.asc" "$f"
+            fi
+            echo "signed: ${f}.asc"
+          done
+          PASSPHRASE=""
+
+      - name: Generate SBOM (syft) per tarball
+        if: steps.secret.outputs.syft == 'true'
+        run: |
+          set -euo pipefail
+          for f in dist/*.tar.gz; do
+            base=$(basename "$f" .tar.gz)
+            syft "$f" -o cyclonedx-json="dist/${base}.sbom.cdx.json"
+            echo "sbom:  dist/${base}.sbom.cdx.json"
+          done
+
+      - name: Generate SBOM (syft) per GHCR image
+        if: steps.secret.outputs.syft == 'true'
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+          GHCR_OWNER: ${{ vars.GHCR_OWNER }}
+        run: |
+          set -euo pipefail
+          GHCR_REPO="ghcr.io/${GHCR_OWNER:-jmagly}"
+          IMAGE_MATRIX='
+          agentic-sandbox-mgmt
+          agentic-sandbox-agent-client
+          agentic-sandbox-agent
+          agentic-sandbox-claude
+          agentic-sandbox-codex
+          agentic-sandbox-opencode
+          agentic-sandbox-automation-control
+          '
+          echo "$IMAGE_MATRIX" | while read -r public; do
+            [ -n "${public}" ] || continue
+            ref="${GHCR_REPO}/${public}:${TAG_NAME}"
+            docker pull "$ref"
+            syft "$ref" -o cyclonedx-json="dist/${public}-${TAG_NAME}.image.sbom.cdx.json"
+            echo "image sbom: dist/${public}-${TAG_NAME}.image.sbom.cdx.json"
+          done
+
+      - name: Cosign-sign release container images
+        if: steps.secret.outputs.cosign == 'true'
+        env:
+          COSIGN_KEY: ${{ secrets.COSIGN_KEY }}
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+          TAG_NAME: ${{ github.ref_name }}
+          INTERNAL_REG: git.integrolabs.net/roctinam/agentic-sandbox
+          GHCR_OWNER: ${{ vars.GHCR_OWNER }}
+        run: |
+          set -euo pipefail
+          GHCR_REPO="ghcr.io/${GHCR_OWNER:-jmagly}"
+          # Write key to a tmpfile (cosign doesn't accept the env var directly
+          # for file-backed keys).
+          KEYFILE="$(mktemp)"; trap "rm -f $KEYFILE" EXIT
+          printf '%s' "$COSIGN_KEY" > "$KEYFILE"
+          IMAGE_MATRIX='
+          agentic-mgmt|agentic-sandbox-mgmt
+          agent-client|agentic-sandbox-agent-client
+          agent|agentic-sandbox-agent
+          claude|agentic-sandbox-claude
+          codex|agentic-sandbox-codex
+          opencode|agentic-sandbox-opencode
+          automation-control|agentic-sandbox-automation-control
+          '
+          echo "$IMAGE_MATRIX" | while IFS='|' read -r internal public; do
+            [ -n "${internal}" ] || continue
+            for img in \
+              "${INTERNAL_REG}/${internal}:${TAG_NAME}" \
+              "${GHCR_REPO}/${public}:${TAG_NAME}"; do
+              cosign sign --yes --key "$KEYFILE" "$img"
+              echo "signed: $img"
+            done
+          done
+
+      - name: Attach SBOMs + GPG signatures to release
+        if: steps.secret.outputs.gpg == 'true' || steps.secret.outputs.syft == 'true'
+        env:
+          GITEA_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          REPO="${{ github.repository }}"
+          if [[ "$REPO" == *"***"* || -z "$REPO" ]]; then
+            REPO_URL=$(git remote get-url origin)
+            REPO="${REPO_URL#*://*/}"; REPO="${REPO%.git}"
+          fi
+          REL_ID=$(curl -sS -H "Authorization: token ${GITEA_TOKEN}" \
+            "${{ github.server_url }}/api/v1/repos/${REPO}/releases/tags/${{ github.ref_name }}" \
+            | jq -r '.id')
+          [ -n "$REL_ID" ] && [ "$REL_ID" != "null" ] || { echo "::error::could not resolve release id"; exit 1; }
+          ASSET_API="${{ github.server_url }}/api/v1/repos/${REPO}/releases/${REL_ID}/assets"
+          RELEASE_API="${{ github.server_url }}/api/v1/repos/${REPO}/releases/${REL_ID}"
+          rm -rf /tmp/syft-archive-contents-* || true
+          RESPONSE="dist/.asset-upload-response.json"
+          for asset in dist/*.asc dist/*.sbom.cdx.json; do
+            [ -f "$asset" ] || continue
+            name=$(basename "$asset")
+            HTTP=$(curl -sS -o "$RESPONSE" -w '%{http_code}' \
+              -X POST -H "Authorization: token ${GITEA_TOKEN}" \
+              -F "attachment=@${asset}" \
+              "${ASSET_API}?name=${name}")
+            case "$HTTP" in
+              201) echo "  ✓ uploaded $name" ;;
+              409)
+                existing_url="$(
+                  curl -fsSL -H "Authorization: token ${GITEA_TOKEN}" "$RELEASE_API" |
+                    jq -er --arg name "$name" '
+                      [.assets[] | select(.name == $name)] |
+                      if length == 1 then .[0].browser_download_url else error("asset lookup") end
+                    '
+                )"
+                existing="$(mktemp)"
+                curl -fsSL -H "Authorization: token ${GITEA_TOKEN}" \
+                  "$existing_url" -o "$existing"
+                [[ "$(sha256sum "$existing" | awk '{print $1}')" == \
+                  "$(sha256sum "$asset" | awk '{print $1}')" ]] \
+                  || { rm -f "$existing"; echo "::error::existing asset digest mismatch: $name"; exit 1; }
+                rm -f "$existing"
+                echo "  = $name already attached with identical digest"
+                ;;
+              *)   echo "::error::upload $name HTTP $HTTP"; cat "$RESPONSE"; exit 1 ;;
+            esac
+          done
+
+  github-release-sync:
+    name: Mirror release to GitHub Releases (#306)
+    runs-on: titan
+    if: >
+      startsWith(gitea.ref, 'refs/tags/v') &&
+      needs.release-attach.result == 'success'
+    needs: [release-attach]
+    steps:
+      - name: Checkout tagged commit
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+        with:
+          fetch-depth: 0
+
+      - name: Check GitHub mirror credential presence
+        id: secret
+        env:
+          # The GitHub mirror PAT is fetched from vault at runtime.
+          VAULT_ROLE: ${{ secrets.VAULT_CI_ROLE_ID }}
+          VAULT_SID: ${{ secrets.VAULT_CI_SECRET_ID }}
+        run: |
+          if [ -z "${VAULT_ROLE}" ] || [ -z "${VAULT_SID}" ]; then
+            echo "::error::VAULT_CI_ROLE_ID/VAULT_CI_SECRET_ID required to fetch the GitHub mirror token from vault; GitHub release sync is required for tag releases"
+            exit 1
+          else
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install gh CLI (if missing)
+        if: steps.secret.outputs.available == 'true'
+        run: |
+          if ! command -v gh >/dev/null 2>&1; then
+            # gh installer is verified upstream; using their official .deb stream.
+            sudo apt-get update && sudo apt-get install -y gh
+          fi
+
+      - name: Download release-binaries artifacts
+        if: steps.secret.outputs.available == 'true'
+        uses: actions/download-artifact@9bc31d5ccc31df68ecc42ccf4149144866c47d8a  # v3.0.2
+        with:
+          path: dist-staging/
+
+      - name: Stage release assets
+        if: steps.secret.outputs.available == 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          find dist-staging -type f \( \
+              -name '*.tar.gz' -o -name '*.deb' -o -name '*.rpm' \
+              -o -name '*.pkg' -o -name '*.dmg' \
+              -o -name '*.release-evidence.json' -o -name '*.evidence.json' \
+              -o -name '*.payload-manifest.tsv' \
+              -o -name 'handoff.json' \
+              -o -name 'agentic-sandbox-install.sh' \
+              -o -name '*.sha256' -o -name 'SHA256SUMS' \
+              -o -name 'SHA256SUMS-linux-packages' -o -name 'SHA256SUMS-macos' \
+              -o -name 'SHA256SUMS-macos-developer' \
+            \) \
+            -exec cp -v {} dist/ \;
+
+          if [ ! -f dist/SHA256SUMS ]; then
+            ( cd dist && sha256sum *.tar.gz *.deb *.rpm agentic-sandbox-install.sh > SHA256SUMS )
+          fi
+          ls -la dist/
+
+      - name: Extract release notes
+        if: steps.secret.outputs.available == 'true'
+        id: notes
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          BODY=$(awk -v v="$VERSION" '
+            $0 ~ "^## \\[" v "\\]" { capture=1; next }
+            capture && $0 ~ /^## \[/ { exit }
+            capture { print }
+          ' CHANGELOG.md)
+          [ -n "$BODY" ] || BODY="Release ${GITHUB_REF_NAME} — see CHANGELOG.md"
+          {
+            echo 'body<<RN_EOF'
+            echo "$BODY"
+            echo 'RN_EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Fetch GitHub mirror token from vault
+        if: steps.secret.outputs.available == 'true'
+        env:
+          VAULT_CI_ROLE_ID: ${{ secrets.VAULT_CI_ROLE_ID }}
+          VAULT_CI_SECRET_ID: ${{ secrets.VAULT_CI_SECRET_ID }}
+        run: |
+          set -euo pipefail
+          ci/vault-fetch.sh <<'SPEC'
+          env GH_TOKEN ${GH_MIRROR_TOKEN_VAULT_PATH} ${GH_MIRROR_TOKEN_VAULT_FIELD}
+          SPEC
+
+      - name: Synchronize exact source and tag to GitHub
+        if: steps.secret.outputs.available == 'true'
+        env:
+          # GH_TOKEN is fetched from vault in the preceding step.
+          GH_REPO: jmagly/agentic-sandbox
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]] \
+            || { echo "::error::checkout does not match exact Gitea release commit"; exit 1; }
+
+          # actions/checkout resolves a tag event through the event commit SHA
+          # and may leave refs/tags/<name> as a lightweight ref. Restore the
+          # authoritative Gitea tag object before comparing or publishing it.
+          git fetch --quiet --force origin \
+            "refs/tags/${TAG_NAME}:refs/tags/${TAG_NAME}"
+          [[ "$(git cat-file -t "refs/tags/${TAG_NAME}")" == "tag" ]] \
+            || { echo "::error::Gitea release ref is not an annotated tag object"; exit 1; }
+          tag_object_payload="$(git cat-file tag "refs/tags/${TAG_NAME}")"
+          grep -q '^-----BEGIN PGP SIGNATURE-----$' <<<"$tag_object_payload" \
+            || { echo "::error::Gitea release tag object has no embedded signature"; exit 1; }
+          [[ "$(git rev-parse "${TAG_NAME}^{commit}")" == "$GITHUB_SHA" ]] \
+            || { echo "::error::Gitea release tag does not resolve to exact release commit"; exit 1; }
+
+          # `gh auth setup-git` installs the credential-helper integration; it
+          # does not put the vault-fetched token in the remote URL or argv.
+          gh auth setup-git
+          git remote remove github-release-mirror 2>/dev/null || true
+          git remote add github-release-mirror "https://github.com/${GH_REPO}.git"
+
+          if git fetch --quiet --no-tags github-release-mirror main; then
+            github_main="$(git rev-parse FETCH_HEAD)"
+            if git merge-base --is-ancestor "$github_main" "$GITHUB_SHA"; then
+              git push github-release-mirror "$GITHUB_SHA:refs/heads/main"
+            elif git merge-base --is-ancestor "$GITHUB_SHA" "$github_main"; then
+              echo "GitHub main already contains the exact release commit"
+            else
+              echo "::error::GitHub main diverged from the Gitea release history"
+              exit 1
+            fi
+          else
+            git push github-release-mirror "$GITHUB_SHA:refs/heads/main"
+          fi
+
+          # Existing immutable refs must match by tag-object identity. Treat an
+          # identical signed annotated object as an idempotent success, publish
+          # a missing object, and fail closed rather than rewriting a mismatch.
+          local_tag_object="$(git rev-parse "refs/tags/${TAG_NAME}")"
+          remote_tag_object="$(
+            git ls-remote --refs --tags github-release-mirror \
+              "refs/tags/${TAG_NAME}" |
+              awk 'NR == 1 {print $1}'
+          )"
+          if [[ -z "$remote_tag_object" ]]; then
+            git push github-release-mirror \
+              "refs/tags/${TAG_NAME}:refs/tags/${TAG_NAME}"
+          elif [[ "$remote_tag_object" == "$local_tag_object" ]]; then
+            echo "GitHub already has the identical immutable tag object"
+          else
+            echo "::error::GitHub tag object differs from the authoritative Gitea tag"
+            exit 1
+          fi
+
+      - name: Create or update GitHub release
+        if: steps.secret.outputs.available == 'true'
+        env:
+          # GH_TOKEN is fetched from vault in the preceding step.
+          GH_REPO: jmagly/agentic-sandbox
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          BODY_FILE="$(mktemp)"; trap "rm -f $BODY_FILE" EXIT
+          cat > "$BODY_FILE" <<'NOTES_EOF'
+          ${{ steps.notes.outputs.body }}
+          NOTES_EOF
+
+          tag_object="$(gh api "repos/${GH_REPO}/git/ref/tags/${TAG_NAME}")"
+          tag_sha="$(jq -er '.object.sha' <<<"$tag_object")"
+          tag_type="$(jq -er '.object.type' <<<"$tag_object")"
+          for _ in 1 2 3 4; do
+            [[ "$tag_type" == "tag" ]] || break
+            tag_object="$(gh api "repos/${GH_REPO}/git/tags/${tag_sha}")"
+            tag_sha="$(jq -er '.object.sha' <<<"$tag_object")"
+            tag_type="$(jq -er '.object.type' <<<"$tag_object")"
+          done
+          [[ "$tag_type" == "commit" && "$tag_sha" == "$GITHUB_SHA" ]] \
+            || { echo "::error::GitHub tag does not resolve to exact Gitea release commit"; exit 1; }
+
+          if gh release view "$TAG_NAME" --repo "$GH_REPO" >/dev/null 2>&1; then
+            echo "Release $TAG_NAME exists on $GH_REPO — preserving published metadata"
+          else
+            echo "Creating release $TAG_NAME on $GH_REPO"
+            PRE_FLAG=""
+            [[ "$TAG_NAME" == *-* ]] && PRE_FLAG="--prerelease"
+            gh release create "$TAG_NAME" --repo "$GH_REPO" \
+              --title "$TAG_NAME" --notes-file "$BODY_FILE" $PRE_FLAG
+          fi
+
+          remote_asset_names="$(
+            gh release view "$TAG_NAME" --repo "$GH_REPO" \
+              --json assets --jq '.assets[].name'
+          )"
+          for asset in dist/*; do
+            [[ -f "$asset" ]] || continue
+            name="$(basename "$asset")"
+            if grep -Fxq "$name" <<<"$remote_asset_names"; then
+              existing_dir="$(mktemp -d)"
+              gh release download "$TAG_NAME" --repo "$GH_REPO" \
+                --pattern "$name" --dir "$existing_dir"
+              existing="$existing_dir/$name"
+              [[ -f "$existing" && \
+                "$(sha256sum "$existing" | awk '{print $1}')" == \
+                "$(sha256sum "$asset" | awk '{print $1}')" ]] \
+                || { rm -rf "$existing_dir"; echo "::error::GitHub asset digest mismatch: $name"; exit 1; }
+              rm -rf "$existing_dir"
+              echo "GitHub asset $name already exists with identical digest"
+            else
+              gh release upload "$TAG_NAME" "$asset" --repo "$GH_REPO"
+            fi
+          done
+
+          gh release view "$TAG_NAME" --repo "$GH_REPO" \
+            --json url,assets --jq '{url, asset_count: (.assets | length)}'
