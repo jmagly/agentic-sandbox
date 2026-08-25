@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-WORKFLOW="$ROOT/.gitea/workflows/ci.yaml"
+WORKFLOW="$ROOT/.gitea/workflows/release.yml"
 VERIFY="$ROOT/scripts/verify-release-assets.sh"
 
 grep -F "needs: [release-attach]" "$WORKFLOW" >/dev/null \
