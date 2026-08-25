@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-WORKFLOW="$ROOT/.gitea/workflows/ci.yaml"
+WORKFLOW="$ROOT/.gitea/workflows/release.yml"
 RUNBOOK="$ROOT/docs/releases/runbook.md"
 RELEASE_NOTE="$ROOT/docs/releases/v2026.6.2.md"
 VERIFIER="$ROOT/scripts/verify-release-assets.sh"
