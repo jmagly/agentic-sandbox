@@ -517,11 +517,17 @@ function celldOwnershipEvidence(observation) {
   };
 }
 
-export function managementEnvironment(config, fleet, managementHost, { celldEndpoint, tlsCaFile, tlsIdentityFile } = {}) {
+export function managementEnvironment(config, fleet, managementHost, { celldEndpoint, tlsCaFile, tlsIdentityFile, operatorMtlsCn } = {}) {
   if ((tlsCaFile === undefined) !== (tlsIdentityFile === undefined)) {
     throw annotateDriverError(new Error("Celld management TLS requires both CA and client identity files"), {
       operation: "orchestration.launch-management.environment.transport",
       errorCode: "CELLD_MANAGEMENT_TRANSPORT_INVALID",
+    });
+  }
+  if (operatorMtlsCn !== undefined && (!tlsCaFile || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(operatorMtlsCn))) {
+    throw annotateDriverError(new Error("Celld management operator mTLS requires a bounded CN and private TLS identity"), {
+      operation: "orchestration.launch-management.environment.operator-mtls",
+      errorCode: "CELLD_MANAGEMENT_OPERATOR_MTLS_INVALID",
     });
   }
   if (celldEndpoint === undefined) {
@@ -566,7 +572,7 @@ export function managementEnvironment(config, fleet, managementHost, { celldEndp
     AIWG_TLS_KEY: fleet.callback.management_server_key_file_ref,
     AIWG_TLS_CLIENT_CA: fleet.callback.ca_file_ref,
     AIWG_TLS_CLIENT_AUTH: "required",
-    AIWG_MTLS_ADMIN_ALLOWLIST: "",
+    AIWG_MTLS_ADMIN_ALLOWLIST: operatorMtlsCn ?? "",
     AGENTIC_CELLD_ENABLED: "1",
     AGENTIC_CELLD_ENDPOINT: celldEndpoint,
     AGENTIC_CELLD_AUTH_KEY_ID: workerVars.keyId,
@@ -651,7 +657,16 @@ export function launchManagement(config, fleet, managementHost, celldTransport =
     executable_sha256: executableSha256,
     process_start_time_ticks: processStartTimeTicks,
   };
-  return { processHandle, logPath, managementHost };
+  return {
+    processHandle,
+    logPath,
+    managementHost,
+    operatorMtls: celldTransport.operatorMtlsCn ? {
+      cn: celldTransport.operatorMtlsCn,
+      ca_file_ref: celldTransport.tlsCaFile,
+      identity_file_ref: celldTransport.tlsIdentityFile,
+    } : null,
+  };
 }
 
 function stopManagement(management, signal = "SIGTERM") {

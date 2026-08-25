@@ -13,6 +13,7 @@ import {
   excludedInventoryEffects,
   executeWorkerDriver,
   prepareWorkerConformanceProject,
+  reviewedFileInventoryArgs,
 } from "../../../scripts/celld-live-worker.mjs";
 
 function profile(driver, hostHash = "2".repeat(64)) {
@@ -149,6 +150,27 @@ test("excluded capability inventory reports each host effect independently", () 
   });
 });
 
+test("reviewed file inventory tolerates descendant removal races without hiding missing roots", () => {
+  const runtime = {
+    config: {
+      base_images_dir: "/build/agentic-sandbox/base-images",
+      vm_storage_dir: "/build/agentic-sandbox/vms",
+      agentshare_root: "/var/tmp/agentic-celld-qualification-123/mount",
+    },
+    fleet: { nodes: [{ state_dir: "/dev/shm/celld/node-1" }, { state_dir: "/dev/shm/celld/node-2" }] },
+  };
+  const args = reviewedFileInventoryArgs(runtime);
+  assert.deepEqual(args.slice(0, 5), [
+    runtime.config.base_images_dir,
+    runtime.config.vm_storage_dir,
+    runtime.config.agentshare_root,
+    runtime.fleet.nodes[0].state_dir,
+    runtime.fleet.nodes[1].state_dir,
+  ]);
+  assert.ok(args.includes("-ignore_readdir_race"));
+  assert.equal(args.includes("-ignore_readdir_race") && args.includes("-xdev"), true);
+});
+
 test("Worker driver fixes the evaluator-owned matrices and does not claim UAT-009", () => {
   const source = readFileSync(new URL("../../../scripts/celld-live-worker.mjs", import.meta.url), "utf8");
   assert.match(source, /const ADVERTISED = \["fetch", "rpc", "storage", "alarm", "websocket", "outbound_https", "wasm", "assets"\]/);
@@ -169,6 +191,7 @@ test("Worker driver fixes the evaluator-owned matrices and does not claim UAT-00
   assert.doesNotMatch(source, /\["cp", `\$\{negativeRoot\}\/\.`/);
   assert.match(source, /CELLD_LIVE_WORKER_COPY_NEGATIVE_PROJECTS_FAILED/);
   assert.match(source, /CELLD_LIVE_WORKER_INVENTORY_FAILED/);
+  assert.match(source, /-ignore_readdir_race/);
   assert.match(source, /NetworkSettings\.Ports/);
   assert.doesNotMatch(source, /\["port", node\.name\]/);
   assert.match(source, /operation\(`dry-run-\$\{capability\}`\)/);

@@ -28,6 +28,7 @@ const NETWORK_AUTH_INVENTORY_SCHEMA = "agentic-sandbox.celld-network-auth-invent
 const NETWORK_AUTH_OWNER = Object.freeze({ repository: "roctinam/agentic-sandbox", workflow: "celld-qualification.yml" });
 const PROBE_CONCURRENCY = 32;
 const MTLS_PROXY_PORT = 8443;
+const MANAGEMENT_OPERATOR_CN = "agentic-celld-management";
 const SCENARIOS = new Set(["UAT-CELLD-010", "UAT-CELLD-012"]);
 const NODE_PROBE_IMAGE = "docker.io/library/node:20@sha256:8f693eaa7e0a8e71560c9a82b55fd54c2ae920a2ba5d2cde28bac7d1c01c9ba5";
 const DENIAL_CLASSES = ["forged_body", "forged_mac", "stale_timestamp", "nonce_replay", "wrong_key", "zero_generation", "wrong_generation", "public_route", "cross_fleet_request"];
@@ -388,7 +389,7 @@ export function prepareMtlsProxyCertificates(inventory, {
   const clientExtensions = join(tlsRoot, "management-client-ext.cnf");
   writeProtected(clientExtensions, "extendedKeyUsage=clientAuth\n");
   runner("openssl", ["genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:2048", "-out", clientKey]);
-  runner("openssl", ["req", "-new", "-key", clientKey, "-subj", "/CN=agentic-celld-management", "-out", clientCsr]);
+  runner("openssl", ["req", "-new", "-key", clientKey, "-subj", `/CN=${MANAGEMENT_OPERATOR_CN}`, "-out", clientCsr]);
   runner("openssl", ["x509", "-req", "-in", clientCsr, "-CA", caCert, "-CAkey", caKey, "-CAserial", caSerial, "-days", "2", "-sha256", "-extfile", clientExtensions, "-out", clientCert]);
   for (const path of [clientKey, clientCsr, clientCert]) protect(path);
   runner("openssl", ["verify", "-purpose", "sslclient", "-CAfile", caCert, clientCert]);
@@ -992,15 +993,21 @@ export async function waitManagementProviderLedger(runtime, { runner = run, time
 
 function managementCelldStatusRequest(management, fleet) {
   return new Promise((resolvePromise, rejectPromise) => {
+    const operatorIdentity = management?.operatorMtls;
+    if (operatorIdentity?.cn !== MANAGEMENT_OPERATOR_CN) {
+      rejectPromise(new Error("management Celld status operator identity is unavailable"));
+      return;
+    }
+    const identity = readFileSync(operatorIdentity.identity_file_ref);
     const request = httpsRequest({
       hostname: management.managementHost,
       port: 8122,
       path: "/api/v2/celld/status",
       method: "GET",
       servername: fleet.callback.management_server_name,
-      ca: readFileSync(fleet.callback.ca_file_ref),
-      cert: readFileSync(fleet.callback.relay_client_cert_file_ref),
-      key: readFileSync(fleet.callback.relay_client_key_file_ref),
+      ca: readFileSync(operatorIdentity.ca_file_ref),
+      cert: identity,
+      key: identity,
       rejectUnauthorized: true,
       agent: false,
       timeout: 10_000,
@@ -1707,6 +1714,7 @@ export async function executeNetworkAuthDriver({ scenarioId, runId, liveProfileP
       celldEndpoint: `https://${networkInventory.proxies[0].listen_address}:${networkInventory.proxies[0].listen_port}`,
       tlsCaFile: networkInventory.proxies[0].ca_file_ref,
       tlsIdentityFile: networkInventory.proxies[0].management_client_identity_file_ref,
+      operatorMtlsCn: MANAGEMENT_OPERATOR_CN,
     }));
     await withDriverOperation("network-auth.wait-management", errorFields, () => waitManagement(management, fleet));
     await withDriverOperation("network-auth.wait-management-celld-status", errorFields, () => waitManagementCelldStatus(management, fleet));

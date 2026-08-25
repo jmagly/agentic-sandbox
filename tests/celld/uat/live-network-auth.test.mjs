@@ -840,6 +840,9 @@ test("network/auth source fixes the qualified sample sizes and pins the probe im
   assert.match(source, /network-auth\.wait-management-celld-status/);
   assert.match(source, /CELLD_MANAGEMENT_CELLD_CONFIG_INVALID/);
   assert.match(source, /\/api\/v2\/celld\/status/);
+  assert.match(source, /operatorMtlsCn: MANAGEMENT_OPERATOR_CN/);
+  assert.match(source, /operatorIdentity\?\.cn !== MANAGEMENT_OPERATOR_CN/);
+  assert.doesNotMatch(source, /AIWG_MTLS_ADMIN_ALLOWLIST:\s*fleet\.callback\.client_cn/);
   assert.match(source, /network-auth\.wait-provider-ledger/);
   assert.match(source, /const route = privateCelldRoute\(runtime\.networkInventory\)/);
   assert.match(source, /role: kind === "public_route" \? "public" : "cross-fleet"/);

@@ -278,6 +278,20 @@ function inventoryCommand(operation, errorFields, program, args, options = {}) {
   return runWorkerCommand(operation, errorFields, program, args, options, "CELLD_LIVE_WORKER_INVENTORY_FAILED");
 }
 
+export function reviewedFileInventoryArgs(runtime) {
+  return [
+    runtime.config.base_images_dir,
+    runtime.config.vm_storage_dir,
+    runtime.config.agentshare_root,
+    ...runtime.fleet.nodes.map((node) => node.state_dir),
+    "-xdev",
+    "-ignore_readdir_race",
+    "-mindepth", "1",
+    "-maxdepth", "3",
+    "-printf", "%p|%y|%s\n",
+  ];
+}
+
 function inventorySnapshot(runtime, operation = (name) => `worker.inventory.${name}`, errorFields = {}) {
   const containers = inventoryCommand(operation("docker-ps"), errorFields, "docker", ["ps", "--all", "--filter", `label=dev.agentic-sandbox.run=${runtime.runId}`, "--format", "{{.Names}}"], { timeout: 30_000 }).split(/\r?\n/).filter(Boolean).sort();
   const pids = runtime.fleet.nodes.map((node) => inventoryCommand(operation("docker-inspect-pid"), errorFields, "docker", ["inspect", "--format", "{{.State.Pid}}", node.name], { timeout: 30_000 }));
@@ -285,7 +299,7 @@ function inventorySnapshot(runtime, operation = (name) => `worker.inventory.${na
   const portMaps = runtime.fleet.nodes.map((node) => inventoryCommand(operation("docker-inspect-ports"), errorFields, "docker", ["inspect", "--format", "{{json .NetworkSettings.Ports}}", node.name], { timeout: 30_000 })).sort();
   const socketTables = pids.map((pid) => inventoryCommand(operation("nsenter-socket-table"), errorFields, "sudo", ["-n", "nsenter", "--target", pid, "--net", "cat", "/proc/net/tcp", "/proc/net/tcp6", "/proc/net/udp", "/proc/net/udp6", "/proc/net/unix"], { timeout: 30_000 })).sort();
   const domains = inventoryCommand(operation("virsh-list-domains"), errorFields, "virsh", ["--connect", runtime.config.libvirt_uri, "list", "--all", "--name"], { timeout: 30_000 }).split(/\r?\n/).filter(Boolean).sort();
-  const reviewedFiles = inventoryCommand(operation("find-reviewed-files"), errorFields, "find", [runtime.config.base_images_dir, runtime.config.vm_storage_dir, runtime.config.agentshare_root, ...runtime.fleet.nodes.map((node) => node.state_dir), "-xdev", "-mindepth", "1", "-maxdepth", "3", "-printf", "%p|%y|%s\n"], { timeout: 120_000 }).split(/\r?\n/).filter(Boolean).sort();
+  const reviewedFiles = inventoryCommand(operation("find-reviewed-files"), errorFields, "find", reviewedFileInventoryArgs(runtime), { timeout: 120_000 }).split(/\r?\n/).filter(Boolean).sort();
   const containerFiles = runtime.fleet.nodes.map((node) => inventoryCommand(operation("docker-diff"), errorFields, "docker", ["diff", node.name], { timeout: 30_000 })).sort();
   return {
     containers,

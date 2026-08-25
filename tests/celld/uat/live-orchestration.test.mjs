@@ -115,11 +115,17 @@ test("management transport can be pinned to the private Celld mTLS proxy", () =>
     const tlsCa = join(directory, "network-ca.crt"), tlsIdentity = join(directory, "management-client.pem");
     const environment = managementEnvironment(liveConfig, fleet, "172.30.0.1", {
       celldEndpoint: "https://172.30.0.20:8443", tlsCaFile: tlsCa, tlsIdentityFile: tlsIdentity,
+      operatorMtlsCn: "agentic-celld-management",
     });
     assert.equal(environment.AGENTIC_CELLD_ENDPOINT, "https://172.30.0.20:8443");
     assert.equal(environment.AGENTIC_CELLD_TLS_CA_FILE, tlsCa);
     assert.equal(environment.AGENTIC_CELLD_TLS_CLIENT_IDENTITY_FILE, tlsIdentity);
+    assert.equal(environment.AIWG_MTLS_ADMIN_ALLOWLIST, "agentic-celld-management");
     assert.throws(() => managementEnvironment(liveConfig, fleet, "172.30.0.1", { tlsCaFile: tlsCa }), /requires both/);
+    assert.throws(
+      () => managementEnvironment(liveConfig, fleet, "172.30.0.1", { operatorMtlsCn: "agentic-celld-management" }),
+      /requires a bounded CN and private TLS identity/,
+    );
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
