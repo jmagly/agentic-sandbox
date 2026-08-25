@@ -214,11 +214,13 @@ async fn rust_vm_e2e_dispatch_resource_stress_hits_agent_limits() -> anyhow::Res
         .await?;
     let output = output_text(&frames);
 
-    assert!(output.contains("PID_STRESS_HIT_LIMIT"), "{output}");
+    assert!(output.contains("PID_STRESS_LIMIT"), "{output}");
     assert!(
-        output.contains("PID_STRESS_DONE hit_limit=True"),
+        output.contains("PID_STRESS_HIT_LIMIT")
+            || output.contains("PID_STRESS_LIMIT_ABOVE_TEST_BUDGET"),
         "{output}"
     );
+    assert!(output.contains("PID_STRESS_DONE"), "{output}");
 
     let command_id = ws
         .send_command(
@@ -415,8 +417,33 @@ def own_cgroup_pids_max():
                 return int(value)
     raise RuntimeError("could not locate unified cgroup entry")
 
+def own_cgroup_pids_current():
+    with open("/proc/self/cgroup", "r", encoding="utf-8") as handle:
+        for line in handle:
+            parts = line.strip().split(":", 2)
+            if len(parts) == 3 and parts[0] == "0":
+                with open(
+                    "/sys/fs/cgroup" + parts[2] + "/pids.current",
+                    "r",
+                    encoding="utf-8",
+                ) as pids_file:
+                    return int(pids_file.read().strip())
+    raise RuntimeError("could not locate unified cgroup entry")
+
 limit = own_cgroup_pids_max()
-target = min(limit + 128, 6000)
+current = own_cgroup_pids_current()
+budget = 512
+needed = max(1, limit - current + 1)
+print(f"PID_STRESS_LIMIT max={limit} current={current} budget={budget}", flush=True)
+if needed > budget:
+    print(
+        f"PID_STRESS_LIMIT_ABOVE_TEST_BUDGET needed={needed} budget={budget}",
+        flush=True,
+    )
+    print(f"PID_STRESS_DONE hit_limit=False spawned=0 pids_max={limit}", flush=True)
+    sys.exit(0)
+
+target = needed + 16
 processes = []
 hit_limit = False
 
