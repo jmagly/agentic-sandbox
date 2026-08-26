@@ -88,7 +88,7 @@
           "listen_address": { "type": "string", "pattern": "^[0-9a-fA-F:.]+$" },
           "listen_port": { "const": 8443 },
           "target_address": { "const": "127.0.0.1" },
-          "target_port": { "const": 8081 },
+          "target_port": { "const": 8080 },
           "binary_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
           "image_ref": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
           "ca_file_ref": { "type": "string", "pattern": "^/dev/shm/" },

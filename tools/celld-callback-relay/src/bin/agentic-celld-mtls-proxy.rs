@@ -233,7 +233,7 @@ mod tests {
             "--listen",
             "0.0.0.0:8443",
             "--target",
-            "127.0.0.1:8081",
+            "127.0.0.1:8080",
             "--ca",
             "/run/tls/ca.crt",
             "--cert",
@@ -258,7 +258,7 @@ mod tests {
         loopback_listener[1] = "127.0.0.1:8443";
         assert!(ProxyConfig::parse_from(loopback_listener).is_err());
         let mut remote_plaintext = valid_args();
-        remote_plaintext[3] = "172.30.0.10:8081";
+        remote_plaintext[3] = "172.30.0.10:8080";
         assert!(ProxyConfig::parse_from(remote_plaintext).is_err());
         let mut duplicate = valid_args();
         duplicate.extend(["--client-cert", "/run/tls/other.crt"]);

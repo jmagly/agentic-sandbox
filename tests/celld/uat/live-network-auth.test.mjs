@@ -254,6 +254,7 @@ test("listener guard allows loopback and exact peers while dropping every bypass
   const guard = planListenerGuard(inventory, {
     sourceContainer: "celld-fleet-node-1", sourceNamespaceInode: 401, sameFleetAddresses: ["172.30.0.21", "172.30.0.20"],
   }, new Date("2026-08-23T08:00:01Z"));
+  assert.equal(guard.protected_port, 8081);
   assert.deepEqual(guard.same_fleet_addresses, ["172.30.0.20", "172.30.0.21"]);
   const commands = listenerGuardCommands(inventory, guard);
   const loopbackAccept = commands.apply[2];
@@ -329,7 +330,7 @@ test("directional matrices isolate only the selected route and fully heal", () =
   assert.throws(() => validateDirectionalRouteMatrices("celld_to_store", matrix(), matrix("celld_to_store"), matrix("celld_to_store")), /did not heal/);
 });
 
-test("mTLS proxy plans bind an exact node, private listener, and node-loopback plaintext target", () => {
+test("mTLS proxy plans bind an exact node, private listener, and signed Worker loopback target", () => {
   const inventory = createNetworkAuthInventory({ runId: "titan-765", runRoot: "/dev/shm/celld-qualification/titan-765", host: "titan" });
   registerNetworkNamespace(inventory, { container: "celld-fleet-node-1", pid: 3, inode: 44, runLabel: "titan-765" });
   const proxy = planMtlsProxy(inventory, {
@@ -338,14 +339,15 @@ test("mTLS proxy plans bind an exact node, private listener, and node-loopback p
   assert.equal(proxy.name, "celld-fleet-node-1-mtls-proxy");
   assert.equal(proxy.listen_port, 8443);
   assert.equal(proxy.target_address, "127.0.0.1");
-  assert.equal(proxy.target_port, 8081);
+  assert.equal(proxy.target_port, 8080);
   assert.equal(proxy.management_client_cert_file_ref, "/dev/shm/celld-qualification/titan-765/network-tls/management-client.crt");
   assert.deepEqual(validateNetworkAuthInventory(inventory), []);
   const args = mtlsProxyCreateArgs(inventory, proxy, { binaryPath: "/repo/target/agentic-celld-mtls-proxy", uid: 1000, gid: 1000 });
   assert.deepEqual(args.slice(0, 3), ["create", "--name", proxy.name]);
   assert.equal(args.includes(`container:${proxy.node_container}`), true);
   assert.equal(args.includes("0.0.0.0:8443"), true);
-  assert.equal(args.includes("127.0.0.1:8081"), true);
+  assert.equal(args.includes("127.0.0.1:8080"), true);
+  assert.equal(args.includes("127.0.0.1:8081"), false);
   assert.equal(args.includes("--client-cert"), true);
   assert.throws(() => planMtlsProxy(inventory, {
     nodeContainer: "celld-foreign-node", listenAddress: "172.30.0.21", binarySha256: "7".repeat(64), imageRef: `sha256:${"6".repeat(64)}`,
@@ -637,6 +639,18 @@ test("environment proxy probe distinguishes interception from an invalid private
     const document = networkAuthDriverErrorDocument(error);
     assert.equal(document.http_status, 401);
     assert.equal(document.node_code, "http.401.cell.signature_invalid");
+    return true;
+  });
+  await assert.rejects(() => probeEnvironmentProxy(route, keyring, {
+    environment: {},
+    openTrap: async () => ({ url: "http://127.0.0.1:41234", connections: () => 0, close: async () => {} }),
+    requester: async () => ({ status: 404, code: null }),
+  }), (error) => {
+    assert.match(error.message, /private Celld control response was invalid/);
+    assert.equal(error.operation, "network-auth.probe-environment-proxy.response");
+    assert.equal(error.errorCode, "CELLD_ENVIRONMENT_PROXY_PRIVATE_RESPONSE_INVALID");
+    assert.equal(error.code, "http.404.missing");
+    assert.equal(error.httpStatus, 404);
     return true;
   });
 });
