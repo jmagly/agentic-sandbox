@@ -5273,10 +5273,37 @@ async fn stop_instance(State(state): State<AppState>, AxPath(id): AxPath<String>
             if s == super::vms::VmState::Stopped {
                 return Ok(());
             }
+            if s != super::vms::VmState::Shutdown {
+                domain
+                    .shutdown()
+                    .map_err(|e| super::vms::VmError::LibvirtError(e.to_string()))?;
+            }
+            let graceful_deadline = std::time::Instant::now() + Duration::from_secs(15);
+            loop {
+                if super::vms::get_domain_state(&domain)? == super::vms::VmState::Stopped {
+                    return Ok(());
+                }
+                if std::time::Instant::now() >= graceful_deadline {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(250));
+            }
             domain
-                .shutdown()
+                .destroy()
                 .map_err(|e| super::vms::VmError::LibvirtError(e.to_string()))?;
-            Ok(())
+            let forced_deadline = std::time::Instant::now() + Duration::from_secs(5);
+            loop {
+                if super::vms::get_domain_state(&domain)? == super::vms::VmState::Stopped {
+                    return Ok(());
+                }
+                if std::time::Instant::now() >= forced_deadline {
+                    return Err(super::vms::VmError::LibvirtError(
+                        "libvirt stop did not converge after the bounded force fallback"
+                            .to_string(),
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
         },
     )
     .await;

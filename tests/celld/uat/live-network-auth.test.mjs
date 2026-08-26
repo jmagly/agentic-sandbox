@@ -627,7 +627,18 @@ test("environment proxy probe distinguishes interception from an invalid private
     environment: {},
     openTrap: async () => ({ url: "http://127.0.0.1:41234", connections: () => 0, close: async () => {} }),
     requester: async () => ({ status: 401, code: "cell.signature_invalid" }),
-  }), /private Celld control response was invalid/);
+  }), (error) => {
+    assert.match(error.message, /private Celld control response was invalid/);
+    assert.equal(error.operation, "network-auth.probe-environment-proxy.response");
+    assert.equal(error.errorCode, "CELLD_ENVIRONMENT_PROXY_PRIVATE_RESPONSE_INVALID");
+    assert.equal(error.code, "http.401.cell.signature_invalid");
+    assert.equal(error.httpStatus, 401);
+    assert.match(error.evidenceSha256, /^[0-9a-f]{64}$/);
+    const document = networkAuthDriverErrorDocument(error);
+    assert.equal(document.http_status, 401);
+    assert.equal(document.node_code, "http.401.cell.signature_invalid");
+    return true;
+  });
 });
 
 test("private Celld HTTPS requests override environment proxy agents", () => {

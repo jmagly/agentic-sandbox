@@ -54,6 +54,9 @@ export function driverErrorDocument(error) {
     const value = safeDriverField(error?.[inputKey]);
     if (value !== null) document[outputKey] = value;
   }
+  if (Number.isInteger(error?.httpStatus) && error.httpStatus >= 100 && error.httpStatus <= 599) {
+    document.http_status = error.httpStatus;
+  }
   if (Number.isInteger(error?.exitStatus)) document.exit_status = error.exitStatus;
   if (error?.timedOut === true) document.timed_out = true;
   return document;

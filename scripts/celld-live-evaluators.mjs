@@ -387,6 +387,9 @@ const ALL_LIVE_EVALUATORS = Object.freeze({
     const passed = matrix.complete && matrix.cases.every((entry, index) => {
       operationIds.add(sha256Digest(entry.operation_id_sha256, `cases[${index}].operation_id_sha256`));
       return boolean(entry.unknown_observed, `cases[${index}].unknown_observed`)
+        && integer(entry.unknown_event_count, `cases[${index}].unknown_event_count`) === 1
+        && integer(entry.unknown_event_sequence, `cases[${index}].unknown_event_sequence`, 1) >= 1
+        && sha256Digest(entry.unknown_event_sha256, `cases[${index}].unknown_event_sha256`).length === 64
         && boolean(entry.original_id_match, `cases[${index}].original_id_match`)
         && !boolean(entry.replacement_id_observed, `cases[${index}].replacement_id_observed`);
     }) && operationIds.size === matrix.cases.length;

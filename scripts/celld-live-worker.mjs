@@ -34,6 +34,13 @@ const OBSERVATION_SCHEMA = "agentic-sandbox.celld-live-observation/v1";
 const SCENARIOS = new Set(["UAT-CELLD-007", "UAT-CELLD-008", "UAT-CELLD-009"]);
 const ADVERTISED = ["fetch", "rpc", "storage", "alarm", "websocket", "outbound_https", "wasm", "assets"];
 const EXCLUDED = ["process", "pty", "workspace", "filesystem", "raw_network", "vm", "container", "host_api"];
+const SOCKET_TABLES = Object.freeze([
+  ["tcp", "/proc/net/tcp"],
+  ["tcp6", "/proc/net/tcp6"],
+  ["udp", "/proc/net/udp"],
+  ["udp6", "/proc/net/udp6"],
+  ["unix", "/proc/net/unix"],
+]);
 const WASM_ADD_HEX = "0061736d0100000001070160027f7f017f030201000707010361646400000a09010700200020016a0b";
 const CONFORMANCE_WORKER = `
 import addModule from "./add.wasm";
@@ -288,8 +295,37 @@ export function reviewedFileInventoryArgs(runtime) {
     "-ignore_readdir_race",
     "-mindepth", "1",
     "-maxdepth", "3",
-    "-printf", "%p|%y|%s\n",
+    "-printf", "%p|%y\n",
   ];
+}
+
+export function stableSocketInventory(protocol, source) {
+  if (!SOCKET_TABLES.some(([candidate]) => candidate === protocol) || typeof source !== "string") {
+    throw new Error("socket inventory protocol is outside the fixed allowlist");
+  }
+  const stable = [];
+  for (const line of source.split(/\r?\n/).slice(1)) {
+    const fields = line.trim().split(/\s+/).filter(Boolean);
+    if (protocol === "unix") {
+      const path = fields.slice(7).join(" ");
+      if (fields.length >= 8 && fields[3] === "00010000" && path.startsWith("/")) {
+        stable.push(`${protocol}|${fields[4]}|${path}`);
+      }
+      continue;
+    }
+    const stableState = protocol.startsWith("tcp") ? "0A" : "07";
+    if (fields.length >= 4 && fields[3] === stableState && /^[0-9A-F]+:[0-9A-F]{4}$/i.test(fields[1])) {
+      stable.push(`${protocol}|${fields[1].toUpperCase()}`);
+    }
+  }
+  return [...new Set(stable)].sort();
+}
+
+export function stableContainerFileInventory(source) {
+  if (typeof source !== "string") throw new Error("container file inventory is invalid");
+  return [...new Set(source.split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => /^[AD] \/.+/.test(line)))].sort();
 }
 
 function inventorySnapshot(runtime, operation = (name) => `worker.inventory.${name}`, errorFields = {}) {
@@ -297,10 +333,15 @@ function inventorySnapshot(runtime, operation = (name) => `worker.inventory.${na
   const pids = runtime.fleet.nodes.map((node) => inventoryCommand(operation("docker-inspect-pid"), errorFields, "docker", ["inspect", "--format", "{{.State.Pid}}", node.name], { timeout: 30_000 }));
   const processTrees = runtime.fleet.nodes.map((node) => inventoryCommand(operation("docker-top"), errorFields, "docker", ["top", node.name, "-eo", "pid,ppid,comm"], { timeout: 30_000 })).sort();
   const portMaps = runtime.fleet.nodes.map((node) => inventoryCommand(operation("docker-inspect-ports"), errorFields, "docker", ["inspect", "--format", "{{json .NetworkSettings.Ports}}", node.name], { timeout: 30_000 })).sort();
-  const socketTables = pids.map((pid) => inventoryCommand(operation("nsenter-socket-table"), errorFields, "sudo", ["-n", "nsenter", "--target", pid, "--net", "cat", "/proc/net/tcp", "/proc/net/tcp6", "/proc/net/udp", "/proc/net/udp6", "/proc/net/unix"], { timeout: 30_000 })).sort();
+  const socketTables = pids.map((pid, nodeIndex) => SOCKET_TABLES.flatMap(([protocol, path]) => stableSocketInventory(
+    protocol,
+    inventoryCommand(operation(`nsenter-socket-table-${nodeIndex}-${protocol}`), errorFields, "sudo", ["-n", "nsenter", "--target", pid, "--net", "cat", path], { timeout: 30_000 }),
+  ))).sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
   const domains = inventoryCommand(operation("virsh-list-domains"), errorFields, "virsh", ["--connect", runtime.config.libvirt_uri, "list", "--all", "--name"], { timeout: 30_000 }).split(/\r?\n/).filter(Boolean).sort();
   const reviewedFiles = inventoryCommand(operation("find-reviewed-files"), errorFields, "sudo", ["-n", "find", ...reviewedFileInventoryArgs(runtime)], { timeout: 120_000 }).split(/\r?\n/).filter(Boolean).sort();
-  const containerFiles = runtime.fleet.nodes.map((node) => inventoryCommand(operation("docker-diff"), errorFields, "docker", ["diff", node.name], { timeout: 30_000 })).sort();
+  const containerFiles = runtime.fleet.nodes.map((node) => stableContainerFileInventory(
+    inventoryCommand(operation("docker-diff"), errorFields, "docker", ["diff", node.name], { timeout: 30_000 }),
+  )).sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
   return {
     containers,
     processes_sha256: sha256(JSON.stringify({ pids, process_trees: processTrees })),

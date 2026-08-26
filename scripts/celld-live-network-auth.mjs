@@ -1341,8 +1341,19 @@ export async function probeEnvironmentProxy(route, keyring, {
     operationId = `environment-proxy-${randomBytes(12).toString("hex")}`;
     const path = `/instance-cells/environment-proxy-${randomUUID()}`;
     response = await requester(route.endpoint, path, { method: "GET", headers: signedHeaders({ method: "GET", path, operationId, generation: 1, body: "", ...keyring }), tls: route.tls });
-    if (trap.connections() !== 0) throw new Error("environment proxy intercepted the private Celld route");
-    if (response.status !== 404 || response.code !== "cell.missing") throw new Error("environment proxy private Celld control response was invalid");
+    if (trap.connections() !== 0) throw annotateDriverError(new Error("environment proxy intercepted the private Celld route"), {
+      operation: "network-auth.probe-environment-proxy.interception",
+      errorCode: "CELLD_ENVIRONMENT_PROXY_INTERCEPTED",
+    });
+    if (response.status !== 404 || response.code !== "cell.missing") {
+      throw annotateDriverError(new Error("environment proxy private Celld control response was invalid"), {
+        operation: "network-auth.probe-environment-proxy.response",
+        errorCode: "CELLD_ENVIRONMENT_PROXY_PRIVATE_RESPONSE_INVALID",
+        code: `http.${response?.status ?? "unknown"}.${response?.code ?? "missing"}`,
+        httpStatus: response?.status,
+        evidenceSha256: sha256(canonicalJson({ status: response?.status ?? null, code: response?.code ?? null })),
+      });
+    }
   } catch (error) {
     primaryError = error;
   } finally {

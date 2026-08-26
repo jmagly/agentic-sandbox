@@ -11,6 +11,7 @@ import {
   applyPlannedOrchestrationFault,
   celldInstanceCellScope,
   clearDispatchGate,
+  durableEffectHistoryObservation,
   executeOrchestrationDriver,
   healPlannedOrchestrationFault,
   issueCommand,
@@ -34,6 +35,23 @@ test("management canonicalizes the reviewed image version to the qualified API p
   assert.equal(managementCelldVersion("0.2.1"), "v0.2.1");
   assert.equal(managementCelldVersion("v0.2.1"), "v0.2.1");
   assert.throws(() => managementCelldVersion("latest"), /version is invalid/);
+});
+
+test("response-loss evidence comes from the exact durable unknown event", () => {
+  const operationId = "uat005-qemu-1-start-0";
+  const event = {
+    document_type: "instance-cell-event", schema_version: "1", event_id: "123e4567-e89b-42d3-a456-426614174000",
+    instance_id: "8be6be9f-eeb9-4a85-983b-3706a7e17400", operation_id: operationId, generation: 1,
+    sequence: 3, kind: "effect_unknown", recorded_at: "2026-08-26T01:38:34.000Z", evidence: { attempts: 1 },
+  };
+  const observation = durableEffectHistoryObservation({ history: [event] }, operationId, "effect_unknown");
+  assert.deepEqual({ ...observation, sha256: undefined }, {
+    operation_id: operationId, kind: "effect_unknown", sequence: 3, count: 1, sha256: undefined,
+  });
+  assert.match(observation.sha256, /^[0-9a-f]{64}$/);
+  assert.throws(() => durableEffectHistoryObservation({ history: [] }, operationId, "effect_unknown"), /exactly one durable/);
+  assert.throws(() => durableEffectHistoryObservation({ history: [event, { ...event, sequence: 4 }] }, operationId, "effect_unknown"), /exactly one durable/);
+  assert.doesNotMatch(orchestrationSource, /waitCellEffect\([^\n]+\["unknown"\]\)/);
 });
 
 function config(overrides = {}) {
@@ -798,6 +816,88 @@ test("Worker acknowledgement leaves every provider action incomplete until indep
       }
     });
   }
+});
+
+test("provider effect convergence retries valid transient states but rejects unowned evidence immediately", async () => {
+  const resource = {
+    instanceId: "123e4567-e89b-42d3-a456-426614174000",
+    name: "celld-test-provider",
+    substrate: "qemu",
+  };
+  const states = ["running", "in shutdown", "shut off"];
+  let calls = 0;
+  const observation = await liveOrchestration.waitForObservedProviderEffect({}, { resource, action: "stop" }, {
+    timeoutMs: 100,
+    intervalMs: 0,
+    observeProvider: async () => ({
+      owned: true,
+      present: true,
+      state: states[calls++],
+      provider_storage_present: true,
+    }),
+  });
+  assert.equal(observation.state, "shut off");
+  assert.equal(calls, 3);
+
+  await assert.rejects(
+    liveOrchestration.waitForObservedProviderEffect({}, { resource, action: "stop" }, {
+      timeoutMs: 100,
+      intervalMs: 0,
+      observeProvider: async () => ({ owned: false, present: true, state: "shut off", provider_storage_present: true }),
+    }),
+    /exact-owned/,
+  );
+});
+
+test("cleanup serializes behind and recovers one interrupted provider action", async () => {
+  const document = inventoryV2({ completedProvision: true });
+  const instanceId = document.resources[0].instance_id;
+  const runtime = {
+    scenarioId: "UAT-CELLD-003",
+    config: config({
+      run_id: "test-run",
+      working_root: "/dev/shm/agentic-celld-orchestration/test-run",
+      inventory_path: "/dev/shm/agentic-celld-orchestration/test-run/orchestration-inventory.json",
+    }),
+    orchestrationInventory: document,
+    providerResources: new Map([[instanceId, { instanceId, name: "celld-test-provider", substrate: "docker" }]]),
+    workerEndpoint: "http://127.0.0.1:18080",
+    fleet: { worker_vars_file_ref: "/protected/worker-vars" },
+    persistInventory: () => {},
+    sendWorkerCommand: async (request) => ({ status: 202, body: { effects: [{ operation_id: request.operationId }] } }),
+  };
+  await issueCommand(runtime, {
+    instanceId,
+    generation: 1,
+    operationId: "interrupted-stop",
+    action: "stop",
+    payload: {},
+  });
+  assert.equal(document.incomplete_mutation_ids.length, 1);
+  let observations = 0;
+  const assertions = await liveOrchestration.cleanupOwnedProviderResources(runtime, {
+    observeProviderResource: async () => (++observations === 1
+      ? exactDockerTerminalObservation({ state: "running" })
+      : exactDockerTerminalObservation({ present: false })),
+    removeProviderResource: async () => {},
+  });
+  assert.equal(assertions.length, 1);
+  assert.deepEqual(document.incomplete_mutation_ids, []);
+  assert.equal(document.resources[0].status, "removed");
+  assert.deepEqual(document.journal.slice(-2).map((entry) => [entry.event, entry.mutation, entry.outcome]), [
+    ["completed", "provider_cleanup", "absent"],
+    ["recovered", "provider_action", "absent"],
+  ]);
+});
+
+test("admin v2 stop waits for libvirt terminal state and has a bounded force fallback", () => {
+  const source = readFileSync(new URL("../../../management/src/http/admin_v2.rs", import.meta.url), "utf8");
+  const handler = source.match(/async fn stop_instance[\s\S]*?async fn destroy_instance/)?.[0] ?? "";
+  assert.match(handler, /graceful_deadline/);
+  assert.match(handler, /get_domain_state\(&domain\).*VmState::Stopped/s);
+  assert.match(handler, /domain\s*\.destroy\(\)/);
+  assert.match(handler, /forced_deadline/);
+  assert.ok(handler.indexOf("forced_deadline") < handler.lastIndexOf("synth_succeeded_op"));
 });
 
 test("provider terminal authorization is explicit and transactional before persistence", async (t) => {

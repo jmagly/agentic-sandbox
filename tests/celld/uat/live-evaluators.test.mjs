@@ -167,6 +167,9 @@ const responseLossCases = matrixCases({ substrate: substrates, action: lifecycle
   provider_dispatch_count: 1,
   attempts: 3,
   unknown_observed: true,
+  unknown_event_count: 1,
+  unknown_event_sequence: index + 1,
+  unknown_event_sha256: uniqueDigest(index + 800),
   convergence_ms: 30_000,
   provider_before: providerFixture(entry.substrate, providerStates[entry.substrate][entry.action][0], index * 2),
   provider_after: providerFixture(entry.substrate, providerStates[entry.substrate][entry.action][1], index * 2 + 1),
@@ -479,6 +482,14 @@ test("orchestration formulas reject aggregate-only, incomplete, duplicate, and a
   const duplicateResponseIdentity = structuredClone(passing["CELLD.005.ORIGINAL_ID"]);
   duplicateResponseIdentity.cases[1].operation_id_sha256 = duplicateResponseIdentity.cases[0].operation_id_sha256;
   assert.equal(TEST_LIVE_EVALUATORS["CELLD.005.ORIGINAL_ID"](duplicateResponseIdentity).passed, false);
+
+  const duplicateUnknownEvent = structuredClone(passing["CELLD.005.ORIGINAL_ID"]);
+  duplicateUnknownEvent.cases[0].unknown_event_count = 2;
+  assert.equal(TEST_LIVE_EVALUATORS["CELLD.005.ORIGINAL_ID"](duplicateUnknownEvent).passed, false);
+
+  const missingUnknownEventDigest = structuredClone(passing["CELLD.005.ORIGINAL_ID"]);
+  delete missingUnknownEventDigest.cases[0].unknown_event_sha256;
+  assert.throws(() => TEST_LIVE_EVALUATORS["CELLD.005.ORIGINAL_ID"](missingUnknownEventDigest), /non-empty string/);
 
   const amplifiedResponseLoss = structuredClone(passing["CELLD.005.NO_SECOND_EFFECT"]);
   amplifiedResponseLoss.cases[0].attempts = 4;

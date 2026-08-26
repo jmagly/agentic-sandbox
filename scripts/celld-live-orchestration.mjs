@@ -117,6 +117,24 @@ function canonicalJson(value) {
   throw new Error("unsupported JSON value");
 }
 
+export function durableEffectHistoryObservation(cell, operationIdValue, kind) {
+  if (!cell || !Array.isArray(cell.history)) throw new Error("Worker cell is missing durable effect history");
+  const events = cell.history.filter((event) => event?.operation_id === operationIdValue && event?.kind === kind);
+  if (events.length !== 1) throw new Error(`Worker cell requires exactly one durable ${kind} event for ${operationIdValue}`);
+  const event = events[0];
+  if (event.document_type !== "instance-cell-event" || event.schema_version !== "1"
+    || !Number.isInteger(event.sequence) || event.sequence < 1 || Number.isNaN(Date.parse(event.recorded_at ?? ""))) {
+    throw new Error(`Worker cell durable ${kind} event is invalid`);
+  }
+  return {
+    operation_id: event.operation_id,
+    kind: event.kind,
+    sequence: event.sequence,
+    sha256: sha256(canonicalJson(event)),
+    count: events.length,
+  };
+}
+
 function argument(args, name) {
   const index = args.indexOf(name);
   if (index < 0 || !args[index + 1]) throw new Error(`${name} is required`);
@@ -1356,6 +1374,46 @@ export async function completeObservedProviderMutation(runtime, { effect, instan
   return terminal.materialized;
 }
 
+export async function waitForObservedProviderEffect(runtime, { resource, action }, {
+  observeProvider = async ({ resource: ownedResource }) => observeOrchestrationProvider(runtime, ownedResource),
+  timeoutMs = runtime?.providerConvergenceTimeoutMs ?? 180_000,
+  intervalMs = runtime?.providerConvergenceIntervalMs ?? 250,
+} = {}) {
+  if (!resource || !ACTIONS.includes(action) || !SUBSTRATES.includes(resource.substrate)
+      || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1
+      || !Number.isSafeInteger(intervalMs) || intervalMs < 0) {
+    throw new Error("provider effect convergence request is invalid");
+  }
+  const expectedStates = {
+    provision: new Set(["created", "shut off"]),
+    start: new Set(["running"]),
+    stop: new Set(["exited", "shut off"]),
+  };
+  const deadline = Date.now() + timeoutMs;
+  let latest = null;
+  do {
+    const observation = await observeProvider({ runtime, resource, action });
+    if (!observation || observation.owned !== true || observation.ambiguous === true) {
+      throw new Error("provider effect convergence observation is not explicitly exact-owned");
+    }
+    latest = observation;
+    const presentTerminal = action !== "destroy";
+    const storageTerminal = action === "provision" && resource.substrate === "qemu"
+      ? observation.provider_storage_present === true
+      : action === "destroy"
+        ? observation.provider_storage_present === false
+        : true;
+    if (observation.present === presentTerminal
+        && storageTerminal
+        && (!presentTerminal || expectedStates[action]?.has(observation.state))) {
+      return observation;
+    }
+    if (Date.now() >= deadline) break;
+    await sleep(intervalMs);
+  } while (Date.now() < deadline);
+  throw new Error(`timed out waiting for independently observed ${resource.substrate} ${action} provider convergence from ${latest?.state ?? "unknown"}`);
+}
+
 function exactRecoveryProviderResource(runtime, plan) {
   const subject = plan.subject;
   const resource = runtime.providerResources?.get(subject.instance_id);
@@ -1425,6 +1483,16 @@ function incompleteProviderMutationFor(inventory, instanceId) {
     && inventory.incomplete_mutation_ids.includes(entry.mutation_id)
     && entry.subject_type === "provider_resource"
     && entry.subject.instance_id === instanceId);
+}
+
+function incompleteProviderActionPlanFor(inventory, instanceId) {
+  const plans = inventory.journal.filter((entry) => entry.event === "planned"
+    && entry.mutation === "provider_action"
+    && inventory.incomplete_mutation_ids.includes(entry.mutation_id)
+    && entry.subject_type === "provider_resource"
+    && entry.subject.instance_id === instanceId);
+  if (plans.length > 1) throw new Error("provider cleanup target has multiple incomplete provider action plans");
+  return plans[0] ?? null;
 }
 
 function completeRecoveredProviderEffect(runtime, original, record, observation) {
@@ -1677,7 +1745,7 @@ async function runOneEffectCampaign(runtime, { prefix, substrate, instanceId, ge
   if (ACTIONS.includes(action)) {
     const resource = runtime.providerResources.get(instanceId);
     if (!resource || resource.substrate !== substrate) throw new Error("provider terminal observation target is absent from the exact-run inventory");
-    providerObservation = observeOrchestrationProvider(runtime, resource);
+    providerObservation = await waitForObservedProviderEffect(runtime, { resource, action });
     await completeObservedProviderMutation(runtime, { effect, instanceId, generation, action, observation: providerObservation });
   }
   return { id, effect, terminal: terminal.body, replayStatuses, cell: cell.cell, providerObservation };
@@ -1943,27 +2011,33 @@ async function runUat005(runtime, timeline) {
         const responseLossFault = await applyPlannedOrchestrationFault(runtime, { kind: "callback_response_loss", target: relayName(runtime.fleet) }, async (target) => {
           await signalExactCallbackResponseLoss(runtime, target);
           originalEffect = await issueCommand(runtime, { instanceId, generation, operationId: id, action, payload: payloads[action] });
-          unknown = await waitCellEffect(runtime, instanceId, generation, id, ["unknown"]);
           terminal = await waitCellEffect(runtime, instanceId, generation, id, ["succeeded", "failed", "rejected"]);
+          unknown = durableEffectHistoryObservation(terminal.cell, id, "effect_unknown");
         });
         if (terminal.effect.status !== "succeeded") throw new Error(`${substrate} ${action} response-loss recovery failed`);
         const managementReplay = await callbackRequest(callbackContext(runtime.fleet, runtime.managementHost, instanceId, generation), originalEffect);
-        const providerAfter = observeOrchestrationProvider(runtime, { instanceId, name, substrate });
+        const providerAfter = await waitForObservedProviderEffect(runtime, {
+          resource: { instanceId, name, substrate },
+          action,
+        });
         await completeObservedProviderMutation(runtime, { effect: originalEffect, instanceId, generation, action, observation: providerAfter });
         const record = {
           substrate,
           action,
           trial: generation,
           operation_id_sha256: sha256(id),
-          original_id_match: unknown.effect.operation_id === id && terminal.effect.operation_id === id,
-          replacement_id_observed: unknown.effect.operation_id !== id || terminal.effect.operation_id !== id,
+          original_id_match: unknown.operation_id === id && terminal.effect.operation_id === id,
+          replacement_id_observed: unknown.operation_id !== id || terminal.effect.operation_id !== id,
           effect_records: terminal.cell.effects.filter((effect) => effect.operation_id === id).length,
+          unknown_event_count: unknown.count,
+          unknown_event_sequence: unknown.sequence,
+          unknown_event_sha256: unknown.sha256,
           management_replay_status: managementReplay.status,
           management_replay_terminal_matches: managementReplay.body?.status === terminal.effect.status,
           provider_dispatch_count_observed: Number.isInteger(managementReplay.body?.provider_dispatch_count),
           provider_dispatch_count: managementReplay.body?.provider_dispatch_count ?? 0,
           attempts: terminal.effect.attempts,
-          unknown_observed: true,
+          unknown_observed: unknown.kind === "effect_unknown",
           convergence_ms: Date.now() - started,
           provider_before: providerBefore,
           provider_after: providerAfter,
@@ -2669,12 +2743,19 @@ export async function removeExactlyObservedProvider(runtime, resource, record, a
   if (!["shut off", "crashed"].includes(current.state)) {
     run("virsh", ["-c", runtime.config.libvirt_uri, "destroy", current.provider_id], { timeout: 180_000 });
   }
-  const beforeUndefine = compareObservedProviderBinding(
-    resource,
-    record,
-    authorizedObservation,
-    await observeEffectTarget({ runtime, resource, record, authorizedObservation }),
-  );
+  const convergenceDeadline = Date.now() + (runtime.providerCleanupConvergenceTimeoutMs ?? 30_000);
+  let beforeUndefine;
+  do {
+    beforeUndefine = compareObservedProviderBinding(
+      resource,
+      record,
+      authorizedObservation,
+      await observeEffectTarget({ runtime, resource, record, authorizedObservation }),
+    );
+    if (["shut off", "crashed"].includes(beforeUndefine.state)) break;
+    if (Date.now() >= convergenceDeadline) break;
+    await sleep(runtime.providerCleanupConvergenceIntervalMs ?? 250);
+  } while (Date.now() < convergenceDeadline);
   const storage = validateExactQemuStorage(resource, beforeUndefine);
   if (!["shut off", "crashed"].includes(beforeUndefine.state)) {
     throw new OrchestrationCleanupResidueError("QEMU cleanup did not observe the exact domain stopped before undefine");
@@ -2782,7 +2863,8 @@ export async function cleanupOwnedProviderResources(runtime, dependencies = {}) 
       }
       const first = exactCleanupObservation(record, await observe({ runtime, resource, record }));
       let cleanupPlan = incompleteProviderCleanupPlan(runtime.orchestrationInventory, record.instance_id);
-      if (!cleanupPlan) cleanupPlan = planProviderCleanup(runtime, resource);
+      const interruptedActionPlan = incompleteProviderActionPlanFor(runtime.orchestrationInventory, record.instance_id);
+      if (!cleanupPlan) cleanupPlan = planProviderCleanup(runtime, resource, new Date(), interruptedActionPlan?.mutation_id ?? null);
       if (first.present) {
         await remove({ runtime, plan: cleanupPlan, resource, record, observation: first });
         const finalObservation = exactCleanupObservation(record, await observe({ runtime, plan: cleanupPlan, resource, record }));
@@ -2790,6 +2872,16 @@ export async function cleanupOwnedProviderResources(runtime, dependencies = {}) 
       }
       reconcileQemuQuarantineResidue(runtime, resource, record, cleanupPlan, dependencies);
       completeProviderCleanup(runtime, cleanupPlan, { present: false, owned: true, provider_storage_present: false });
+      if (interruptedActionPlan
+          && runtime.orchestrationInventory.incomplete_mutation_ids.includes(interruptedActionPlan.mutation_id)) {
+        finishOrchestrationMutation(runtime.orchestrationInventory, interruptedActionPlan, {
+          event: "recovered",
+          outcome: "absent",
+          observedIdentitySha256: null,
+          observedConfigurationSha256: null,
+        });
+        persistOrchestrationInventory(runtime);
+      }
       runtime.providerResources?.delete(record.instance_id);
       assertions.push(`${record.substrate === "docker" ? "Docker" : "QEMU"} provider identity ${sha256(record.instance_id)} absent`);
     } catch (error) {

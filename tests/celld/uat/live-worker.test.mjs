@@ -14,6 +14,8 @@ import {
   executeWorkerDriver,
   prepareWorkerConformanceProject,
   reviewedFileInventoryArgs,
+  stableContainerFileInventory,
+  stableSocketInventory,
 } from "../../../scripts/celld-live-worker.mjs";
 
 function profile(driver, hostHash = "2".repeat(64)) {
@@ -169,6 +171,35 @@ test("reviewed file inventory tolerates descendant removal races without hiding 
   ]);
   assert.ok(args.includes("-ignore_readdir_race"));
   assert.equal(args.includes("-ignore_readdir_race") && args.includes("-xdev"), true);
+  assert.equal(args.at(-1), "%p|%y\n");
+});
+
+test("side-effect inventory retains stable listeners and ignores transient socket traffic", () => {
+  const tcp = [
+    "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode",
+    "   0: 0100007F:1FBD 00000000:0000 0A 00000000:00000000 00:00000000 00000000 1000 0 12345 1",
+    "   1: 0B1EAC0A:C350 14001EAC:01BB 01 00000000:00000000 02:00000010 00000000 1000 0 12346 2",
+  ].join("\n");
+  const udp = [
+    "   sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode",
+    " 1000: 00000000:14E9 00000000:0000 07 00000000:00000000 00:00000000 00000000 0 0 22222 2",
+  ].join("\n");
+  const unix = [
+    "Num       RefCount Protocol Flags    Type St Inode Path",
+    "0001: 00000002 00000000 00010000 0001 01 33333 /run/celld.sock",
+    "0002: 00000003 00000000 00000000 0001 03 33334",
+  ].join("\n");
+  assert.deepEqual(stableSocketInventory("tcp", tcp), ["tcp|0100007F:1FBD"]);
+  assert.deepEqual(stableSocketInventory("udp", udp), ["udp|00000000:14E9"]);
+  assert.deepEqual(stableSocketInventory("unix", unix), ["unix|0001|/run/celld.sock"]);
+  assert.throws(() => stableSocketInventory("raw", tcp), /allowlist/);
+});
+
+test("container file inventory measures persistent additions and deletions, not routine writes", () => {
+  assert.deepEqual(stableContainerFileInventory("C /var/lib/celld/state.db\nA /tmp/unexpected\nD /etc/removed\nA /tmp/unexpected\n"), [
+    "A /tmp/unexpected",
+    "D /etc/removed",
+  ]);
 });
 
 test("Worker driver fixes the evaluator-owned matrices and does not claim UAT-009", () => {
