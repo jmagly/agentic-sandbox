@@ -989,6 +989,48 @@ test("nested cleanup already absent after its effect converges without replay ac
   }
 });
 
+test("normal QEMU lifecycle destroy needs no cleanup quarantine plan once exact storage is absent", async () => {
+  const fixture = exactRunFixture("red-qemu-lifecycle-destroy");
+  try {
+    const storageRoot = join(fixture.root, "vm-storage");
+    const storagePath = join(storageRoot, "celld-owned-provider");
+    fixture.config.vm_storage_dir = storageRoot;
+    mkdirSync(storagePath, { recursive: true, mode: 0o700 });
+    writeFileSync(join(storagePath, "disk.qcow2"), "authorized storage\n", { mode: 0o600 });
+    const { resource } = addObservedQemuProvider(fixture.inventory, storagePath);
+    const destroy = planOrchestrationMutation(fixture.inventory, {
+      mutation: "provider_action",
+      scenarioId: resource.scenario_id,
+      subjectType: "provider_resource",
+      subject: providerSubject({
+        instanceId: resource.instance_id,
+        name: resource.name,
+        substrate: "qemu",
+        action: "destroy",
+        operationId: "normal-lifecycle-destroy",
+      }),
+    }, new Date("2026-08-23T00:00:03.000Z"));
+    finishOrchestrationMutation(fixture.inventory, destroy.entry, {
+      outcome: "absent",
+      observedIdentitySha256: null,
+      observedConfigurationSha256: null,
+    }, new Date("2026-08-23T00:00:04.000Z"));
+    rmSync(storagePath, { recursive: true, force: false });
+    const runtime = runtimeFor(fixture, resource);
+    let destructiveCalls = 0;
+    const assertions = await liveOrchestration.cleanupOwnedProviderResources(runtime, {
+      observeProviderResource: async () => { throw new Error("removed lifecycle resource must not be destructively re-observed"); },
+      removeProviderResource: async () => { destructiveCalls += 1; },
+    });
+    assert.deepEqual(assertions, []);
+    assert.equal(destructiveCalls, 0);
+    assert.equal(runtime.providerResources.has(resource.instance_id), false);
+    assert.deepEqual(fixture.inventory.incomplete_mutation_ids, []);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
 test("recovery heals an active materialized fault even after its apply terminal was durably committed", async () => {
   const fixture = exactRunFixture("red-active-fault");
   try {
@@ -1351,6 +1393,7 @@ test("normal provider cleanup continues exact Docker cleanup after QEMU helper r
       },
     );
     assert.equal(cleanupError.message, "simulated QEMU helper failure");
+    assert.equal(cleanupError.errorCode, "CELLD_PROVIDER_CLEANUP_REMOVE");
     assert.deepEqual(removals, [qemuResource.instance_id, dockerResource.instance_id]);
     assert.equal(qemuResource.status, "cleanup_pending");
     assert.equal(dockerResource.status, "removed");

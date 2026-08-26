@@ -1825,40 +1825,46 @@ async function waitCellEffect(runtime, instanceId, generation, operationIdValue,
 }
 
 async function runOneEffectCampaign(runtime, { prefix, substrate, instanceId, generation, action, payload, repeats = 0 }) {
-  const id = operationId(prefix, substrate, generation, action);
-  const effect = await issueCommand(runtime, { instanceId, generation, operationId: id, action, payload });
-  const terminal = await terminalCallback(runtime, instanceId, generation, effect);
-  if (terminal.body.status !== "succeeded") throw new Error(`${substrate} ${action} did not succeed: ${terminal.body.terminal_code ?? "unknown"}`);
-  let replayStatuses = [];
-  if (repeats > 0) {
-    const context = callbackContext(runtime.fleet, runtime.managementHost, instanceId, generation);
-    context.agent = new HttpsAgent({ keepAlive: true, maxSockets: 24, ca: context.ca, cert: context.clientCert, key: context.clientKey, rejectUnauthorized: true });
-    try {
-      replayStatuses = await parallelRepeat(repeats, 24, async () => {
-        const replay = await callbackRequest(context, effect);
-        const resultPresent = Object.hasOwn(replay.body ?? {}, "result") && Object.hasOwn(terminal.body, "result");
-        return {
-          status: replay.status,
-          management_operation_id_matches: replay.body?.management_operation_id === terminal.body.management_operation_id,
-          terminal_status_matches: replay.body?.status === terminal.body.status,
-          terminal_code_matches: replay.body?.terminal_code === terminal.body.terminal_code,
-          result_matches: resultPresent && canonicalJson(replay.body.result) === canonicalJson(terminal.body.result),
-          provider_dispatch_count_matches: replay.body?.provider_dispatch_count === terminal.body.provider_dispatch_count,
-        };
-      });
-    } finally {
-      context.agent.destroy();
+  try {
+    const id = operationId(prefix, substrate, generation, action);
+    const effect = await issueCommand(runtime, { instanceId, generation, operationId: id, action, payload });
+    const terminal = await terminalCallback(runtime, instanceId, generation, effect);
+    if (terminal.body.status !== "succeeded") throw new Error(`${substrate} ${action} did not succeed: ${terminal.body.terminal_code ?? "unknown"}`);
+    let replayStatuses = [];
+    if (repeats > 0) {
+      const context = callbackContext(runtime.fleet, runtime.managementHost, instanceId, generation);
+      context.agent = new HttpsAgent({ keepAlive: true, maxSockets: 24, ca: context.ca, cert: context.clientCert, key: context.clientKey, rejectUnauthorized: true });
+      try {
+        replayStatuses = await parallelRepeat(repeats, 24, async () => {
+          const replay = await callbackRequest(context, effect);
+          const resultPresent = Object.hasOwn(replay.body ?? {}, "result") && Object.hasOwn(terminal.body, "result");
+          return {
+            status: replay.status,
+            management_operation_id_matches: replay.body?.management_operation_id === terminal.body.management_operation_id,
+            terminal_status_matches: replay.body?.status === terminal.body.status,
+            terminal_code_matches: replay.body?.terminal_code === terminal.body.terminal_code,
+            result_matches: resultPresent && canonicalJson(replay.body.result) === canonicalJson(terminal.body.result),
+            provider_dispatch_count_matches: replay.body?.provider_dispatch_count === terminal.body.provider_dispatch_count,
+          };
+        });
+      } finally {
+        context.agent.destroy();
+      }
     }
+    const cell = await waitCellEffect(runtime, instanceId, generation, id, ["succeeded"]);
+    let providerObservation = null;
+    if (ACTIONS.includes(action)) {
+      const resource = runtime.providerResources.get(instanceId);
+      if (!resource || resource.substrate !== substrate) throw new Error("provider terminal observation target is absent from the exact-run inventory");
+      providerObservation = await waitForObservedProviderEffect(runtime, { resource, action });
+      await completeObservedProviderMutation(runtime, { effect, instanceId, generation, action, observation: providerObservation });
+    }
+    return { id, effect, terminal: terminal.body, replayStatuses, cell: cell.cell, providerObservation };
+  } catch (error) {
+    throw annotateDriverError(error, {
+      errorCode: `CELLD_PROVIDER_CAMPAIGN_${substrate.toUpperCase()}_${action.toUpperCase()}`,
+    });
   }
-  const cell = await waitCellEffect(runtime, instanceId, generation, id, ["succeeded"]);
-  let providerObservation = null;
-  if (ACTIONS.includes(action)) {
-    const resource = runtime.providerResources.get(instanceId);
-    if (!resource || resource.substrate !== substrate) throw new Error("provider terminal observation target is absent from the exact-run inventory");
-    providerObservation = await waitForObservedProviderEffect(runtime, { resource, action });
-    await completeObservedProviderMutation(runtime, { effect, instanceId, generation, action, observation: providerObservation });
-  }
-  return { id, effect, terminal: terminal.body, replayStatuses, cell: cell.cell, providerObservation };
 }
 
 async function runUat003(runtime, timeline) {
@@ -2111,50 +2117,56 @@ async function runUat005(runtime, timeline) {
     for (let generation = 1; generation <= 100; generation += 1) {
       const payloads = { provision: provisionPayload(runtime.config, substrate, name), start: {}, stop: {}, destroy: {} };
       for (const action of ACTIONS) {
-        if (action === "provision") planProviderResource(runtime, { instanceId, name, substrate });
-        const providerBefore = observeOrchestrationProvider(runtime, { instanceId, name, substrate });
-        const id = operationId("uat005", substrate, generation, action);
-        const started = Date.now();
-        let originalEffect;
-        let unknown;
-        let terminal;
-        const responseLossFault = await applyPlannedOrchestrationFault(runtime, { kind: "callback_response_loss", target: relayName(runtime.fleet) }, async (target) => {
-          await signalExactCallbackResponseLoss(runtime, target);
-          originalEffect = await issueCommand(runtime, { instanceId, generation, operationId: id, action, payload: payloads[action] });
-          terminal = await waitCellEffect(runtime, instanceId, generation, id, ["succeeded", "failed", "rejected"]);
-          unknown = durableEffectHistoryObservation(terminal.cell, id, "effect_unknown");
-        });
-        if (terminal.effect.status !== "succeeded") throw new Error(`${substrate} ${action} response-loss recovery failed`);
-        const managementReplay = await callbackRequest(callbackContext(runtime.fleet, runtime.managementHost, instanceId, generation), originalEffect);
-        const providerAfter = await waitForObservedProviderEffect(runtime, {
-          resource: { instanceId, name, substrate },
-          action,
-        });
-        await completeObservedProviderMutation(runtime, { effect: originalEffect, instanceId, generation, action, observation: providerAfter });
-        const record = {
-          substrate,
-          action,
-          trial: generation,
-          operation_id_sha256: sha256(id),
-          original_id_match: unknown.operation_id === id && terminal.effect.operation_id === id,
-          replacement_id_observed: unknown.operation_id !== id || terminal.effect.operation_id !== id,
-          effect_records: terminal.cell.effects.filter((effect) => effect.operation_id === id).length,
-          unknown_event_count: unknown.count,
-          unknown_event_sequence: unknown.sequence,
-          unknown_event_sha256: unknown.sha256,
-          management_replay_status: managementReplay.status,
-          management_replay_terminal_matches: managementReplay.body?.status === terminal.effect.status,
-          provider_dispatch_count_observed: Number.isInteger(managementReplay.body?.provider_dispatch_count),
-          provider_dispatch_count: managementReplay.body?.provider_dispatch_count ?? 0,
-          attempts: terminal.effect.attempts,
-          unknown_observed: unknown.kind === "effect_unknown",
-          convergence_ms: Date.now() - started,
-          provider_before: providerBefore,
-          provider_after: providerAfter,
-        };
-        cases.push(record);
-        timeline.push({ scenario: "UAT-CELLD-005", kind: "response_loss_trial", ...record });
-        await healPlannedOrchestrationFault(runtime, responseLossFault, async () => {});
+        try {
+          if (action === "provision") planProviderResource(runtime, { instanceId, name, substrate });
+          const providerBefore = observeOrchestrationProvider(runtime, { instanceId, name, substrate });
+          const id = operationId("uat005", substrate, generation, action);
+          const started = Date.now();
+          let originalEffect;
+          let unknown;
+          let terminal;
+          const responseLossFault = await applyPlannedOrchestrationFault(runtime, { kind: "callback_response_loss", target: relayName(runtime.fleet) }, async (target) => {
+            await signalExactCallbackResponseLoss(runtime, target);
+            originalEffect = await issueCommand(runtime, { instanceId, generation, operationId: id, action, payload: payloads[action] });
+            terminal = await waitCellEffect(runtime, instanceId, generation, id, ["succeeded", "failed", "rejected"]);
+            unknown = durableEffectHistoryObservation(terminal.cell, id, "effect_unknown");
+          });
+          if (terminal.effect.status !== "succeeded") throw new Error(`${substrate} ${action} response-loss recovery failed`);
+          const managementReplay = await callbackRequest(callbackContext(runtime.fleet, runtime.managementHost, instanceId, generation), originalEffect);
+          const providerAfter = await waitForObservedProviderEffect(runtime, {
+            resource: { instanceId, name, substrate },
+            action,
+          });
+          await completeObservedProviderMutation(runtime, { effect: originalEffect, instanceId, generation, action, observation: providerAfter });
+          const record = {
+            substrate,
+            action,
+            trial: generation,
+            operation_id_sha256: sha256(id),
+            original_id_match: unknown.operation_id === id && terminal.effect.operation_id === id,
+            replacement_id_observed: unknown.operation_id !== id || terminal.effect.operation_id !== id,
+            effect_records: terminal.cell.effects.filter((effect) => effect.operation_id === id).length,
+            unknown_event_count: unknown.count,
+            unknown_event_sequence: unknown.sequence,
+            unknown_event_sha256: unknown.sha256,
+            management_replay_status: managementReplay.status,
+            management_replay_terminal_matches: managementReplay.body?.status === terminal.effect.status,
+            provider_dispatch_count_observed: Number.isInteger(managementReplay.body?.provider_dispatch_count),
+            provider_dispatch_count: managementReplay.body?.provider_dispatch_count ?? 0,
+            attempts: terminal.effect.attempts,
+            unknown_observed: unknown.kind === "effect_unknown",
+            convergence_ms: Date.now() - started,
+            provider_before: providerBefore,
+            provider_after: providerAfter,
+          };
+          cases.push(record);
+          timeline.push({ scenario: "UAT-CELLD-005", kind: "response_loss_trial", ...record });
+          await healPlannedOrchestrationFault(runtime, responseLossFault, async () => {});
+        } catch (error) {
+          throw annotateDriverError(error, {
+            errorCode: `CELLD_RESPONSE_LOSS_${substrate.toUpperCase()}_${action.toUpperCase()}`,
+          });
+        }
       }
     }
   }
@@ -2889,6 +2901,28 @@ function latestProviderCleanupPlan(inventory, instanceId) {
   return null;
 }
 
+function assertNoUnplannedQemuCleanupResidue(runtime, resource, record) {
+  if (!isAbsolute(record.storage_path ?? "")
+      || resolve(dirname(record.storage_path)) !== resolve(runtime.config.vm_storage_dir ?? "")
+      || basename(record.storage_path) !== resource.name) {
+    throw new OrchestrationCleanupResidueError("removed QEMU resource has an invalid persisted storage boundary");
+  }
+  if (lstatIfPresent(record.storage_path) !== null) {
+    throw new OrchestrationCleanupResidueError("removed QEMU resource retains its original storage pathname without cleanup authority");
+  }
+  const escapedName = resource.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const candidatePattern = new RegExp(`^\\.${escapedName}\\.cleanup-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`);
+  let candidates;
+  try {
+    candidates = readdirSync(dirname(record.storage_path)).filter((name) => candidatePattern.test(name));
+  } catch (error) {
+    throw new OrchestrationCleanupResidueError(`removed QEMU resource cleanup cannot enumerate its exact storage boundary: ${error.message}`, { cause: error });
+  }
+  if (candidates.length !== 0) {
+    throw new OrchestrationCleanupResidueError("removed QEMU resource retains an unplanned storage quarantine");
+  }
+}
+
 function qemuStorageIdentityForPersistedPath(record, path) {
   let metadata;
   try { metadata = lstatSync(path); } catch (error) {
@@ -2942,7 +2976,10 @@ function reconcileQemuQuarantineResidue(runtime, resource, record, cleanupPlan, 
 
 function markCleanupResidue(runtime, error) {
   try { persistOrchestrationInventory(runtime, new Date(), "cleanup_residue"); } catch (persistError) {
-    throw new OrchestrationCleanupResidueError(`${error.message}; cleanup residue persistence failed: ${persistError.message}`, { cause: error });
+    throw annotateDriverError(
+      new OrchestrationCleanupResidueError(`${error.message}; cleanup residue persistence failed: ${persistError.message}`, { cause: error }),
+      { errorCode: error.errorCode ?? "CELLD_PROVIDER_CLEANUP_RESIDUE_PERSISTENCE" },
+    );
   }
   if (error instanceof OrchestrationCleanupResidueError) throw error;
   throw new OrchestrationCleanupResidueError(error.message, { cause: error });
@@ -2960,6 +2997,7 @@ export async function cleanupOwnedProviderResources(runtime, dependencies = {}) 
   const assertions = [];
   const failures = [];
   for (const record of runtime.orchestrationInventory.resources) {
+    let cleanupPhase = "INITIAL_OBSERVATION";
     try {
       const resource = runtime.providerResources?.get(record.instance_id) ?? {
         instanceId: record.instance_id,
@@ -2967,20 +3005,30 @@ export async function cleanupOwnedProviderResources(runtime, dependencies = {}) 
         substrate: record.substrate,
       };
       if (record.status === "removed") {
-        if (record.substrate === "qemu") reconcileQemuQuarantineResidue(runtime, resource, record, latestProviderCleanupPlan(runtime.orchestrationInventory, record.instance_id), dependencies);
+        cleanupPhase = "REMOVED_RESOURCE_RECONCILIATION";
+        if (record.substrate === "qemu") {
+          const cleanupPlan = latestProviderCleanupPlan(runtime.orchestrationInventory, record.instance_id);
+          if (cleanupPlan) reconcileQemuQuarantineResidue(runtime, resource, record, cleanupPlan, dependencies);
+          else assertNoUnplannedQemuCleanupResidue(runtime, resource, record);
+        }
         runtime.providerResources?.delete(record.instance_id);
         continue;
       }
       const first = exactCleanupObservation(record, await observe({ runtime, resource, record }));
+      cleanupPhase = "PLAN";
       let cleanupPlan = incompleteProviderCleanupPlan(runtime.orchestrationInventory, record.instance_id);
       const interruptedActionPlan = incompleteProviderActionPlanFor(runtime.orchestrationInventory, record.instance_id);
       if (!cleanupPlan) cleanupPlan = planProviderCleanup(runtime, resource, new Date(), interruptedActionPlan?.mutation_id ?? null);
       if (first.present) {
+        cleanupPhase = "REMOVE";
         await remove({ runtime, plan: cleanupPlan, resource, record, observation: first });
+        cleanupPhase = "FINAL_OBSERVATION";
         const finalObservation = exactCleanupObservation(record, await observe({ runtime, plan: cleanupPlan, resource, record }));
         if (finalObservation.present) throw new OrchestrationCleanupResidueError("provider cleanup did not reach exact observed absence");
       }
+      cleanupPhase = "QUARANTINE_RECONCILIATION";
       reconcileQemuQuarantineResidue(runtime, resource, record, cleanupPlan, dependencies);
+      cleanupPhase = "TERMINAL_COMMIT";
       completeProviderCleanup(runtime, cleanupPlan, { present: false, owned: true, provider_storage_present: false });
       if (interruptedActionPlan
           && runtime.orchestrationInventory.incomplete_mutation_ids.includes(interruptedActionPlan.mutation_id)) {
@@ -2995,7 +3043,10 @@ export async function cleanupOwnedProviderResources(runtime, dependencies = {}) 
       runtime.providerResources?.delete(record.instance_id);
       assertions.push(`${record.substrate === "docker" ? "Docker" : "QEMU"} provider identity ${sha256(record.instance_id)} absent`);
     } catch (error) {
-      failures.push(error instanceof OrchestrationCleanupResidueError ? error : new OrchestrationCleanupResidueError(error.message, { cause: error }));
+      const failure = error instanceof OrchestrationCleanupResidueError
+        ? error
+        : new OrchestrationCleanupResidueError(error.message, { cause: error });
+      failures.push(annotateDriverError(failure, { errorCode: `CELLD_PROVIDER_CLEANUP_${cleanupPhase}` }));
     }
   }
   if (failures.length) markCleanupResidue(runtime, failures[0]);
