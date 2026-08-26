@@ -155,3 +155,10 @@ Custody snapshot (post-pass): `agentic/dsh:latest` = `sha256:023bc7364b9e627069d
 
 Six-file management WIP (stash-archived, `git stash@{0}`) audited hunk-by-hunk against the v2026.8.5 tree: **100% superseded upstream** (`LIBVIRT_URI` configurability ×5 sites; `AGENTIC_LIBVIRT_MONITOR` disable switch; dev.sh restructure). Resolution = theirs-everywhere, compile-gated clean (`agentic-mgmt` release build vs current tree). Fleet restarted onto fresh binary; surviving pilot re-authenticated mtls without recreation.
 
+### Invariants (I-series, governing the five-project rollout)
+
+- **I1 — Git is the sole lane bridge.** Workers deliver via commits/feature-branches; sessions, transcripts, and container fs are disposable (F16/T3).
+- **I2 — Credential hygiene.** Workers receive only the scoped lease (ro, `AGENTIC_CREDENTIAL_DIR`); never mount `$HOME`, `~/.ssh`, `~/.config`; repo-carried secrets must remain hardware-bound (YubiKey KEK pattern) to stay inert inside sandboxes (F14).
+- **I3 — No session-store crossing.** Worker `.aiwg/` state never syncs back except via git-committed artifacts; interactive host lane never adopts worker session stores.
+- **I4 — Daemon anchoring.** Host daemon (`daemon-init`) binds to the **canonical project root only** — never inside worker clones. Worker clones are deliberately daemon-invisible (no watcher, no MC state, no budget rollup); the AIWG daemon's project-root anchoring is the mechanism, and running it in a clone fragments gate/audit state. Fleet end-state places one daemon *inside each sandbox container*, anchored to the container root — contained by design. Budget enforcement therefore must be applied at instance creation for unsupervised workers until they are adopted under a daemon supervisor.
+
