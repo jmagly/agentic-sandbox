@@ -1030,6 +1030,61 @@ test("recovery heals an active materialized fault even after its apply terminal 
   }
 });
 
+test("recovery durably records a never-observed pending fault without fabricating an apply time", async () => {
+  const fixture = exactRunFixture("red-unobserved-fault");
+  try {
+    const subject = {
+      fault_id: "9".repeat(32),
+      kind: "callback_response_loss",
+      target: "celld-owned-relay",
+      target_identity_sha256: "7".repeat(64),
+      target_ownership_sha256: "8".repeat(64),
+    };
+    planOrchestrationMutation(fixture.inventory, {
+      mutation: "fault_apply",
+      scenarioId: "UAT-CELLD-005",
+      subjectType: "fault",
+      subject,
+    }, new Date("2026-08-23T00:00:01.000Z"));
+    commitOrchestrationInventory(fixture.config.inventory_path, fixture.inventory, { config: fixture.config });
+    const runtime = {
+      scenarioId: "UAT-CELLD-005",
+      runId: fixture.runId,
+      config: fixture.config,
+      orchestrationInventory: fixture.inventory,
+      providerResources: new Map(),
+      persistedJournalHeadSha256: fixture.inventory.journal_head_sha256,
+    };
+    const dependencies = {
+      observeFaultTarget: async () => ({
+        owned: true,
+        present: false,
+        target_identity_sha256: subject.target_identity_sha256,
+        target_ownership_sha256: subject.target_ownership_sha256,
+      }),
+      healFaultTarget: async () => { throw new Error("an unobserved fault must not be healed"); },
+    };
+
+    await liveOrchestration.recoverOrchestrationInventory(runtime, dependencies);
+    const reloaded = loadProtectedOrchestrationInventory(fixture.config.inventory_path, fixture.config, {
+      expectedHostSha256: fixture.inventory.host_sha256,
+    });
+    assert.equal(reloaded.faults[0].status, "healed");
+    assert.equal(reloaded.faults[0].applied_at, undefined);
+    assert.ok(Number.isFinite(Date.parse(reloaded.faults[0].healed_at)));
+    assert.deepEqual(reloaded.incomplete_mutation_ids, []);
+    assert.equal(reloaded.journal.at(-1).outcome, "not_observed");
+
+    await liveOrchestration.recoverOrchestrationInventory({
+      ...runtime,
+      orchestrationInventory: reloaded,
+      persistedJournalHeadSha256: reloaded.journal_head_sha256,
+    }, dependencies);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
 test("recovery does not trust caller-supplied owned true for unbound provider or fault plans", async (t) => {
   await t.test("provider plan", async () => {
     const fixture = exactRunFixture("red-unbound-provider");

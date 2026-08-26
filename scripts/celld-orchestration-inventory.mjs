@@ -591,7 +591,7 @@ function validateV2(inventory, config, { expectedHostSha256, expectedUid, expect
         || !["planned", "applied", "heal_pending", "healed"].includes(fault?.status)
         || !Number.isSafeInteger(fault?.last_sequence) || fault.last_sequence < 1
         || !validTimestamp(fault?.planned_at) || !validTimestamp(fault?.updated_at)
-        || (["applied", "healed"].includes(fault?.status) && !validTimestamp(fault?.applied_at))
+        || (fault?.applied_at !== undefined && !validTimestamp(fault.applied_at))
         || (fault?.status === "healed" && !validTimestamp(fault?.healed_at))
         || fault.id !== expected?.id || fault.kind !== expected?.kind || fault.target !== expected?.target
         || fault.target_identity_sha256 !== expected?.target_identity_sha256
