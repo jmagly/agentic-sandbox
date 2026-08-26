@@ -47,6 +47,10 @@ jobs:
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
       CARGO_TARGET_DIR: ${{ github.workspace }}/.celld-target
+      # The installed privileged helper is verified byte-for-byte against the
+      # candidate built below. Never let the runner's moving `stable` alias
+      # silently change those reviewed bytes.
+      RUSTUP_TOOLCHAIN: "1.92.0"
       CELLD_QUALIFICATION_EXPECTED_HOST: titan
       CELLD_QUALIFICATION_EXPECTED_COMMIT: ${{ github.sha }}
       CELLD_QUALIFICATION_BUILD_ROOT: /build

@@ -39,6 +39,7 @@ test("Celld qualification is manual, Titan-only, and capacity-one", () => {
   assert.match(workflow, /group: agentic-sandbox-vm-e2e/);
   assert.match(workflow, /CARGO_BUILD_JOBS: "8"/);
   assert.match(workflow, /CARGO_INCREMENTAL: "0"/);
+  assert.match(workflow, /RUSTUP_TOOLCHAIN: "1\.92\.0"/);
   assert.match(workflow, /name: Automated Celld UAT 003-015/);
   assert.match(workflow, /timeout-minutes: 480/);
   assert.match(workflow, /420m/);
