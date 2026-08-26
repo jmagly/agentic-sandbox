@@ -3,7 +3,7 @@
 import { spawnSync } from "node:child_process";
 import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { request as httpsRequest } from "node:https";
+import { Agent as HttpsAgent, request as httpsRequest } from "node:https";
 import { connect, createServer as createNetServer, isIP } from "node:net";
 import { hostname } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
@@ -27,6 +27,12 @@ const OBSERVATION_SCHEMA = "agentic-sandbox.celld-live-observation/v1";
 const NETWORK_AUTH_INVENTORY_SCHEMA = "agentic-sandbox.celld-network-auth-inventory/v1";
 const NETWORK_AUTH_OWNER = Object.freeze({ repository: "roctinam/agentic-sandbox", workflow: "celld-qualification.yml" });
 const PROBE_CONCURRENCY = 32;
+const DIRECT_HTTPS_AGENT = new HttpsAgent({
+  keepAlive: false,
+  maxCachedSessions: 0,
+  maxSockets: PROBE_CONCURRENCY,
+  proxyEnv: {},
+});
 const MTLS_PROXY_PORT = 8443;
 const MANAGEMENT_OPERATOR_CN = "agentic-celld-management";
 const SCENARIOS = new Set(["UAT-CELLD-010", "UAT-CELLD-012"]);
@@ -1009,7 +1015,7 @@ function managementCelldStatusRequest(management, fleet) {
       cert: identity,
       key: identity,
       rejectUnauthorized: true,
-      agent: false,
+      agent: DIRECT_HTTPS_AGENT,
       timeout: 10_000,
     }, (response) => {
       const chunks = [];
@@ -1151,7 +1157,7 @@ function boundedHttpsRequest(url, { method, headers, body, restrictedValues, tls
       key: tls.identity,
       ...(tls.servername === undefined ? {} : { servername: tls.servername }),
       rejectUnauthorized: true,
-      agent: false,
+      agent: DIRECT_HTTPS_AGENT,
       timeout: 10_000,
     }, (response) => {
       const chunks = [];
@@ -1335,7 +1341,8 @@ export async function probeEnvironmentProxy(route, keyring, {
     operationId = `environment-proxy-${randomBytes(12).toString("hex")}`;
     const path = `/instance-cells/environment-proxy-${randomUUID()}`;
     response = await requester(route.endpoint, path, { method: "GET", headers: signedHeaders({ method: "GET", path, operationId, generation: 1, body: "", ...keyring }), tls: route.tls });
-    if (response.status !== 404 || response.code !== "cell.missing" || trap.connections() !== 0) throw new Error("environment proxy intercepted or altered the private Celld route");
+    if (trap.connections() !== 0) throw new Error("environment proxy intercepted the private Celld route");
+    if (response.status !== 404 || response.code !== "cell.missing") throw new Error("environment proxy private Celld control response was invalid");
   } catch (error) {
     primaryError = error;
   } finally {

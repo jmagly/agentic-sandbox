@@ -615,6 +615,28 @@ test("environment proxy variables cannot intercept the explicit private route", 
   assert.deepEqual(environment, { HTTPS_PROXY: "http://old.invalid:1" });
 });
 
+test("environment proxy probe distinguishes interception from an invalid private response", async () => {
+  const route = { endpoint: "https://172.30.0.20:8443", tls: { ca: Buffer.from("private-ca"), identity: Buffer.from("management") } };
+  const keyring = { keyId: "run-key", key: "k".repeat(43) };
+  await assert.rejects(() => probeEnvironmentProxy(route, keyring, {
+    environment: {},
+    openTrap: async () => ({ url: "http://127.0.0.1:41234", connections: () => 1, close: async () => {} }),
+    requester: async () => ({ status: 404, code: "cell.missing" }),
+  }), /intercepted the private Celld route/);
+  await assert.rejects(() => probeEnvironmentProxy(route, keyring, {
+    environment: {},
+    openTrap: async () => ({ url: "http://127.0.0.1:41234", connections: () => 0, close: async () => {} }),
+    requester: async () => ({ status: 401, code: "cell.signature_invalid" }),
+  }), /private Celld control response was invalid/);
+});
+
+test("private Celld HTTPS requests override environment proxy agents", () => {
+  const source = readFileSync(new URL("../../../scripts/celld-live-network-auth.mjs", import.meta.url), "utf8");
+  assert.match(source, /new HttpsAgent\(\{[\s\S]*?proxyEnv: \{\}[\s\S]*?\}\)/);
+  assert.match(source, /agent: DIRECT_HTTPS_AGENT/);
+  assert.doesNotMatch(source, /agent: false/);
+});
+
 test("partition controller persists before mutation and heals only its exact nft table", () => {
   const inventory = createNetworkAuthInventory({ runId: "titan-765", runRoot: "/dev/shm/celld-qualification/titan-765", host: "titan", now: new Date("2026-08-23T08:00:00Z") });
   registerNetworkNamespace(inventory, { container: "celld-fleet-node-1", pid: 3210, inode: 4026533001, runLabel: "titan-765" }, new Date("2026-08-23T08:00:01Z"));

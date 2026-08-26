@@ -402,7 +402,9 @@ async function runExcluded(runtime, timeline) {
   const effects = excludedInventoryEffects(before, after);
   const unchanged = Object.values(effects).every((value) => value === 0);
   const diagnosis = await withDriverOperation(operation("diagnose-fleet"), errorFields, () => diagnoseFleet(runtime.fleetPath));
-  const probe = await withDriverOperation(operation("probe-worker"), errorFields, () => probeFleetWorker(runtime.fleetPath));
+  const probe = await withWorkerAccess(operation("probe-worker-endpoint"), errorFields, runtime.fleetPath, (endpoint) => (
+    withDriverOperation(operation("probe-worker"), errorFields, () => probeFleetWorker(runtime.fleetPath, { endpoint }))
+  ));
   timeline.push({ scenario: "UAT-CELLD-008", attempts: attempts.length, typed_rejections: typedRejections, codes, attempt_records: attempts, inventory_before: before, inventory_after: after, inventory_before_sha256: `sha256:${sha256(JSON.stringify(before))}`, inventory_after_sha256: `sha256:${sha256(JSON.stringify(after))}`, effects, fleet_status: diagnosis.status, worker_status: probe.status });
   return { assertions: [
     { id: "CELLD.008.LOUD_REJECTION", measurements: { capabilities: EXCLUDED, attempts_per_capability: 100, attempts: 800, typed_rejections: typedRejections, silent_successes: silentSuccesses } },

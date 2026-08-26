@@ -186,6 +186,8 @@ test("Worker driver fixes the evaluator-owned matrices and does not claim UAT-00
   assert.match(source, /CELLD_LIVE_WORKER_RESET_NEGATIVE_PROJECTS_FAILED/);
   assert.match(source, /operation\("copy-negative-projects"\)/);
   assert.match(source, /copyNegativeProjectsToContainer/);
+  assert.match(source, /withWorkerAccess\(operation\("probe-worker-endpoint"\)[\s\S]*?probeFleetWorker\(runtime\.fleetPath, \{ endpoint \}\)/);
+  assert.doesNotMatch(source, /operation\("probe-worker"\)[^\n]*probeFleetWorker\(runtime\.fleetPath\)\)/);
   assert.match(source, /\["exec", "-i", primary, "sh", "-c"/);
   assert.match(source, /cat > \$\{targetPath\}/);
   assert.doesNotMatch(source, /\["cp", `\$\{negativeRoot\}\/\.`/);
