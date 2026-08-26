@@ -4,7 +4,7 @@ import { chmodSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 
-import { getWorkerCell, reconcileWorkerCell, sendWorkerCommand } from "../../../scripts/celld-worker-client.mjs";
+import { getWorkerCell, getWorkerOperation, reconcileWorkerCell, sendWorkerCommand } from "../../../scripts/celld-worker-client.mjs";
 
 const root = join("/dev/shm", `agentic-worker-client-${randomUUID()}`);
 const varsFile = join(root, "worker-vars");
@@ -67,4 +67,30 @@ test("Worker lookup and reconcile preserve caller-supplied operation and generat
     { path: "/instance-cells/instance-a", method: "GET", operation: "operation-original", generation: "2", body: undefined },
     { path: "/instance-cells/instance-a/reconcile", method: "POST", operation: "operation-original", generation: "2", body: '{"management_generation":2}' },
   ]);
+});
+
+test("Worker operation lookup uses a signed bounded projection route", async () => {
+  const fetcher = async (url, init) => {
+    assert.equal(url.pathname, "/instance-cells/instance-a/operation");
+    assert.equal(init.method, "GET");
+    assert.equal(init.headers["x-agentic-operation-id"], "operation-original");
+    assert.equal(init.headers["x-agentic-generation"], "2");
+    return Response.json({
+      instance_id: "instance-a",
+      generation: 2,
+      effects: [{ operation_id: "operation-original", status: "succeeded" }],
+      history: [{ operation_id: "operation-original", kind: "effect_terminal" }],
+    });
+  };
+  const result = await getWorkerOperation({
+    endpoint: "http://127.0.0.1:18080",
+    varsFile,
+    instanceId: "instance-a",
+    operationId: "operation-original",
+    generation: 2,
+    fetcher,
+    nonce: "e".repeat(32),
+  });
+  assert.equal(result.status, 200);
+  assert.equal(result.body.effects[0].operation_id, "operation-original");
 });

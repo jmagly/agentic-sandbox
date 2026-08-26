@@ -52,7 +52,7 @@ const EXPECTED_IMAGE = Object.freeze({
 });
 const IMAGE_FIELDS = Object.freeze(["product", "version", "commit", "image", "index_digest", "manifest_digest"]);
 export const FLEET_IMAGE_CHANNELS = Object.freeze(["approved", "reviewed-candidate"]);
-const EXPECTED_WORKER_DIGEST = "sha256:f2ead310c1d05497c38afd882cfbc57d2ad292846ec919e1c7e27936d64d5496";
+const EXPECTED_WORKER_DIGEST = "sha256:ee79e3c52deaadd30fe9ab485d7e78d4a9f84447e483e9e4fa86efd2e357d000";
 const CALLBACK_CLIENT_CN = "agentic-celld-worker-callback";
 const CALLBACK_RELAY_PORT = 8125;
 const MANAGEMENT_TLS_PORT = 8122;

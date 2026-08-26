@@ -38,6 +38,9 @@ The qualification Worker client accepts only an exact host-loopback origin,
 reads the same protected vars file directly, caps JSON responses at 4 KiB, and
 rejects a response that echoes its key, request signature, or nonce. Callers
 receive status and bounded JSON only; authentication headers are never returned.
+Command acknowledgements and operation polling use an authenticated
+per-operation projection, so durable cell history growth cannot pressure the
+client to relax that evidence bound.
 
 Remote management-to-Celld traffic requires a private CA and a mode-0600 combined PEM client identity. That client disables public root certificates and environment proxies, so the private control request is authenticated only by the configured trust root and sent directly. The pinned Worker API cannot present a client certificate. Its managed callback therefore terminates first at a fixed node-loopback relay; the relay presents the exact client certificate to management without parsing or logging the HMAC-authenticated request. The callback route bypasses operator-role resolution and instead requires the exact CN extracted from a certificate already verified by the management mTLS listener, plus its generation-bound HMAC and durable operation identity; caller-supplied headers cannot supply the certificate identity. The callback CN must remain absent from the mTLS admin allowlist, so the relay cannot acquire authority on any other management route. The relay has no HMAC key, object-store identity, provider credential, public listener, or independent management route. Missing or partial remote mTLS configuration prevents Celld startup, and a missing or wrong callback certificate is rejected before HMAC verification or provider dispatch.
 

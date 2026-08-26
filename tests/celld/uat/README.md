@@ -193,7 +193,10 @@ the exact operation hash, and management publishes the product-defined phase,
 PID, and timestamp before the driver kills it. Trusted formulas reject grouped
 faults, reused identities, a phase/PID mismatch, or impossible timestamp order.
 UAT-005 joins every response-loss recovery to the exact external
-lifecycle transition. UAT-006 replaces its literal zero with management's
+lifecycle transition. Its relay acknowledges that the one-shot loss is armed
+before the Worker command is sent, and its signed per-operation lookup retains
+only that operation's effect and durable history under the 4 KiB evidence
+bound. UAT-006 replaces its literal zero with management's
 generation-fence `provider_dispatch_count_delta`, requires unchanged external
 provider identity/configuration/state across stale and future attempts, and
 runs a one-dispatch control after healing. Collision, stale-generation, and

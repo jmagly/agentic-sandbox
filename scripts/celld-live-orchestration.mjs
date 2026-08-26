@@ -55,7 +55,7 @@ import {
   validateOrchestrationInventoryDocument,
   QEMU_CLEANUP_CAPTURE_ROOT,
 } from "./celld-orchestration-inventory.mjs";
-import { getWorkerCell, sendWorkerCommand } from "./celld-worker-client.mjs";
+import { getWorkerOperation, sendWorkerCommand } from "./celld-worker-client.mjs";
 import { validateLiveProfile } from "./celld-uat-live-protocol.mjs";
 export { driverErrorDocument };
 
@@ -1189,7 +1189,19 @@ export async function signalExactCallbackResponseLoss(runtime, binding) {
     throw new Error("callback response-loss signal lacks the persisted exact container identity");
   }
   const execute = runtime.runCommand ?? run;
+  const signaledAt = new Date().toISOString();
   execute("docker", ["kill", "--signal", "SIGUSR1", exact.provider_id], { timeout: 30_000 });
+  await waitFor(() => {
+    let logs;
+    if (runtime.runCommand) {
+      logs = execute("docker", ["logs", "--since", signaledAt, exact.provider_id], { timeout: 30_000 });
+    } else {
+      const result = spawnSync("docker", ["logs", "--since", signaledAt, exact.provider_id], { encoding: "utf8", shell: false, timeout: 30_000 });
+      if (result.error || result.status !== 0) throw new Error("callback response-loss arming could not read the exact relay log");
+      logs = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
+    }
+    return logs.includes("Celld callback relay armed one response loss");
+  }, { timeoutMs: 10_000, intervalMs: 25, description: "exact callback response-loss arming" });
 }
 
 export async function applyPlannedOrchestrationFault(runtime, fault, apply) {
@@ -1805,7 +1817,7 @@ async function terminalCallback(runtime, instanceId, generation, effect) {
 
 async function waitCellEffect(runtime, instanceId, generation, operationIdValue, acceptedStatuses) {
   return waitFor(async () => {
-    const cell = await getWorkerCell({ endpoint: runtime.workerEndpoint, varsFile: runtime.fleet.worker_vars_file_ref, instanceId, operationId: `lookup-${randomBytes(8).toString("hex")}`, generation });
+    const cell = await getWorkerOperation({ endpoint: runtime.workerEndpoint, varsFile: runtime.fleet.worker_vars_file_ref, instanceId, operationId: operationIdValue, generation });
     if (cell.status !== 200) return false;
     const effect = cell.body.effects?.find((candidate) => candidate.operation_id === operationIdValue);
     return effect && acceptedStatuses.includes(effect.status) ? { cell: cell.body, effect } : false;

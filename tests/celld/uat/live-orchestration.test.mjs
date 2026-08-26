@@ -24,6 +24,7 @@ import {
   observeOrchestrationProvider,
   prepareDispatchGate,
   requestHash,
+  signalExactCallbackResponseLoss,
   validateOrchestrationConfig,
   validateOrchestrationInventory,
   waitDispatchGate,
@@ -52,6 +53,32 @@ test("response-loss evidence comes from the exact durable unknown event", () => 
   assert.throws(() => durableEffectHistoryObservation({ history: [] }, operationId, "effect_unknown"), /exactly one durable/);
   assert.throws(() => durableEffectHistoryObservation({ history: [event, { ...event, sequence: 4 }] }, operationId, "effect_unknown"), /exactly one durable/);
   assert.doesNotMatch(orchestrationSource, /waitCellEffect\([^\n]+\["unknown"\]\)/);
+  assert.match(orchestrationSource, /getWorkerOperation\(/);
+});
+
+test("response-loss injection waits until the exact relay acknowledges arming", async () => {
+  const calls = [];
+  const providerId = "a".repeat(64);
+  const binding = {
+    owned: true,
+    provider_id: providerId,
+    target_identity_sha256: createHash("sha256").update(`docker:${providerId}`).digest("hex"),
+    target_ownership_sha256: "b".repeat(64),
+  };
+  const runtime = {
+    runCommand(program, args) {
+      calls.push([program, ...args]);
+      if (args[0] === "logs") return "Celld callback relay armed one response loss\n";
+      return "";
+    },
+  };
+  await signalExactCallbackResponseLoss(runtime, binding);
+  assert.equal(calls[0][1], "kill");
+  assert.deepEqual(calls[0].slice(2, 4), ["--signal", "SIGUSR1"]);
+  assert.equal(calls[0][4], providerId);
+  assert.equal(calls[1][1], "logs");
+  assert.ok(calls[1].includes("--since"));
+  assert.equal(calls[1].at(-1), providerId);
 });
 
 function config(overrides = {}) {
@@ -1671,7 +1698,10 @@ test("UAT-005 response-loss signal addresses the persisted revalidated container
   const calls = [];
   await signal({
     runId: "test-run",
-    runCommand: (program, args) => { calls.push([program, args]); return ""; },
+    runCommand: (program, args) => {
+      calls.push([program, args]);
+      return args[0] === "logs" ? "Celld callback relay armed one response loss\n" : "";
+    },
   }, {
     owned: true,
     target: "celld-test-node-1-callback-relay",
@@ -1679,7 +1709,10 @@ test("UAT-005 response-loss signal addresses the persisted revalidated container
     target_identity_sha256: createHash("sha256").update(`docker:${providerId}`).digest("hex"),
     target_ownership_sha256: "4".repeat(64),
   });
-  assert.deepEqual(calls, [["docker", ["kill", "--signal", "SIGUSR1", providerId]]]);
+  assert.deepEqual(calls[0], ["docker", ["kill", "--signal", "SIGUSR1", providerId]]);
+  assert.equal(calls[1][0], "docker");
+  assert.deepEqual(calls[1][1].slice(0, 2), ["logs", "--since"]);
+  assert.equal(calls[1][1].at(-1), providerId);
   assert.equal(calls.flat(2).includes("celld-test-node-1-callback-relay"), false);
 });
 

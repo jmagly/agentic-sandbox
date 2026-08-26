@@ -9,7 +9,7 @@ const TOMBSTONE_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-    const match = url.pathname.match(/^\/instance-cells\/([^/]+)(?:\/(commands|reconcile))?$/);
+    const match = url.pathname.match(/^\/instance-cells\/([^/]+)(?:\/(commands|reconcile|operation))?$/);
     if (!match) return response(404, { error: { code: "cell.not_found", detail: "unknown route" } });
     let routedInstanceId;
     try {
@@ -45,6 +45,14 @@ export class InstanceCell {
     if (route === "/state" && request.method === "GET") {
       const cell = await this.state.storage.get("cell");
       return cell ? response(200, cell) : response(404, { error: { code: "cell.missing" } });
+    }
+    if (route === "/operation" && request.method === "GET") {
+      const cell = await this.state.storage.get("cell");
+      if (!cell) return response(404, { error: { code: "cell.missing" } });
+      const projected = operationProjection(cell, request.headers.get("x-agentic-operation-id"));
+      return projected
+        ? response(200, projected)
+        : response(404, { error: { code: "cell.operation_missing" } });
     }
     if (route === "/commands" && request.method === "POST") {
       return this.command(
@@ -110,7 +118,9 @@ export class InstanceCell {
       }
       const existing = cell.effects.find((effect) => effect.operation_id === command.operation_id);
       if (existing) {
-        result = existing.request_hash === command.request_hash ? [200, cell] : [409, { error: { code: "cell.operation_collision" } }];
+        result = existing.request_hash === command.request_hash
+          ? [200, operationProjection(cell, command.operation_id)]
+          : [409, { error: { code: "cell.operation_collision" } }];
         return;
       }
       if (cell.effects.length >= MAX_EFFECTS) { result = [422, { error: { code: "cell.effect_limit" } }]; return; }
@@ -123,7 +133,7 @@ export class InstanceCell {
       // Leave a deterministic scheduling window so the command acknowledgement
       // is durable before an alarm runner can claim the effect.
       await tx.setAlarm(Date.now() + 1_000);
-      result = [202, cell];
+      result = [202, operationProjection(cell, command.operation_id)];
     });
     return response(result[0], result[1]);
   }
@@ -281,6 +291,23 @@ function authKeyring(env, now) {
 }
 
 function freshCell(instance_id, generation) { return { document_type: "instance-cell-state", schema_version: "1", instance_id, generation, desired_state: "requested", observation: null, effects: [], history_sequence: 0, tombstone_until: null, updated_at: new Date().toISOString(), history: [] }; }
+function operationProjection(cell, operationId) {
+  const effects = cell.effects.filter((effect) => effect.operation_id === operationId);
+  if (effects.length !== 1) return null;
+  return {
+    document_type: cell.document_type,
+    schema_version: cell.schema_version,
+    instance_id: cell.instance_id,
+    generation: cell.generation,
+    desired_state: cell.desired_state,
+    observation: cell.observation,
+    effects,
+    history_sequence: cell.history_sequence,
+    tombstone_until: cell.tombstone_until,
+    updated_at: cell.updated_at,
+    history: cell.history.filter((event) => event.operation_id === operationId),
+  };
+}
 function validInstanceId(value) { return typeof value === "string" && value.length > 0 && value.length <= 128; }
 function validCommand(command) {
   return command !== null && typeof command === "object" && !Array.isArray(command) &&

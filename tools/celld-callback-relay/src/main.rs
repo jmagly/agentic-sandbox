@@ -224,6 +224,7 @@ async fn serve(config: RelayConfig) -> Result<()> {
             tokio::spawn(async move {
                 while signal.recv().await.is_some() {
                     flag.store(true, Ordering::SeqCst);
+                    eprintln!("Celld callback relay armed one response loss");
                 }
             });
         }

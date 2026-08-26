@@ -253,6 +253,46 @@ describe("signed InstanceCell behavior", () => {
     expect((await response.json()).error.code).toBe("cell.operation_collision");
   });
 
+  it("returns bounded per-operation projections after cell history grows", async ({ expect }) => {
+    const instanceId = "instance-bounded-projection";
+    let latestOperationId;
+    for (let index = 0; index < 40; index += 1) {
+      latestOperationId = `op-bounded-${index}`;
+      const command = await makeCommand(instanceId, latestOperationId, 1, "observe", {
+        marker: "x".repeat(64),
+      });
+      const response = await workerExports.default.fetch(await signedRequest(`/instance-cells/${instanceId}/commands`, {
+        body: command,
+        generation: 1,
+        operationId: latestOperationId,
+      }));
+      expect(response.status).toBe(202);
+      const bytes = await response.clone().arrayBuffer();
+      expect(bytes.byteLength).toBeLessThanOrEqual(4096);
+      const body = await response.json();
+      expect(body.effects).toHaveLength(1);
+      expect(body.effects[0].operation_id).toBe(latestOperationId);
+      expect(body.history.every((event) => event.operation_id === latestOperationId)).toBe(true);
+    }
+
+    const lookup = await workerExports.default.fetch(await signedRequest(`/instance-cells/${instanceId}/operation`, {
+      generation: 1,
+      operationId: latestOperationId,
+    }));
+    expect(lookup.status).toBe(200);
+    expect((await lookup.clone().arrayBuffer()).byteLength).toBeLessThanOrEqual(4096);
+    const projected = await lookup.json();
+    expect(projected.effects).toHaveLength(1);
+    expect(projected.effects[0].operation_id).toBe(latestOperationId);
+
+    const missing = await workerExports.default.fetch(await signedRequest(`/instance-cells/${instanceId}/operation`, {
+      generation: 1,
+      operationId: "op-not-present",
+    }));
+    expect(missing.status).toBe(404);
+    expect((await missing.json()).error.code).toBe("cell.operation_missing");
+  });
+
   it("fences an older generation before operation replay", async ({ expect }) => {
     const current = await makeCommand("instance-fence", "op-current", 2, "provision");
     let request = await signedRequest("/instance-cells/instance-fence/commands", {

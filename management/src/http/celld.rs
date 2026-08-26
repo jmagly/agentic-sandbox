@@ -1229,7 +1229,7 @@ mod tests {
                     "artifact":{
                         "celld_version":"v0.2.1",
                         "celld_artifact_sha256":"sha256:69554171c3b927d32b6d334475071d4b5fa7abd1a2bdd11cac78a6858a5b2923",
-                        "worker_digest":"sha256:f2ead310c1d05497c38afd882cfbc57d2ad292846ec919e1c7e27936d64d5496"
+                        "worker_digest":"sha256:ee79e3c52deaadd30fe9ab485d7e78d4a9f84447e483e9e4fa86efd2e357d000"
                     },
                     "listeners":{
                         "public_listener":"0.0.0.0:443",

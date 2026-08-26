@@ -97,6 +97,10 @@ be discovered; it never authorizes a duplicate destructive effect.
   `pending`, `dispatched`, and `unknown` are reconcilable.
 - Retrying a terminal failure requires a new operation ID. Transport retries
   reuse the original operation ID.
+- Command acknowledgements and signed `GET /operation` lookups return only the
+  effect and history events bound to the authenticated operation ID. The full
+  cell remains available on the state route for operator reconciliation; it is
+  not echoed into a qualification response after history grows.
 
 ## Consistency protocol
 

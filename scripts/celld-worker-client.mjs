@@ -133,6 +133,13 @@ export async function getWorkerCell({ endpoint, varsFile, instanceId, operationI
   return request(fetcher, origin, path, { method: "GET", headers: signed.headers }, signed.restricted);
 }
 
+export async function getWorkerOperation({ endpoint, varsFile, instanceId, operationId, generation, fetcher = fetch, now = new Date(), nonce = randomBytes(16).toString("hex") }) {
+  const origin = loopbackOrigin(endpoint);
+  const path = checkedPath(`/instance-cells/${encodeURIComponent(checkedInstanceId(instanceId))}/operation`);
+  const signed = signedRequest({ method: "GET", path, operationId, generation, body: "", varsFile, now, nonce });
+  return request(fetcher, origin, path, { method: "GET", headers: signed.headers }, signed.restricted);
+}
+
 export async function reconcileWorkerCell({ endpoint, varsFile, instanceId, operationId, generation, managementGeneration, fetcher = fetch, now = new Date(), nonce = randomBytes(16).toString("hex") }) {
   const origin = loopbackOrigin(endpoint);
   checkedInstanceId(instanceId);
