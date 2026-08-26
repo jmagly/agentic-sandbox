@@ -144,6 +144,7 @@ impl AsyncWrite for TonicVsockIo {
 
 // Internal modules
 mod claude;
+mod providers;
 mod credentials;
 mod health;
 mod metrics;
@@ -3552,6 +3553,35 @@ async fn execute_claude_task(
     let command_id = cmd.command_id.clone();
     let start = std::time::Instant::now();
     let (mission_id, fallback_task_id) = command_correlation(&cmd);
+
+    // Provider routing (issue #5): the manifest may declare `provider`; only
+    // `claude` has a registered executor today. Unregistered providers fail
+    // closed with a structured error rather than misrouting to claude.
+    let declared_provider = cmd
+        .args
+        .first()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+        .and_then(|v| {
+            v.get("provider")
+                .and_then(|p| p.as_str())
+                .map(|s| s.to_string())
+        });
+    if let Err(unsupported) = providers::Provider::resolve(declared_provider.as_deref()) {
+        error!("[{}] {}", command_id, unsupported);
+        let result = CommandResult {
+            command_id: command_id.clone(),
+            exit_code: -1,
+            error: unsupported.to_string(),
+            duration_ms: 0,
+            success: false,
+        };
+        let _ = output_tx
+            .send(AgentMessage {
+                payload: Some(proto::agent_message::Payload::CommandResult(result)),
+            })
+            .await;
+        return;
+    }
 
     // Parse task config from first argument
     let mut config: claude::ClaudeTaskConfig =
