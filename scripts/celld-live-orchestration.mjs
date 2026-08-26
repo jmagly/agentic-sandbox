@@ -1152,6 +1152,17 @@ export async function observeOrchestrationFaultTarget({ runtime, plan, fault }) 
       const running = execute("docker", ["inspect", "--format", "{{.State.Running}}", subject.target], { timeout: 30_000 }).trim() === "true";
       return { owned: true, present: !running, ...(binding ?? {}) };
     }
+    const baseline = binding?.provider_id
+      ? runtime.callbackResponseLossBaselines?.get(binding.provider_id)
+      : null;
+    if (baseline) {
+      const logs = exactCallbackRelayLogs(runtime, binding.provider_id);
+      return {
+        owned: true,
+        present: relayMarkerCount(logs, "Celld callback relay injected one response loss") > baseline.injected,
+        ...(binding ?? {}),
+      };
+    }
     let logs;
     if (runtime.runCommand) {
       logs = execute("docker", ["logs", "--since", plan.recorded_at, subject.target], { timeout: 30_000 });
@@ -1182,6 +1193,18 @@ function sameFaultBinding(left, right) {
     && (left?.provider_id === undefined || right?.provider_id === undefined || left.provider_id === right.provider_id);
 }
 
+function exactCallbackRelayLogs(runtime, providerId) {
+  const args = ["logs", "--tail", "8192", providerId];
+  if (runtime.runCommand) return runtime.runCommand("docker", args, { timeout: 30_000 });
+  const result = spawnSync("docker", args, { encoding: "utf8", shell: false, timeout: 30_000, maxBuffer: 1024 * 1024 });
+  if (result.error || result.status !== 0) throw new Error("callback response-loss observation could not read the exact bounded relay log");
+  return `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
+}
+
+function relayMarkerCount(logs, marker) {
+  return logs.split(marker).length - 1;
+}
+
 export async function signalExactCallbackResponseLoss(runtime, binding) {
   const exact = exactFaultBinding(binding, "callback response-loss signal");
   if (!/^[0-9a-f]{64}$/.test(exact.provider_id ?? "")
@@ -1189,19 +1212,18 @@ export async function signalExactCallbackResponseLoss(runtime, binding) {
     throw new Error("callback response-loss signal lacks the persisted exact container identity");
   }
   const execute = runtime.runCommand ?? run;
-  const signaledAt = new Date().toISOString();
+  const before = exactCallbackRelayLogs(runtime, exact.provider_id);
+  const armedBefore = relayMarkerCount(before, "Celld callback relay armed one response loss");
   execute("docker", ["kill", "--signal", "SIGUSR1", exact.provider_id], { timeout: 30_000 });
-  await waitFor(() => {
-    let logs;
-    if (runtime.runCommand) {
-      logs = execute("docker", ["logs", "--since", signaledAt, exact.provider_id], { timeout: 30_000 });
-    } else {
-      const result = spawnSync("docker", ["logs", "--since", signaledAt, exact.provider_id], { encoding: "utf8", shell: false, timeout: 30_000 });
-      if (result.error || result.status !== 0) throw new Error("callback response-loss arming could not read the exact relay log");
-      logs = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
-    }
-    return logs.includes("Celld callback relay armed one response loss");
+  const armedLogs = await waitFor(() => {
+    const logs = exactCallbackRelayLogs(runtime, exact.provider_id);
+    return relayMarkerCount(logs, "Celld callback relay armed one response loss") > armedBefore ? logs : false;
   }, { timeoutMs: 10_000, intervalMs: 25, description: "exact callback response-loss arming" });
+  runtime.callbackResponseLossBaselines ??= new Map();
+  runtime.callbackResponseLossBaselines.set(exact.provider_id, {
+    armed: relayMarkerCount(armedLogs, "Celld callback relay armed one response loss"),
+    injected: relayMarkerCount(armedLogs, "Celld callback relay injected one response loss"),
+  });
 }
 
 export async function applyPlannedOrchestrationFault(runtime, fault, apply) {
@@ -1824,14 +1846,31 @@ async function waitCellEffect(runtime, instanceId, generation, operationIdValue,
   }, { timeoutMs: 900_000, intervalMs: 250, description: `Worker effect ${operationIdValue}` });
 }
 
+function providerTerminalErrorCode(substrate, action, terminalCode) {
+  const suffix = String(terminalCode ?? "unknown")
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 64) || "UNKNOWN";
+  return `CELLD_PROVIDER_TERMINAL_${substrate.toUpperCase()}_${action.toUpperCase()}_${suffix}`;
+}
+
 async function runOneEffectCampaign(runtime, { prefix, substrate, instanceId, generation, action, payload, repeats = 0 }) {
+  let phase = "issue";
   try {
     const id = operationId(prefix, substrate, generation, action);
     const effect = await issueCommand(runtime, { instanceId, generation, operationId: id, action, payload });
+    phase = "terminal-callback";
     const terminal = await terminalCallback(runtime, instanceId, generation, effect);
-    if (terminal.body.status !== "succeeded") throw new Error(`${substrate} ${action} did not succeed: ${terminal.body.terminal_code ?? "unknown"}`);
+    if (terminal.body.status !== "succeeded") {
+      throw annotateDriverError(
+        new Error(`${substrate} ${action} did not succeed: ${terminal.body.terminal_code ?? "unknown"}`),
+        { errorCode: providerTerminalErrorCode(substrate, action, terminal.body.terminal_code) },
+      );
+    }
     let replayStatuses = [];
     if (repeats > 0) {
+      phase = "replay";
       const context = callbackContext(runtime.fleet, runtime.managementHost, instanceId, generation);
       context.agent = new HttpsAgent({ keepAlive: true, maxSockets: 24, ca: context.ca, cert: context.clientCert, key: context.clientKey, rejectUnauthorized: true });
       try {
@@ -1851,17 +1890,21 @@ async function runOneEffectCampaign(runtime, { prefix, substrate, instanceId, ge
         context.agent.destroy();
       }
     }
+    phase = "worker-terminal";
     const cell = await waitCellEffect(runtime, instanceId, generation, id, ["succeeded"]);
     let providerObservation = null;
     if (ACTIONS.includes(action)) {
+      phase = "provider-observation";
       const resource = runtime.providerResources.get(instanceId);
       if (!resource || resource.substrate !== substrate) throw new Error("provider terminal observation target is absent from the exact-run inventory");
       providerObservation = await waitForObservedProviderEffect(runtime, { resource, action });
+      phase = "inventory-terminal";
       await completeObservedProviderMutation(runtime, { effect, instanceId, generation, action, observation: providerObservation });
     }
     return { id, effect, terminal: terminal.body, replayStatuses, cell: cell.cell, providerObservation };
   } catch (error) {
     throw annotateDriverError(error, {
+      operation: `orchestration.provider.${substrate}.${action}.${phase}`,
       errorCode: `CELLD_PROVIDER_CAMPAIGN_${substrate.toUpperCase()}_${action.toUpperCase()}`,
     });
   }
@@ -1942,11 +1985,16 @@ async function runUat003(runtime, timeline) {
 async function runUat004(runtime, timeline) {
   const cases = [];
   const providerCases = [];
-  for (const substrate of SUBSTRATES) {
+  let recoveryPhase = "setup";
+  try {
+    for (const substrate of SUBSTRATES) {
     const instanceId = randomUUID();
     const name = `celld-recovery-${substrate}-${sha256(`${runtime.runId}:004`).slice(0, 8)}`;
+    recoveryPhase = `${substrate}-setup-provision`;
     await runOneEffectCampaign(runtime, { prefix: "uat004-setup", substrate, instanceId, generation: 1, action: "provision", payload: provisionPayload(runtime.config, substrate, name) });
+    recoveryPhase = `${substrate}-setup-start`;
     await runOneEffectCampaign(runtime, { prefix: "uat004-setup", substrate, instanceId, generation: 1, action: "start", payload: {} });
+    recoveryPhase = `${substrate}-provider-baseline`;
     const providerObservationBefore = observeOrchestrationProvider(runtime, { instanceId, name, substrate });
     for (const crashPoint of CRASH_POINTS) {
       for (let index = 0; index < 100; index += 1) {
@@ -1963,6 +2011,7 @@ async function runUat004(runtime, timeline) {
         let ownershipAfterLoss = null;
         let recoveryMs = null;
         try {
+          recoveryPhase = `${substrate}-${crashPoint}-management-fault`;
           if (crashPoint === "before_dispatch") {
             managementFault = await applyPlannedOrchestrationFault(runtime, { kind: "management_process_kill", target: "management" }, () => stopManagementAndWait(runtime.management, "SIGKILL"));
             phaseEvidence = {
@@ -1978,6 +2027,7 @@ async function runUat004(runtime, timeline) {
           }
 
           commandSentAt = new Date().toISOString();
+          recoveryPhase = `${substrate}-${crashPoint}-issue-command`;
           effect = await issueCommand(runtime, {
             instanceId,
             generation: 1,
@@ -1988,6 +2038,7 @@ async function runUat004(runtime, timeline) {
           acknowledgedAt = new Date().toISOString();
 
           if (crashPoint !== "before_dispatch") {
+            recoveryPhase = `${substrate}-${crashPoint}-dispatch-gate`;
             const reached = await waitDispatchGate(runtime, id, crashPoint, managementPid);
             phaseEvidence = {
               schema_version: CRASH_PHASE_EVIDENCE_SCHEMA,
@@ -2002,10 +2053,12 @@ async function runUat004(runtime, timeline) {
           }
 
           const faultStarted = Date.parse(managementFault.applied_at);
+          recoveryPhase = `${substrate}-${crashPoint}-owner-fault`;
           nodeFault = await applyPlannedOrchestrationFault(runtime, { kind: "fleet_node_stop", target: ownershipBefore.owner_target }, (target) => run("docker", ["stop", "--time", "5", target.provider_id], { timeout: 30_000 }));
           const fallbackIndex = runtime.fleet.nodes.findIndex((node) => node.name !== ownershipBefore.owner_target);
           if (fallbackIndex < 0) throw new Error("owner-loss campaign has no surviving Worker endpoint");
           runtime.workerEndpoint = workerEndpoint(runtime.fleet, fallbackIndex);
+          recoveryPhase = `${substrate}-${crashPoint}-owner-takeover`;
           ownershipAfterLoss = await waitFor(async () => {
             const observation = await observeCelldOwnership(runtime, { instanceId });
             return observation.owner_target !== ownershipBefore.owner_target && observation.owner_epoch > ownershipBefore.owner_epoch
@@ -2013,9 +2066,12 @@ async function runUat004(runtime, timeline) {
               : false;
           }, { timeoutMs: 30_000, intervalMs: 250, description: "Celld owner takeover and epoch advance" });
 
+          recoveryPhase = `${substrate}-${crashPoint}-management-restart`;
           runtime.management = await restartManagement(runtime.management, runtime.config, runtime.fleet, runtime.managementHost, runtime.workerEndpoint);
           await healPlannedOrchestrationFault(runtime, managementFault, async () => {});
+          recoveryPhase = `${substrate}-${crashPoint}-terminal-callback`;
           const terminal = await terminalCallback(runtime, instanceId, 1, effect);
+          recoveryPhase = `${substrate}-${crashPoint}-worker-terminal`;
           const cell = await waitCellEffect(runtime, instanceId, 1, id, ["succeeded"]);
           recoveryMs = Date.now() - faultStarted;
           if (terminal.body.status !== "succeeded") throw new Error("restart trial did not converge to success");
@@ -2023,10 +2079,13 @@ async function runUat004(runtime, timeline) {
         } finally {
           clearDispatchGate(runtime, id);
           if (runtime.management.processHandle.exitCode !== null || runtime.management.processHandle.signalCode !== null || runtime.management.processHandle.killed) {
+            recoveryPhase = `${substrate}-${crashPoint}-finally-management-restart`;
             runtime.management = await restartManagement(runtime.management, runtime.config, runtime.fleet, runtime.managementHost, runtime.workerEndpoint);
           }
+          recoveryPhase = `${substrate}-${crashPoint}-finally-management-heal`;
           if (managementFault?.status === "applied") await healPlannedOrchestrationFault(runtime, managementFault, async () => {});
           if (nodeFault?.status === "applied") {
+            recoveryPhase = `${substrate}-${crashPoint}-finally-owner-heal`;
             await healPlannedOrchestrationFault(runtime, nodeFault, async (target) => {
               run("docker", ["start", target.provider_id], { timeout: 30_000 });
               await waitFor(() => diagnoseFleet(runtime.fleetPath).status === "READY", { timeoutMs: 30_000, intervalMs: 250, description: "three-node fleet heal" });
@@ -2035,10 +2094,12 @@ async function runUat004(runtime, timeline) {
           runtime.workerEndpoint = workerEndpoint(runtime.fleet, 0);
         }
 
+        recoveryPhase = `${substrate}-${crashPoint}-healed-ownership`;
         const ownershipAfterHeal = await waitFor(async () => {
           const observation = await observeCelldOwnership(runtime, { instanceId });
           return observation.live_nodes === 3 ? observation : false;
         }, { timeoutMs: 30_000, intervalMs: 250, description: "healed three-node owner observation" });
+        recoveryPhase = `${substrate}-${crashPoint}-healed-control`;
         const baseline = await runOneEffectCampaign(runtime, {
           prefix: `uat004-heal-${crashPoint}-${index + 1}`,
           substrate,
@@ -2086,23 +2147,29 @@ async function runUat004(runtime, timeline) {
     timeline.push({ scenario: "UAT-CELLD-004", kind: "provider_inventory", ...providerCase });
     await runOneEffectCampaign(runtime, { prefix: "uat004-clean", substrate, instanceId, generation: 1, action: "stop", payload: {} });
     await runOneEffectCampaign(runtime, { prefix: "uat004-clean", substrate, instanceId, generation: 1, action: "destroy", payload: {} });
+    }
+    const diagnosis = diagnoseFleet(runtime.fleetPath);
+    return {
+      assertions: [
+        { id: "CELLD.004.NO_LOSS", measurements: { cases } },
+        { id: "CELLD.004.RECOVERY", measurements: { cases, provider_cases: providerCases, components_healthy: diagnosis.status === "READY", inventory_restored: diagnosis.membership?.running === 3 } },
+      ],
+      faults: CRASH_POINTS.map((kind) => ({
+        kind: `owner_and_management_${kind}`,
+        acknowledged_intents: 200,
+        fault_batches: 200,
+        management_faults: 200,
+        owner_faults: 200,
+        independent_per_intent: true,
+      })),
+      metrics: [{ name: "recovery_samples", value: cases.length, unit: "trials" }],
+    };
+  } catch (error) {
+    throw annotateDriverError(error, {
+      operation: `orchestration.uat004.${recoveryPhase}`,
+      errorCode: `CELLD_RECOVERY_CAMPAIGN_${recoveryPhase.toUpperCase().replace(/[^A-Z0-9]+/g, "_").slice(0, 96)}`,
+    });
   }
-  const diagnosis = diagnoseFleet(runtime.fleetPath);
-  return {
-    assertions: [
-      { id: "CELLD.004.NO_LOSS", measurements: { cases } },
-      { id: "CELLD.004.RECOVERY", measurements: { cases, provider_cases: providerCases, components_healthy: diagnosis.status === "READY", inventory_restored: diagnosis.membership?.running === 3 } },
-    ],
-    faults: CRASH_POINTS.map((kind) => ({
-      kind: `owner_and_management_${kind}`,
-      acknowledged_intents: 200,
-      fault_batches: 200,
-      management_faults: 200,
-      owner_faults: 200,
-      independent_per_intent: true,
-    })),
-    metrics: [{ name: "recovery_samples", value: cases.length, unit: "trials" }],
-  };
 }
 
 function relayName(fleet, nodeIndex = 0) {

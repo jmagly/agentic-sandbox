@@ -58,6 +58,7 @@ test("response-loss evidence comes from the exact durable unknown event", () => 
 
 test("response-loss injection waits until the exact relay acknowledges arming", async () => {
   const calls = [];
+  let armed = 0;
   const providerId = "a".repeat(64);
   const binding = {
     owned: true,
@@ -68,17 +69,56 @@ test("response-loss injection waits until the exact relay acknowledges arming", 
   const runtime = {
     runCommand(program, args) {
       calls.push([program, ...args]);
-      if (args[0] === "logs") return "Celld callback relay armed one response loss\n";
+      if (args[0] === "logs") return "Celld callback relay armed one response loss\n".repeat(armed);
+      if (args[0] === "kill") armed += 1;
       return "";
     },
   };
   await signalExactCallbackResponseLoss(runtime, binding);
-  assert.equal(calls[0][1], "kill");
-  assert.deepEqual(calls[0].slice(2, 4), ["--signal", "SIGUSR1"]);
-  assert.equal(calls[0][4], providerId);
-  assert.equal(calls[1][1], "logs");
-  assert.ok(calls[1].includes("--since"));
-  assert.equal(calls[1].at(-1), providerId);
+  await signalExactCallbackResponseLoss(runtime, binding);
+  assert.equal(calls[0][1], "logs");
+  assert.deepEqual(calls[0].slice(2, 4), ["--tail", "8192"]);
+  assert.equal(calls[1][1], "kill");
+  assert.deepEqual(calls[1].slice(2, 4), ["--signal", "SIGUSR1"]);
+  assert.equal(calls[1][4], providerId);
+  assert.equal(calls[2][1], "logs");
+  assert.equal(calls[2].at(-1), providerId);
+  assert.equal(armed, 2, "a stale first acknowledgement must not satisfy the second arm");
+  assert.equal(runtime.callbackResponseLossBaselines.get(providerId).armed, 2);
+});
+
+test("response-loss observation requires an injected marker newer than the exact arm baseline", async () => {
+  const providerId = "c".repeat(64);
+  const target = "celld-test-node-1-callback-relay";
+  const labels = {
+    "dev.agentic-sandbox.repository": "roctinam/agentic-sandbox",
+    "dev.agentic-sandbox.workflow": "celld-qualification",
+    "dev.agentic-sandbox.run": "test-run",
+    "dev.agentic-sandbox.scope": "celld-qualification",
+  };
+  let injected = 1;
+  const runtime = {
+    runId: "test-run",
+    fleet: { nodes: [{ name: "celld-test-node-1" }] },
+    callbackResponseLossBaselines: new Map([[providerId, { armed: 1, injected: 1 }]]),
+    runCommand(_program, args) {
+      if (args[0] === "inspect") return `${providerId}|${JSON.stringify(labels)}`;
+      if (args[0] === "logs") return "Celld callback relay injected one response loss\n".repeat(injected);
+      throw new Error(`unexpected Docker command ${args[0]}`);
+    },
+  };
+  const subject = {
+    fault_id: "a".repeat(32),
+    kind: "callback_response_loss",
+    target,
+  };
+  const plan = { mutation: "fault_apply", recorded_at: new Date().toISOString(), subject };
+  const stale = await liveOrchestration.observeOrchestrationFaultTarget({ runtime, plan, fault: subject });
+  assert.equal(stale.present, false);
+  injected = 2;
+  const current = await liveOrchestration.observeOrchestrationFaultTarget({ runtime, plan, fault: subject });
+  assert.equal(current.present, true);
+  assert.equal(current.provider_id, providerId);
 });
 
 function config(overrides = {}) {
@@ -1696,11 +1736,14 @@ test("UAT-005 response-loss signal addresses the persisted revalidated container
   assert.equal(typeof signal, "function", "the production UAT-005 signal needs a behavior-testable exact-ID boundary");
   const providerId = "3".repeat(64);
   const calls = [];
+  let armed = false;
   await signal({
     runId: "test-run",
     runCommand: (program, args) => {
       calls.push([program, args]);
-      return args[0] === "logs" ? "Celld callback relay armed one response loss\n" : "";
+      if (args[0] === "logs") return armed ? "Celld callback relay armed one response loss\n" : "";
+      if (args[0] === "kill") armed = true;
+      return "";
     },
   }, {
     owned: true,
@@ -1709,10 +1752,11 @@ test("UAT-005 response-loss signal addresses the persisted revalidated container
     target_identity_sha256: createHash("sha256").update(`docker:${providerId}`).digest("hex"),
     target_ownership_sha256: "4".repeat(64),
   });
-  assert.deepEqual(calls[0], ["docker", ["kill", "--signal", "SIGUSR1", providerId]]);
-  assert.equal(calls[1][0], "docker");
-  assert.deepEqual(calls[1][1].slice(0, 2), ["logs", "--since"]);
-  assert.equal(calls[1][1].at(-1), providerId);
+  assert.deepEqual(calls[0], ["docker", ["logs", "--tail", "8192", providerId]]);
+  assert.deepEqual(calls[1], ["docker", ["kill", "--signal", "SIGUSR1", providerId]]);
+  assert.equal(calls[2][0], "docker");
+  assert.deepEqual(calls[2][1].slice(0, 3), ["logs", "--tail", "8192"]);
+  assert.equal(calls[2][1].at(-1), providerId);
   assert.equal(calls.flat(2).includes("celld-test-node-1-callback-relay"), false);
 });
 
