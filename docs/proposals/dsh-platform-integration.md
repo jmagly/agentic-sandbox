@@ -72,7 +72,10 @@ Supporting contracts:
 
 - **M1 — Image parity (`agentic/dsh:latest`)**: pins entry; `Dockerfile.dsh` (codex-style, loadout manifest, LABELs, schema-grep validation); `dsh-automation.sh`; inventory/readiness learn dsh; `build.sh PLATFORMS+=dsh`. *Acceptance: green build incl. schema greps; `agentic-provider-inventory dsh` row present.*
 - **M2 — Instance bring-up**: launch pilot instance from dashboard image picker; pane attach lands in `dsh profile`; verified from Cockpit incl. tailnet client. *Acceptance: Running tab shows live dsh session driven end-to-end.*
-- **M3 — Supervisor parity**: `agent-rs/src/dsh.rs` (`DshTaskConfig` mirroring ClaudeTaskConfig; `api_key_env` default per resolved credential decision) + `__dsh_task__` dispatch + manifest `dsh:` block; tests mirror claude.rs suite. *Acceptance: `sandboxctl task submit` with dsh manifest completes against real model.*
+- **M3 — Task-executor generalization + dsh registration (REVISED twice; supersedes mirror-first)**: per operator review, do **not** add a third parallel vendor module (`dsh.rs` cloning `claude.rs`). The `__claude_task__` stringly dispatch + per-vendor module + `claude:` manifest block is O(N) debt; DSH's native provider-routed design (provider+model pairing, pi-ai registry) makes it the natural *second registrant* of a generalized surface, not a Claude fork. Sequence:
+  1. Upstream discussion issue proposing `ProviderExecutor` trait + registry (generic `TaskConfig {provider, prompt, working_dir, session_id, model, api_key_env}`, `workload_identity::configure_command` gating applied registry-wide, `RenewCertificate`-aware cert lifecycle) with `claude` ported as registrant #1 and `dsh` as #2.
+  2. PR #4 (image-only) stays open, unblocked.
+  3. Implementation PR follows maintainer feedback; mirror-only `dsh.rs` remains the fallback if upstream prefers incremental modules.
 - **M4 — Delivery**: upstream PR (image + supervisor + docs); AIWG capability matrix lists deepseek-harness as Tier 1 CLI platform; steward routing note.
 
 Risks: rc-version churn (pins + scheduled bump review); exact inner one-shot flag needs confirmation during M1 (timebox; fallback = PTY-driven TUI mode, which cockpit already handles); npm registry reachability inside build (package is published — `npx @deepseek-ai/dsh web` is the documented quick start).
