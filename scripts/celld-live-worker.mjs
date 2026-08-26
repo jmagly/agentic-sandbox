@@ -299,7 +299,7 @@ function inventorySnapshot(runtime, operation = (name) => `worker.inventory.${na
   const portMaps = runtime.fleet.nodes.map((node) => inventoryCommand(operation("docker-inspect-ports"), errorFields, "docker", ["inspect", "--format", "{{json .NetworkSettings.Ports}}", node.name], { timeout: 30_000 })).sort();
   const socketTables = pids.map((pid) => inventoryCommand(operation("nsenter-socket-table"), errorFields, "sudo", ["-n", "nsenter", "--target", pid, "--net", "cat", "/proc/net/tcp", "/proc/net/tcp6", "/proc/net/udp", "/proc/net/udp6", "/proc/net/unix"], { timeout: 30_000 })).sort();
   const domains = inventoryCommand(operation("virsh-list-domains"), errorFields, "virsh", ["--connect", runtime.config.libvirt_uri, "list", "--all", "--name"], { timeout: 30_000 }).split(/\r?\n/).filter(Boolean).sort();
-  const reviewedFiles = inventoryCommand(operation("find-reviewed-files"), errorFields, "find", reviewedFileInventoryArgs(runtime), { timeout: 120_000 }).split(/\r?\n/).filter(Boolean).sort();
+  const reviewedFiles = inventoryCommand(operation("find-reviewed-files"), errorFields, "sudo", ["-n", "find", ...reviewedFileInventoryArgs(runtime)], { timeout: 120_000 }).split(/\r?\n/).filter(Boolean).sort();
   const containerFiles = runtime.fleet.nodes.map((node) => inventoryCommand(operation("docker-diff"), errorFields, "docker", ["diff", node.name], { timeout: 30_000 })).sort();
   return {
     containers,

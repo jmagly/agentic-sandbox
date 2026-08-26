@@ -372,7 +372,9 @@ jobs:
             node scripts/celld-live-worker.mjs cleanup --config "${CELLD_ORCHESTRATION_CONFIG}" || cleanup_rc=4
             node scripts/celld-live-network-auth.mjs cleanup --config "${CELLD_ORCHESTRATION_CONFIG}" || cleanup_rc=4
             node scripts/celld-live-orchestration.mjs cleanup --config "${CELLD_ORCHESTRATION_CONFIG}" --profile "${CELLD_STORAGE_LIVE_PROFILE}" || cleanup_rc=4
-            rmdir /dev/shm/agentic-celld-orchestration 2>/dev/null || cleanup_rc=4
+            # The parent is shared by separately owned retained runs. Exact-run
+            # cleanup above remains fail-closed; parent removal is best-effort.
+            rmdir /dev/shm/agentic-celld-orchestration 2>/dev/null || true
             exit "${cleanup_rc}"
           fi
 

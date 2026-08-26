@@ -192,6 +192,7 @@ test("Worker driver fixes the evaluator-owned matrices and does not claim UAT-00
   assert.match(source, /CELLD_LIVE_WORKER_COPY_NEGATIVE_PROJECTS_FAILED/);
   assert.match(source, /CELLD_LIVE_WORKER_INVENTORY_FAILED/);
   assert.match(source, /-ignore_readdir_race/);
+  assert.match(source, /"sudo", \["-n", "find", \.\.\.reviewedFileInventoryArgs\(runtime\)\]/);
   assert.match(source, /NetworkSettings\.Ports/);
   assert.doesNotMatch(source, /\["port", node\.name\]/);
   assert.match(source, /operation\(`dry-run-\$\{capability\}`\)/);

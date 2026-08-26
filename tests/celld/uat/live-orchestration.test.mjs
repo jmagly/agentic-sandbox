@@ -17,6 +17,7 @@ import {
   launchManagement,
   loadAuthorizedOrchestrationInventory,
   loadProtectedOrchestrationRuntime,
+  managementCelldVersion,
   managementEnvironment,
   observeCelldOwnership,
   observeOrchestrationProvider,
@@ -28,6 +29,12 @@ import {
 } from "../../../scripts/celld-live-orchestration.mjs";
 
 const orchestrationSource = readFileSync(new URL("../../../scripts/celld-live-orchestration.mjs", import.meta.url), "utf8");
+
+test("management canonicalizes the reviewed image version to the qualified API pin", () => {
+  assert.equal(managementCelldVersion("0.2.1"), "v0.2.1");
+  assert.equal(managementCelldVersion("v0.2.1"), "v0.2.1");
+  assert.throws(() => managementCelldVersion("latest"), /version is invalid/);
+});
 
 function config(overrides = {}) {
   return {

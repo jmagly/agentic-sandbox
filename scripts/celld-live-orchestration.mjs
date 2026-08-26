@@ -517,6 +517,11 @@ function celldOwnershipEvidence(observation) {
   };
 }
 
+export function managementCelldVersion(version) {
+  if (!/^v?\d+\.\d+\.\d+$/.test(version ?? "")) throw new Error("Celld management version is invalid");
+  return version.startsWith("v") ? version : `v${version}`;
+}
+
 export function managementEnvironment(config, fleet, managementHost, { celldEndpoint, tlsCaFile, tlsIdentityFile, operatorMtlsCn } = {}) {
   if ((tlsCaFile === undefined) !== (tlsIdentityFile === undefined)) {
     throw annotateDriverError(new Error("Celld management TLS requires both CA and client identity files"), {
@@ -580,7 +585,7 @@ export function managementEnvironment(config, fleet, managementHost, { celldEndp
     AGENTIC_CELLD_EFFECT_LEDGER_PATH: fleet.callback.effect_ledger_file_ref,
     AGENTIC_CELLD_QUALIFICATION_DISPATCH_GATE_DIR: dispatchGates,
     AGENTIC_CELLD_CALLBACK_MTLS_CN: fleet.callback.client_cn,
-    AGENTIC_CELLD_VERSION: fleet.pins.celld.version,
+    AGENTIC_CELLD_VERSION: managementCelldVersion(fleet.pins.celld.version),
     AGENTIC_CELLD_COMMIT: fleet.pins.celld.commit,
     AGENTIC_GRPC_UDS: join(secrets, "agent-grpc.sock"),
     AGENTIC_GRPC_VSOCK_PORT: "0",

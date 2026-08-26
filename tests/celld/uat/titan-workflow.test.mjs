@@ -138,6 +138,7 @@ test("Celld qualification recovers before UAT and attempts every scoped cleaner 
   assert.match(cleanup.body, /node scripts\/celld-live-worker\.mjs cleanup[^\n]*\|\| cleanup_rc=4/);
   assert.match(cleanup.body, /node scripts\/celld-live-network-auth\.mjs cleanup[^\n]*\|\| cleanup_rc=4/);
   assert.match(cleanup.body, /node scripts\/celld-live-orchestration\.mjs cleanup[^\n]*\|\| cleanup_rc=4/);
+  assert.match(cleanup.body, /rmdir \/dev\/shm\/agentic-celld-orchestration 2>\/dev\/null \|\| true/);
   assert.match(cleanup.body, /exit "\$\{cleanup_rc\}"/);
 });
 
