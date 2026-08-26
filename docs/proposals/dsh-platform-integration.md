@@ -151,6 +151,7 @@ Custody snapshot (post-pass): `agentic/dsh:latest` = `sha256:023bc7364b9e627069d
 | 4 | Repo bind-mount visible in worker session (`~/zta:/workspace`) | proof listing ✅ |
 | 5 | Programmatic keystroke drive (`session input --file`) executes inside tmux pane | `proof.txt` written/read ✅ |
 | 6 | F19-compliant live model call (python reads lease internally — zero argv/host exposure) | `"zta worker linked"` · 95 tok · $0.00002 ✅ |
+| 7 | **Cockpit-pane model round-trip driven from Aside UI** (crypto-edge-worker: Drive grant → typed prompt reading lease in-container → GLM-5.3-Flash reply streamed to pane; screenshot retained in session evidence) | `MODEL: z-ai/glm-5.3-flash` · `REPLY: cockpit e2e linked` ✅ |
 
 **M2 status:** every infrastructure gate green including compliant live-model E2E. Remaining human step: operator types the prompt from a Cockpit pane (desktop/iPhone) for the full acceptance photo.
 
