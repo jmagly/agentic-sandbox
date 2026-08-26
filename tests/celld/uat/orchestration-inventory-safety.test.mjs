@@ -2756,7 +2756,9 @@ test("QEMU final capture requires a protected rooted deletion boundary", async (
     assert.match(helperSource, /ensure_root_only_directory\(Path::new\(CAPTURE_ROOT\)\)/);
     assert.match(helperSource, /require_root_directory\(Path::new\("\/build"\), false\)/);
     assert.match(helperSource, /require_root_directory\(Path::new\("\/build\/agentic-sandbox"\), false\)/);
-    assert.match(helperSource, /vm_root\.file_type\(\)\.is_symlink\(\)/);
+    assert.match(helperSource, /require_root_directory\(Path::new\(VM_ROOT\), false\)/);
+    assert.match(helperSource, /if owner_only \{ 0o077 \} else \{ 0o002 \}/);
+    assert.match(helperSource, /metadata\.file_type\(\)\.is_symlink\(\)/);
     assert.match(helperSource, /libc::getpwuid\(sudo_uid\)/);
     assert.match(helperSource, /libc::getgrouplist/);
     assert.match(helperSource, /expected_group_is_authorized\(sudo_gid, &supplementary_gids, request\.expected_gid\)/);

@@ -243,7 +243,7 @@ fn metadata_if_present(path: &Path) -> Result<Option<fs::Metadata>> {
 fn require_root_directory(path: &Path, owner_only: bool) -> Result<fs::Metadata> {
     let metadata = fs::symlink_metadata(path)
         .with_context(|| format!("inspect fixed directory {}", path.display()))?;
-    let forbidden = if owner_only { 0o077 } else { 0o022 };
+    let forbidden = if owner_only { 0o077 } else { 0o002 };
     if !metadata.file_type().is_dir()
         || metadata.file_type().is_symlink()
         || metadata.uid() != 0
@@ -490,10 +490,7 @@ fn execute(request: &Request) -> Result<&'static str> {
 
     require_root_directory(Path::new("/build"), false)?;
     require_root_directory(Path::new("/build/agentic-sandbox"), false)?;
-    let vm_root = fs::symlink_metadata(VM_ROOT).context("inspect fixed VM root")?;
-    if !vm_root.file_type().is_dir() || vm_root.file_type().is_symlink() {
-        bail!("fixed VM root is unsafe");
-    }
+    let vm_root = require_root_directory(Path::new(VM_ROOT), false)?;
     let capture_root = ensure_root_only_directory(Path::new(CAPTURE_ROOT))?;
     if vm_root.dev() != capture_root.dev() {
         bail!("VM and capture roots are not on the same filesystem");
