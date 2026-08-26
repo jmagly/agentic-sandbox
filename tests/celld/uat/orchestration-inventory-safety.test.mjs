@@ -2762,6 +2762,8 @@ test("QEMU final capture requires a protected rooted deletion boundary", async (
     assert.match(helperSource, /libc::getpwuid\(sudo_uid\)/);
     assert.match(helperSource, /libc::getgrouplist/);
     assert.match(helperSource, /expected_group_is_authorized\(sudo_gid, &supplementary_gids, request\.expected_gid\)/);
+    assert.match(helperSource, /gid == expected_gid && \(!is_directory \|\| uid == expected_uid\)/);
+    assert.match(helperSource, /\(kind\.is_file\(\) \|\| kind\.is_symlink\(\)\) && metadata\.nlink\(\) == 1/);
   });
 });
 

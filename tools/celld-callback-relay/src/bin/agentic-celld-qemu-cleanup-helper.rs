@@ -417,6 +417,16 @@ fn write_tombstone(path: &Path, request: &Request) -> Result<()> {
     verify_tombstone(path, request)
 }
 
+fn captured_entry_owner_is_authorized(
+    is_directory: bool,
+    uid: u32,
+    gid: u32,
+    expected_uid: u32,
+    expected_gid: u32,
+) -> bool {
+    gid == expected_gid && (!is_directory || uid == expected_uid)
+}
+
 fn verify_tree(path: &Path, uid: u32, gid: u32, count: &mut usize, depth: usize) -> Result<()> {
     if depth > MAX_TREE_DEPTH {
         bail!("captured tree exceeds the fixed depth bound");
@@ -430,10 +440,16 @@ fn verify_tree(path: &Path, uid: u32, gid: u32, count: &mut usize, depth: usize)
         let child = entry.path();
         let metadata = fs::symlink_metadata(&child)
             .with_context(|| format!("inspect captured entry {}", child.display()))?;
-        if metadata.uid() != uid || metadata.gid() != gid {
-            bail!("captured tree contains a foreign owner");
-        }
         let kind = metadata.file_type();
+        if !captured_entry_owner_is_authorized(
+            kind.is_dir() && !kind.is_symlink(),
+            metadata.uid(),
+            metadata.gid(),
+            uid,
+            gid,
+        ) {
+            bail!("captured tree contains an unauthorized owner or group");
+        }
         if kind.is_dir() && !kind.is_symlink() {
             verify_tree(&child, uid, gid, count, depth + 1)?;
         } else if (kind.is_file() || kind.is_symlink()) && metadata.nlink() == 1 {
@@ -617,6 +633,22 @@ mod tests {
         assert!(expected_group_is_authorized(1000, &[4, 27, 992], 1000));
         assert!(expected_group_is_authorized(1000, &[4, 27, 992], 992));
         assert!(!expected_group_is_authorized(1000, &[4, 27, 992], 991));
+    }
+
+    #[test]
+    fn captured_provider_leaf_may_use_a_dynamic_uid_but_not_a_foreign_group() {
+        assert!(captured_entry_owner_is_authorized(
+            false, 64055, 992, 1000, 992
+        ));
+        assert!(!captured_entry_owner_is_authorized(
+            false, 64055, 991, 1000, 992
+        ));
+        assert!(!captured_entry_owner_is_authorized(
+            true, 64055, 992, 1000, 992
+        ));
+        assert!(captured_entry_owner_is_authorized(
+            true, 1000, 992, 1000, 992
+        ));
     }
 
     #[test]
