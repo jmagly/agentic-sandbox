@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -91,6 +91,21 @@ test("orchestration driver error document exposes safe phase fields only", () =>
   assert.equal(JSON.stringify(document).includes("bearer token"), false);
 });
 
+test("cleanup precedence retains a safe digest of the masked campaign failure", () => {
+  const cleanup = new Error("storage cleanup failed");
+  cleanup.exitCode = 4;
+  cleanup.operation = "orchestration.cleanup-storage";
+  cleanup.campaignError = Object.assign(new Error("private campaign detail"), {
+    operation: "orchestration.run-uat-celld-004",
+    errorCode: "CELLD_RESTART_FAILED",
+  });
+  const document = liveOrchestration.driverErrorDocument(cleanup);
+  assert.equal(document.campaign_operation, "orchestration.run-uat-celld-004");
+  assert.equal(document.campaign_error_code, "CELLD_RESTART_FAILED");
+  assert.equal(document.campaign_message_sha256, createHash("sha256").update("private campaign detail").digest("hex"));
+  assert.equal(JSON.stringify(document).includes("private campaign detail"), false);
+});
+
 test("orchestration config confines exact-run mutation targets and immutable inputs", () => {
   assert.deepEqual(validateOrchestrationConfig(config(), { repoRoot: "/repo" }), []);
   assert.match(validateOrchestrationConfig(config({ working_root: "/tmp/titan-123" }), { repoRoot: "/repo" }).join(";"), /below \/dev\/shm/);
@@ -146,6 +161,17 @@ test("management transport can be pinned to the private Celld mTLS proxy", () =>
     assert.equal(environment.AGENTIC_CELLD_TLS_CA_FILE, tlsCa);
     assert.equal(environment.AGENTIC_CELLD_TLS_CLIENT_IDENTITY_FILE, tlsIdentity);
     assert.equal(environment.AIWG_MTLS_ADMIN_ALLOWLIST, "agentic-celld-management");
+    const qualificationKeyRoot = join(directory, "management-state", "secrets", "ssh-keys");
+    const keyRootMetadata = lstatSync(qualificationKeyRoot);
+    assert.equal(keyRootMetadata.isDirectory(), true);
+    assert.equal(keyRootMetadata.isSymbolicLink(), false);
+    assert.equal(keyRootMetadata.uid, process.getuid());
+    assert.equal(keyRootMetadata.gid, process.getgid());
+    assert.equal(keyRootMetadata.mode & 0o777, 0o700);
+    assert.doesNotThrow(() => managementEnvironment(liveConfig, fleet, "172.30.0.1", {
+      celldEndpoint: "https://172.30.0.20:8443", tlsCaFile: tlsCa, tlsIdentityFile: tlsIdentity,
+      operatorMtlsCn: "agentic-celld-management",
+    }));
     assert.throws(() => managementEnvironment(liveConfig, fleet, "172.30.0.1", { tlsCaFile: tlsCa }), /requires both/);
     assert.throws(
       () => managementEnvironment(liveConfig, fleet, "172.30.0.1", { operatorMtlsCn: "agentic-celld-management" }),
@@ -225,6 +251,12 @@ test("orchestration driver uses fixture-managed Worker access for live managemen
   assert.match(orchestrationSource, /celldEndpoint: workerAccess\.endpoint/);
   assert.match(orchestrationSource, /workerEndpoint: workerAccess\.endpoint/);
   assert.match(orchestrationSource, /workerAccess\.close\(\)/);
+});
+
+test("management restart preserves the exact fixture-managed Worker transport", () => {
+  assert.match(orchestrationSource, /celldTransport:\s*\{[\s\S]*?celldEndpoint:\s*environment\.AGENTIC_CELLD_ENDPOINT/);
+  assert.match(orchestrationSource, /launchManagement\(config, fleet, managementHost, \{ \.\.\.management\.celldTransport, celldEndpoint \}\)/);
+  assert.match(orchestrationSource, /restartManagement\(runtime\.management, runtime\.config, runtime\.fleet, runtime\.managementHost, runtime\.workerEndpoint\)/);
 });
 
 test("management launch annotates spawn failures before readiness polling", () => {

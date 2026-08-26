@@ -1608,6 +1608,116 @@ test("cleanup residue takes exit-4 precedence over a simultaneous campaign error
   assert.equal(selected.campaignError, campaignError);
 });
 
+test("live cleanup converges an interrupted observed fault before fixture teardown", async () => {
+  const fixture = exactRunFixture("red-live-fault-cleanup");
+  try {
+    const planned = planOrchestrationMutation(fixture.inventory, {
+      mutation: "fault_apply",
+      scenarioId: "UAT-CELLD-005",
+      subjectType: "fault",
+      subject: {
+        fault_id: "c".repeat(32),
+        kind: "callback_response_loss",
+        target: "celld-owned-relay",
+        target_identity_sha256: "7".repeat(64),
+        target_ownership_sha256: "8".repeat(64),
+      },
+    });
+    let active = true;
+    let healCalls = 0;
+    const binding = {
+      owned: true,
+      target_identity_sha256: planned.entry.subject.target_identity_sha256,
+      target_ownership_sha256: planned.entry.subject.target_ownership_sha256,
+    };
+    const runtime = {
+      scenarioId: "UAT-CELLD-005",
+      runId: fixture.runId,
+      config: fixture.config,
+      orchestrationInventory: fixture.inventory,
+      providerResources: new Map(),
+      persistInventory: () => {},
+      observeFaultTarget: async () => ({ ...binding, present: active }),
+      revalidateFaultTarget: async () => binding,
+    };
+    const assertions = await liveOrchestration.cleanupOwnedOrchestrationFaults(runtime, {
+      healFaultEffect: async () => { healCalls += 1; active = false; },
+    });
+    assert.equal(healCalls, 1);
+    assert.equal(fixture.inventory.faults[0].status, "healed");
+    assert.deepEqual(fixture.inventory.incomplete_mutation_ids, []);
+    assert.deepEqual(assertions, ["fault callback_response_loss cccccccccccccccccccccccccccccccc healed"]);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("live cleanup journals a same-run management replacement before healing", async () => {
+  const fixture = exactRunFixture("red-live-management-cleanup");
+  try {
+    const previous = {
+      owned: true,
+      provider_id: "4100",
+      target_identity_sha256: "3".repeat(64),
+      target_ownership_sha256: "4".repeat(64),
+      spawn_identity: {
+        run_id: fixture.runId,
+        executable_sha256: "5".repeat(64),
+        process_start_time_ticks: "100",
+      },
+    };
+    const replacement = {
+      owned: true,
+      provider_id: "4200",
+      target_identity_sha256: "6".repeat(64),
+      target_ownership_sha256: "7".repeat(64),
+      spawn_identity: {
+        run_id: fixture.runId,
+        executable_sha256: "5".repeat(64),
+        process_start_time_ticks: "200",
+      },
+    };
+    const planned = planOrchestrationMutation(fixture.inventory, {
+      mutation: "fault_apply",
+      scenarioId: "UAT-CELLD-004",
+      subjectType: "fault",
+      subject: {
+        fault_id: "d".repeat(32),
+        kind: "management_process_kill",
+        target: "management",
+        target_identity_sha256: previous.target_identity_sha256,
+        target_ownership_sha256: previous.target_ownership_sha256,
+      },
+    });
+    let binding = previous;
+    const runtime = {
+      scenarioId: "UAT-CELLD-004",
+      runId: fixture.runId,
+      config: fixture.config,
+      orchestrationInventory: fixture.inventory,
+      providerResources: new Map(),
+      persistInventory: () => {},
+      observeFaultTarget: async ({ plan }) => ({ ...binding, present: plan.mutation === "fault_apply" }),
+      revalidateFaultTarget: async () => binding,
+    };
+    finishOrchestrationMutation(fixture.inventory, planned.entry, { outcome: "applied" });
+    await liveOrchestration.cleanupOwnedOrchestrationFaults(runtime, {
+      healFaultEffect: async () => { binding = replacement; },
+    });
+    assert.equal(fixture.inventory.faults[0].status, "healed");
+    const healed = fixture.inventory.journal.find((entry) => entry.event === "completed" && entry.mutation === "fault_heal");
+    assert.deepEqual(healed.target_transition, {
+      kind: "management_process_replacement",
+      previous_identity_sha256: previous.target_identity_sha256,
+      replacement_identity_sha256: replacement.target_identity_sha256,
+      replacement_ownership_sha256: replacement.target_ownership_sha256,
+      replacement_provider_id: replacement.provider_id,
+    });
+  } finally {
+    fixture.cleanup();
+  }
+});
+
 test("cleanup residue exits 4 while ordinary orchestration driver errors remain exit 3", () => {
   const fixture = exactRunFixture("red-cli-exit");
   try {

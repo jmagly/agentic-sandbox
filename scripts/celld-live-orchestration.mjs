@@ -565,10 +565,17 @@ export function managementEnvironment(config, fleet, managementHost, { celldEndp
   }
   const stateRoot = join(fleet.run_root, "management-state");
   const secrets = join(stateRoot, "secrets");
+  const sshKeys = join(secrets, "ssh-keys");
   const dispatchGates = join(stateRoot, "dispatch-gates");
   try {
     mkdirSync(secrets, { recursive: true, mode: 0o700 });
     chmodSync(secrets, 0o700);
+    // The QEMU provisioner creates root-owned ephemeral key leaves below this
+    // directory and removes those leaves during destroy. Keep the exact
+    // qualification directory owned by the runner so fixture cleanup can reap
+    // the now-empty directory without a generic privileged delete.
+    mkdirSync(sshKeys, { recursive: true, mode: 0o700 });
+    chmodSync(sshKeys, 0o700);
     mkdirSync(dispatchGates, { recursive: true, mode: 0o700 });
     chmodSync(dispatchGates, 0o700);
   } catch (error) {
@@ -684,6 +691,14 @@ export function launchManagement(config, fleet, managementHost, celldTransport =
     processHandle,
     logPath,
     managementHost,
+    celldTransport: {
+      celldEndpoint: environment.AGENTIC_CELLD_ENDPOINT,
+      ...(celldTransport.tlsCaFile ? {
+        tlsCaFile: celldTransport.tlsCaFile,
+        tlsIdentityFile: celldTransport.tlsIdentityFile,
+      } : {}),
+      ...(celldTransport.operatorMtlsCn ? { operatorMtlsCn: celldTransport.operatorMtlsCn } : {}),
+    },
     operatorMtls: celldTransport.operatorMtlsCn ? {
       cn: celldTransport.operatorMtlsCn,
       ca_file_ref: celldTransport.tlsCaFile,
@@ -724,9 +739,9 @@ export async function waitManagement(management, fleet) {
   }), { timeoutMs: 120_000, intervalMs: 250, description: "management private mTLS listener" });
 }
 
-async function restartManagement(management, config, fleet, managementHost) {
+async function restartManagement(management, config, fleet, managementHost, celldEndpoint) {
   await stopManagementAndWait(management, "SIGKILL");
-  const restarted = launchManagement(config, fleet, managementHost);
+  const restarted = launchManagement(config, fleet, managementHost, { ...management.celldTransport, celldEndpoint });
   await waitManagement(restarted, fleet);
   return restarted;
 }
@@ -1115,10 +1130,10 @@ export async function resolveOrchestrationFaultTarget({ runtime, fault, plan }) 
   };
 }
 
-export async function observeOrchestrationFaultTarget({ runtime, plan }) {
-  const subject = plan?.subject;
+export async function observeOrchestrationFaultTarget({ runtime, plan, fault }) {
+  const subject = plan?.subject ?? fault;
   if (!subject || !FAULT_KINDS.has(subject.kind)) throw new Error("fault observation lacks an exact persisted subject");
-  const isHeal = plan.mutation === "fault_heal";
+  const isHeal = plan?.mutation === "fault_heal";
   const binding = runtime.runId !== undefined ? await resolveOrchestrationFaultTarget({ runtime, fault: subject, plan }) : null;
   if (subject.kind === "management_process_kill") {
     if (subject.target !== "management" || !runtime.management?.processHandle) throw new Error("management fault observation target is not exact-owned");
@@ -1267,6 +1282,89 @@ export async function healPlannedOrchestrationFault(runtime, record, heal) {
   }
   await heal();
   markFault(runtime, record, "healed");
+}
+
+async function healLiveOrchestrationFaultEffect({ runtime, fault, binding }) {
+  if (fault.kind === "management_process_kill") {
+    const handle = runtime.management?.processHandle;
+    if (!handle || handle.exitCode !== null || handle.signalCode !== null || handle.killed) {
+      runtime.management = await restartManagement(
+        runtime.management,
+        runtime.config,
+        runtime.fleet,
+        runtime.managementHost,
+        runtime.workerEndpoint,
+      );
+    }
+    return;
+  }
+  const exact = exactFaultBinding(binding, "live cleanup fault heal");
+  if (!/^[0-9a-f]{64}$/.test(exact.provider_id ?? "")) {
+    throw new Error("live cleanup fault heal lacks the exact container identity");
+  }
+  if (fault.kind === "callback_response_loss") return;
+  if (fault.kind === "callback_relay_pause") {
+    run("docker", ["unpause", exact.provider_id], { timeout: 30_000 });
+    return;
+  }
+  if (fault.kind === "fleet_node_stop") {
+    run("docker", ["start", exact.provider_id], { timeout: 30_000 });
+    await waitFor(() => diagnoseFleet(runtime.fleetPath).status === "READY", {
+      timeoutMs: 30_000,
+      intervalMs: 250,
+      description: "three-node fleet cleanup heal",
+    });
+    return;
+  }
+  throw new Error("live cleanup fault kind is outside the fixed allowlist");
+}
+
+export async function cleanupOwnedOrchestrationFaults(runtime, dependencies = {}) {
+  if (!runtime) return [];
+  if (!isOrchestrationInventoryV2(runtime.orchestrationInventory)) {
+    throw new Error("orchestration inventory v1 is read-only during fault cleanup; upgrade to v2 first");
+  }
+  const observeFault = dependencies.observeFaultTarget ?? runtime.observeFaultTarget;
+  const healFaultEffect = dependencies.healFaultEffect ?? healLiveOrchestrationFaultEffect;
+  if (typeof observeFault !== "function" || typeof healFaultEffect !== "function") {
+    throw new Error("live fault cleanup requires exact observation and heal adapters");
+  }
+  const inventory = runtime.orchestrationInventory;
+  for (const plan of inventory.journal.filter((entry) => entry.event === "planned"
+    && entry.mutation === "fault_apply"
+    && inventory.incomplete_mutation_ids.includes(entry.mutation_id))) {
+    const fault = exactRecoveryFault(runtime, plan);
+    const observed = exactRecoveryFaultObservation(
+      plan.subject,
+      await observeFault({ runtime, plan, fault, subject: plan.subject }),
+      true,
+    );
+    finishOrchestrationMutation(inventory, plan, {
+      event: "recovered",
+      outcome: observed.active ? "applied" : "not_observed",
+    });
+    persistOrchestrationInventory(runtime);
+  }
+  const assertions = [];
+  for (const fault of inventory.faults.filter((entry) => entry.status === "applied")) {
+    // A management heal authorizes the replacement spawn identity. Start that
+    // replacement before planning the heal so the journal records an explicit
+    // same-run identity transition instead of authorizing the dead process.
+    if (fault.kind === "management_process_kill") {
+      await healFaultEffect({ runtime, fault, binding: null });
+    }
+    await healPlannedOrchestrationFault(runtime, fault, async (binding) => {
+      if (fault.kind === "management_process_kill") return;
+      await healFaultEffect({ runtime, fault, binding });
+    });
+    assertions.push(`fault ${fault.kind} ${fault.id} healed`);
+  }
+  if (inventory.incomplete_mutation_ids.some((mutationId) => inventory.journal.some((entry) => entry.event === "planned"
+    && entry.mutation_id === mutationId
+    && entry.subject_type === "fault"))) {
+    throw new OrchestrationCleanupResidueError("live fault cleanup retains an incomplete fault mutation");
+  }
+  return assertions;
 }
 
 export async function issueCommand(runtime, { instanceId, generation, operationId: id, action, payload }) {
@@ -1897,7 +1995,7 @@ async function runUat004(runtime, timeline) {
               : false;
           }, { timeoutMs: 30_000, intervalMs: 250, description: "Celld owner takeover and epoch advance" });
 
-          runtime.management = await restartManagement(runtime.management, runtime.config, runtime.fleet, runtime.managementHost);
+          runtime.management = await restartManagement(runtime.management, runtime.config, runtime.fleet, runtime.managementHost, runtime.workerEndpoint);
           await healPlannedOrchestrationFault(runtime, managementFault, async () => {});
           const terminal = await terminalCallback(runtime, instanceId, 1, effect);
           const cell = await waitCellEffect(runtime, instanceId, 1, id, ["succeeded"]);
@@ -1907,7 +2005,7 @@ async function runUat004(runtime, timeline) {
         } finally {
           clearDispatchGate(runtime, id);
           if (runtime.management.processHandle.exitCode !== null || runtime.management.processHandle.signalCode !== null || runtime.management.processHandle.killed) {
-            runtime.management = await restartManagement(runtime.management, runtime.config, runtime.fleet, runtime.managementHost);
+            runtime.management = await restartManagement(runtime.management, runtime.config, runtime.fleet, runtime.managementHost, runtime.workerEndpoint);
           }
           if (managementFault?.status === "applied") await healPlannedOrchestrationFault(runtime, managementFault, async () => {});
           if (nodeFault?.status === "applied") {
@@ -2999,6 +3097,7 @@ export async function executeOrchestrationDriver({ scenarioId, runId, liveProfil
         ? error
         : new OrchestrationCleanupResidueError(`${kind} cleanup failed`, { cause: error }), { operation: `orchestration.cleanup-${kind}`, scenarioId }));
     };
+    try { cleanupAssertions.push(...await cleanupOwnedOrchestrationFaults(runtime)); } catch (error) { retainCleanupError("faults", error); }
     try { await stopManagementAndWait(runtime?.management ?? management, "SIGKILL"); cleanupAssertions.push("management process terminated"); } catch (error) { retainCleanupError("management", error); }
     try { if (workerAccess) { await workerAccess.close(); cleanupAssertions.push("Worker loopback access closed"); } } catch (error) { retainCleanupError("worker-access", error); }
     try { cleanupAssertions.push(...await cleanupOwnedProviderResources(runtime)); } catch (error) { retainCleanupError("provider", error); }

@@ -59,6 +59,13 @@ export function driverErrorDocument(error) {
   }
   if (Number.isInteger(error?.exitStatus)) document.exit_status = error.exitStatus;
   if (error?.timedOut === true) document.timed_out = true;
+  if (error?.campaignError) {
+    const operation = safeDriverField(error.campaignError.operation);
+    const errorCode = safeDriverField(error.campaignError.errorCode);
+    if (operation !== null) document.campaign_operation = operation;
+    if (errorCode !== null) document.campaign_error_code = errorCode;
+    document.campaign_message_sha256 = sha256(String(error.campaignError.message ?? ""));
+  }
   return document;
 }
 
