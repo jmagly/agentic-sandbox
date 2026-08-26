@@ -77,7 +77,7 @@ probe_ssh() {
 if [[ $# -gt 0 ]]; then
   providers=("$@")
 else
-  providers=(codex claude github ssh)
+  providers=(codex claude dsh github ssh)
 fi
 
 printf 'schema\tagentic.provider_readiness.v1\n'
@@ -97,6 +97,10 @@ for provider in "${providers[@]}"; do
       ;;
     ssh)
       probe_ssh
+      ;;
+    dsh)
+      key_file="$(file_or_dir_default "${OPENROUTER_API_KEY_FILE:-}" "openrouter_api_key")"
+      probe_file_provider "dsh" "dsh" "$key_file"
       ;;
     *)
       emit "$provider" "" "unknown" "" "unknown" "unsupported_provider"

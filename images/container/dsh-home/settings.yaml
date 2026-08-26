@@ -1,0 +1,36 @@
+# DSH worker skeleton — baked into the agentic/dsh image at /var/lib/dsh
+# (DSH_HOME). Static snapshot of the operator route: provider openrouter,
+# model z-ai/glm-5.3-flash (operator decision 2026-08-26; catalog limits
+# verified against openrouter.ai/api/v1/models — see
+# docs/proposals/dsh-platform-integration.md §M0).
+# The API key is resolved at request time from OPENROUTER_API_KEY — the
+# credential lease materializes AGENTIC_CREDENTIAL_DIR/openrouter_api_key and
+# agentic-dsh-automation exports it — and is intentionally not stored here.
+# Invariant F14: never add an explicit apiKey field to this file; apiKeyEnv
+# keeps authentication flowing through the lease-controlled environment.
+llm-pi-ai:
+  providers:
+    openrouter:
+      displayName: OpenRouter
+      apiKeyEnv: OPENROUTER_API_KEY
+      api: openai-completions
+      baseURL: https://openrouter.ai/api/v1
+      models:
+        - id: z-ai/glm-5.3-flash
+          name: 'Z.ai: GLM 5.3 Flash'
+          contextWindow: 1048576
+          maxTokens: 131072
+          input: [ text, image ]
+          reasoningEfforts:
+            low: low
+            high: high
+            max: max
+          compat:
+            supportsDeveloperRole: false
+            thinkingFormat: openrouter
+
+# Used for all subsequently-created DSH sessions.
+agent-default-model:
+  provider: openrouter
+  model: z-ai/glm-5.3-flash
+  reasoningEffort: max

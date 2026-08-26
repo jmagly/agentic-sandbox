@@ -8,6 +8,10 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+### Added
+
+- **agentic/dsh platform image** — DeepSeek Harness CLI (`@deepseek-ai/dsh`, pinned) layered on `agent:dev` following the codex image pattern: build-time provider inventory/readiness schema validation, loadout manifest, credential-free worker skeleton (`DSH_HOME`, OpenRouter route `z-ai/glm-5.3-flash`, `apiKeyEnv` only), and `agentic-dsh-automation` launcher resolving the `openrouter_api_key` lease. Design: `docs/proposals/dsh-platform-integration.md`.
+
 ## [2026.8.5] — 2026-08-23
 
 Patch release adding the protected Celld live-qualification implementation and

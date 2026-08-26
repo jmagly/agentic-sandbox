@@ -14,10 +14,8 @@
 @stoplight/spectral-cli  6.16.0    2026-05-17  .gitea/workflows/schema-lint.yml                                                                              initial pin (#266)
 ajv-cli                  5.0.0     2026-05-17  .gitea/workflows/schema-lint.yml                                                                              initial pin (#266)
 ajv-formats              3.0.1     2026-05-17  .gitea/workflows/schema-lint.yml                                                                              initial pin (#266)
-@openai/codex            0.149.0   2026-08-20  images/container/Dockerfile.codex, images/qemu/cloud-init/ubuntu.sh, images/qemu/loadouts/providers/codex.yaml  provider refresh
-@openai/codex-linux-x64  npm:@openai/codex@0.149.0-linux-x64  2026-08-20  images/container/Dockerfile.codex, images/qemu/cloud-init/ubuntu.sh                    native package bumped with @openai/codex
-@openai/codex-linux-arm64 npm:@openai/codex@0.149.0-linux-arm64 2026-08-20  images/container/Dockerfile.codex                                                    native arm64 package bumped with @openai/codex
-@anthropic-ai/claude-code 2.1.238  2026-08-20  images/agent/claude/Dockerfile                                                                                provider refresh
-aiwg                     2026.8.12 2026-08-20  images/qemu/cloud-init/ubuntu.sh, images/qemu/profiles/agentic-dev-cloud-init.yaml, images/qemu/loadouts/generate-from-manifest.sh, images/container/Dockerfile.dev  framework refresh
-@github/copilot          1.0.80    2026-08-20  images/qemu/loadouts/providers/copilot.yaml                                                                    provider refresh
-openclaw                 2026.7.1-2 2026-08-20 images/qemu/loadouts/providers/openclaw.yaml                                                                   provider refresh
+@openai/codex            0.130.0   2026-05-17  images/container/Dockerfile.codex, images/qemu/cloud-init/ubuntu.sh                                            initial pin (#266)
+@openai/codex-linux-x64  npm:@openai/codex@0.130.0-linux-x64  2026-06-01  images/container/Dockerfile.codex, images/qemu/cloud-init/ubuntu.sh                    native optional package alias required when npm lifecycle scripts are disabled
+@anthropic-ai/claude-code 2.1.143  2026-05-17  images/agent/claude/Dockerfile                                                                                initial pin (#266)
+aiwg                     2026.5.7  2026-05-17  images/qemu/cloud-init/ubuntu.sh, images/qemu/profiles/agentic-dev-cloud-init.yaml, images/qemu/loadouts/generate-from-manifest.sh  initial pin (#266) — replaces @next floating tag
+@deepseek-ai/dsh        0.1.1-rc.2  2026-08-26  images/container/Dockerfile.dsh  initial pin — dsh platform (docs/proposals/dsh-platform-integration.md); publisher is the operator, bump via release:dsh review
