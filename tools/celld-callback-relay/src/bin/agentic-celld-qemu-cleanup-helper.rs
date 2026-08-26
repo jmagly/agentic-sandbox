@@ -10,7 +10,9 @@
 use anyhow::{anyhow, bail, Context, Result};
 use std::{
     collections::BTreeMap,
-    env, fs,
+    env,
+    ffi::{CStr, CString},
+    fs,
     fs::{File, OpenOptions},
     io::{self, Read, Write},
     os::unix::fs::{MetadataExt, PermissionsExt},
@@ -281,6 +283,52 @@ fn exact_identity(metadata: &fs::Metadata, request: &Request, description: &str)
     Ok(())
 }
 
+fn expected_group_is_authorized(
+    primary_gid: u32,
+    supplementary_gids: &[u32],
+    expected_gid: u32,
+) -> bool {
+    expected_gid == primary_gid || supplementary_gids.contains(&expected_gid)
+}
+
+fn sudo_caller_supplementary_groups(sudo_uid: u32, sudo_gid: u32) -> Result<Vec<u32>> {
+    let sudo_user = env::var("SUDO_USER").context("SUDO_USER is required")?;
+    let sudo_user = CString::new(sudo_user).context("SUDO_USER is invalid")?;
+    unsafe {
+        let passwd = libc::getpwuid(sudo_uid);
+        if passwd.is_null()
+            || (*passwd).pw_uid != sudo_uid
+            || (*passwd).pw_gid != sudo_gid
+            || CStr::from_ptr((*passwd).pw_name).to_bytes() != sudo_user.as_bytes()
+        {
+            bail!("sudo caller identity does not match the local account database");
+        }
+        let mut count = 0;
+        libc::getgrouplist(
+            sudo_user.as_ptr(),
+            sudo_gid,
+            std::ptr::null_mut(),
+            &mut count,
+        );
+        if !(1..=1024).contains(&count) {
+            bail!("sudo caller group vector is outside the fixed bound");
+        }
+        let mut groups = vec![0 as libc::gid_t; count as usize];
+        if libc::getgrouplist(
+            sudo_user.as_ptr(),
+            sudo_gid,
+            groups.as_mut_ptr(),
+            &mut count,
+        ) < 0
+            || count < 1
+            || count as usize > groups.len()
+        {
+            bail!("sudo caller group vector changed during verification");
+        }
+        Ok(groups[..count as usize].to_vec())
+    }
+}
+
 fn sync_directory(path: &Path) -> Result<()> {
     File::open(path)
         .with_context(|| format!("open directory {} for sync", path.display()))?
@@ -432,7 +480,11 @@ fn execute(request: &Request) -> Result<&'static str> {
         .context("SUDO_GID is required")?
         .parse::<u32>()
         .context("SUDO_GID is invalid")?;
-    if sudo_uid == 0 || request.expected_uid != sudo_uid || request.expected_gid != sudo_gid {
+    let supplementary_gids = sudo_caller_supplementary_groups(sudo_uid, sudo_gid)?;
+    if sudo_uid == 0
+        || request.expected_uid != sudo_uid
+        || !expected_group_is_authorized(sudo_gid, &supplementary_gids, request.expected_gid)
+    {
         bail!("request owner does not match the non-root sudo caller");
     }
 
@@ -561,6 +613,13 @@ mod tests {
         format!(
             "{{\"schema_version\":\"{REQUEST_SCHEMA}\",\"operation\":\"{OPERATION}\",\"run_id\":\"titan-123\",\"source_path\":\"{source}\",\"capture_path\":\"{capture}\",\"expected_uid\":\"1000\",\"expected_gid\":\"1000\",\"expected_device\":\"8\",\"expected_inode\":\"9\"}}"
         )
+    }
+
+    #[test]
+    fn exact_storage_group_must_be_primary_or_supplementary() {
+        assert!(expected_group_is_authorized(1000, &[4, 27, 992], 1000));
+        assert!(expected_group_is_authorized(1000, &[4, 27, 992], 992));
+        assert!(!expected_group_is_authorized(1000, &[4, 27, 992], 991));
     }
 
     #[test]
