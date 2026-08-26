@@ -1031,6 +1031,108 @@ test("normal QEMU lifecycle destroy needs no cleanup quarantine plan once exact 
   }
 });
 
+test("normal cleanup durably closes an absent interrupted provision before cleaning later resources", async () => {
+  const fixture = exactRunFixture("red-absent-interrupted-provision");
+  try {
+    const absentSubject = providerSubject({
+      instanceId: "123e4567-e89b-42d3-a456-426614174001",
+      name: "celld-absent-provider",
+      operationId: "interrupted-absent-provision",
+    });
+    planOrchestrationMutation(fixture.inventory, {
+      mutation: "provider_action",
+      scenarioId: "UAT-CELLD-003",
+      subjectType: "provider_resource",
+      subject: absentSubject,
+    }, new Date("2026-08-23T00:00:03.000Z"));
+    const { resource: presentResource } = addObservedProvider(fixture.inventory, {
+      subject: providerSubject({
+        instanceId: "123e4567-e89b-42d3-a456-426614174002",
+        name: "celld-later-provider",
+        operationId: "later-provision",
+      }),
+    });
+    const runtime = {
+      scenarioId: "UAT-CELLD-003",
+      runId: fixture.runId,
+      config: fixture.config,
+      orchestrationInventory: fixture.inventory,
+      providerResources: new Map(fixture.inventory.resources.map((resource) => [resource.instance_id, {
+        instanceId: resource.instance_id,
+        name: resource.name,
+        substrate: resource.substrate,
+      }])),
+      persistInventory: (_path, inventory) => {
+        assert.deepEqual(validateOrchestrationInventoryDocument(inventory, fixture.config), []);
+      },
+    };
+    let present = true;
+    let removeCalls = 0;
+    const assertions = await liveOrchestration.cleanupOwnedProviderResources(runtime, {
+      observeProviderResource: async ({ resource }) => resource.instanceId === absentSubject.instance_id
+        ? persistedDockerObservation(fixture.inventory.resources.find((entry) => entry.instance_id === resource.instanceId), false)
+        : persistedDockerObservation(presentResource, present),
+      removeProviderResource: async ({ resource }) => {
+        assert.equal(resource.instanceId, presentResource.instance_id);
+        removeCalls += 1;
+        present = false;
+      },
+    });
+    assert.equal(removeCalls, 1);
+    assert.equal(assertions.length, 2);
+    assert.deepEqual(fixture.inventory.incomplete_mutation_ids, []);
+    assert.equal(fixture.inventory.resources.every((resource) => resource.status === "removed"), true);
+    assert.equal(runtime.providerResources.size, 0);
+    assert.deepEqual(validateOrchestrationInventoryDocument(fixture.inventory, fixture.config), []);
+    const absentTerminal = fixture.inventory.journal.find((entry) => entry.mutation_id === fixture.inventory.journal[0].mutation_id && entry.event === "recovered");
+    assert.equal(absentTerminal?.outcome, "absent");
+    assert.equal(fixture.inventory.journal.some((entry) => entry.mutation === "provider_cleanup" && entry.subject.instance_id === absentSubject.instance_id), false);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("normal cleanup durably binds an observed interrupted provision before removing it", async () => {
+  const fixture = exactRunFixture("red-observed-interrupted-provision");
+  try {
+    const subject = providerSubject({ operationId: "interrupted-observed-provision" });
+    const planned = planOrchestrationMutation(fixture.inventory, {
+      mutation: "provider_action",
+      scenarioId: "UAT-CELLD-003",
+      subjectType: "provider_resource",
+      subject,
+    }, new Date("2026-08-23T00:00:01.000Z"));
+    const record = planned.materialized;
+    const runtime = runtimeFor(fixture, record);
+    runtime.persistInventory = (_path, inventory) => {
+      assert.deepEqual(validateOrchestrationInventoryDocument(inventory, fixture.config), []);
+    };
+    const observation = trustedDockerObservation(fixture);
+    let present = true;
+    let removeCalls = 0;
+    await liveOrchestration.cleanupOwnedProviderResources(runtime, {
+      observeProviderResource: async () => present
+        ? observation
+        : persistedDockerObservation(record, false),
+      removeProviderResource: async () => {
+        assert.equal(record.status, "cleanup_pending");
+        assert.equal(record.provider_id, observation.provider_id);
+        removeCalls += 1;
+        present = false;
+      },
+    });
+    assert.equal(removeCalls, 1);
+    assert.deepEqual(fixture.inventory.incomplete_mutation_ids, []);
+    assert.equal(record.status, "removed");
+    assert.equal(record.provider_id, observation.provider_id);
+    assert.deepEqual(validateOrchestrationInventoryDocument(fixture.inventory, fixture.config), []);
+    const recovered = fixture.inventory.journal.find((entry) => entry.mutation_id === planned.entry.mutation_id && entry.event === "recovered");
+    assert.equal(recovered?.outcome, "effect_observed");
+  } finally {
+    fixture.cleanup();
+  }
+});
+
 test("recovery heals an active materialized fault even after its apply terminal was durably committed", async () => {
   const fixture = exactRunFixture("red-active-fault");
   try {
@@ -1513,6 +1615,55 @@ test("re-provision clears removed identity bindings and crash recovery binds onl
         "managed_network_configuration_sha256",
         "provider_storage_identity_sha256",
       ]) assert.equal(Object.hasOwn(resource, field), false, field);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  await t.test("QEMU re-provision replay clears every retired storage binding", () => {
+    const fixture = exactRunFixture("red-qemu-reprovision-clear");
+    try {
+      const storageRoot = join(fixture.root, "vm-storage");
+      const storagePath = join(storageRoot, "celld-owned-provider");
+      fixture.config.vm_storage_dir = storageRoot;
+      mkdirSync(storagePath, { recursive: true, mode: 0o700 });
+      writeFileSync(join(storagePath, "disk.qcow2"), "authorized storage\n", { mode: 0o600 });
+      const { resource } = addObservedQemuProvider(fixture.inventory, storagePath);
+      const cleanup = addPendingCleanup(fixture.inventory, resource);
+      finishOrchestrationMutation(fixture.inventory, cleanup.entry, {
+        outcome: "absent",
+        observedIdentitySha256: null,
+        observedConfigurationSha256: null,
+      }, new Date("2026-08-23T00:00:04.000Z"));
+      planOrchestrationMutation(fixture.inventory, {
+        mutation: "provider_action",
+        scenarioId: "UAT-CELLD-006",
+        subjectType: "provider_resource",
+        subject: providerSubject({
+          instanceId: resource.instance_id,
+          name: resource.name,
+          substrate: "qemu",
+          generation: 2,
+          operationId: "qemu-reprovision-generation-2",
+        }),
+      }, new Date("2026-08-23T00:00:05.000Z"));
+      assert.equal(resource.status, "planned");
+      for (const field of [
+        "provider_identity_sha256",
+        "configuration_sha256",
+        "ownership_binding_sha256",
+        "provider_storage_identity_sha256",
+        "storage_path",
+        "storage_device",
+        "storage_inode",
+        "storage_uid",
+        "storage_gid",
+        "storage_quarantine_path",
+        "storage_quarantine_identity_sha256",
+        "storage_final_capture_path",
+        "storage_final_capture_identity_sha256",
+      ]) assert.equal(Object.hasOwn(resource, field), false, field);
+      assert.deepEqual(validateOrchestrationInventoryDocument(fixture.inventory, fixture.config), []);
     } finally {
       fixture.cleanup();
     }

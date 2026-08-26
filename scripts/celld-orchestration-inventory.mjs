@@ -379,6 +379,10 @@ function replayV2Journal(inventory, errors) {
           delete expected.managed_network_configuration_sha256;
           delete expected.provider_storage_identity_sha256;
           delete expected.storage_path;
+          delete expected.storage_device;
+          delete expected.storage_inode;
+          delete expected.storage_uid;
+          delete expected.storage_gid;
           delete expected.storage_quarantine_path;
           delete expected.storage_quarantine_identity_sha256;
           delete expected.storage_final_capture_path;

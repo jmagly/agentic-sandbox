@@ -3018,7 +3018,31 @@ export async function cleanupOwnedProviderResources(runtime, dependencies = {}) 
       cleanupPhase = "PLAN";
       let cleanupPlan = incompleteProviderCleanupPlan(runtime.orchestrationInventory, record.instance_id);
       const interruptedActionPlan = incompleteProviderActionPlanFor(runtime.orchestrationInventory, record.instance_id);
-      if (!cleanupPlan) cleanupPlan = planProviderCleanup(runtime, resource, new Date(), interruptedActionPlan?.mutation_id ?? null);
+      const newlyBoundEffect = interruptedActionPlan?.mutation === "provider_action"
+        && interruptedActionPlan.subject.action === "provision"
+        && first.present
+        && !record.provider_identity_sha256
+        && hasProviderEffectBinding(resource.substrate, first);
+      if (first.present && !record.provider_identity_sha256 && !cleanupPlan && !newlyBoundEffect && runtime.runId !== undefined) {
+        throw new OrchestrationCleanupResidueError("provider cleanup refuses an unbound provider plan before any destructive effect");
+      }
+      if (newlyBoundEffect) completeRecoveredProviderEffect(runtime, interruptedActionPlan, record, first);
+      if (!first.present && interruptedActionPlan && !cleanupPlan) {
+        finishOrchestrationMutation(runtime.orchestrationInventory, interruptedActionPlan, {
+          event: "recovered",
+          outcome: "absent",
+          observedIdentitySha256: null,
+          observedConfigurationSha256: null,
+        });
+        persistOrchestrationInventory(runtime);
+        runtime.providerResources?.delete(record.instance_id);
+        assertions.push(`${record.substrate === "docker" ? "Docker" : "QEMU"} interrupted provider identity ${sha256(record.instance_id)} absent`);
+        continue;
+      }
+      if (!cleanupPlan) {
+        cleanupPlan = planProviderCleanup(runtime, resource, new Date(),
+          newlyBoundEffect ? null : interruptedActionPlan?.mutation_id ?? null);
+      }
       if (first.present) {
         cleanupPhase = "REMOVE";
         await remove({ runtime, plan: cleanupPlan, resource, record, observation: first });
