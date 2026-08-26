@@ -37,8 +37,11 @@ RUN npm install -g --ignore-scripts @deepseek-ai/dsh@0.1.1-rc.2 \
         > /etc/agentic-sandbox/loadout-manifest.json
 
 # Worker DSH_HOME skeleton: static model catalog + default route, no secrets.
+# AGENTIC_CREDENTIAL_DIR matches agent-rs credentials.rs DEFAULT_CREDENTIAL_DIR;
+# the executor materializes leased secrets as files here (openrouter_api_key).
 COPY images/container/dsh-home/ /var/lib/dsh/
-ENV DSH_HOME=/var/lib/dsh
+ENV DSH_HOME=/var/lib/dsh \
+    AGENTIC_CREDENTIAL_DIR=/run/agentic-sandbox/credentials
 
 COPY images/common/automation-control/provider-inventory.sh /usr/local/bin/agentic-provider-inventory
 COPY images/common/automation-control/provider-readiness.sh /usr/local/bin/agentic-provider-readiness
