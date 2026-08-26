@@ -108,3 +108,21 @@ Refuted attacks (evidence-backed, do NOT re-litigate): base images are digest-pi
 - **Traceability (house style):** file the upstream tracking issue at M0 exit; cite its number in this doc header, commit messages, and the PR — matching the repo's `Issues: #NNN` convention.
 - **Gate mapping:** LO = §7 decisions + F14/F15 mitigations accepted · LA = M1 green incl. smoke test · IOC = M2 keystroke test passed · PR = M4 upstream merge + capability-matrix row.
 
+---
+
+## 12. Adversarial pass 4 — conformance audit vs existing platform corpus
+
+Baseline triangulated across Dockerfile.{claude,codex,opencode}. The exemplars themselves diverge (claude=helpers+validation; codex adds labels+manifest; opencode minimal install+PATH) — parity epic #181 context. **dsh implements the strictest superset (codex-level) plus the baked DSH_HOME skeleton.** The only sanctioned delta is the model provider (OpenRouter `z-ai/glm-5.3-flash`, `apiKeyEnv` ambient) — verified: no Anthropic/OpenAI auth assumptions in any dsh artifact.
+
+| ID | Lens | Finding | Disposition |
+|---|---|---|---|
+| F19 | sec-eng / secret-handling-runtime | Manual smoke test passed the lease through **host shell command substitution → argv** (key visible in `ps` on both sides for the call duration). The designed path — `agentic-dsh-automation` reading the file *inside* the container — has zero boundary crossing. | Rotate the scoped key at next natural interval; future tests use the automation path only |
+| F20 | sec-eng / supply-chain-trust | Pin is version-level; no tarball integrity digest. Upstream precedent is version pins (bases ARE sha256-pinned) — mixed depth vs skill guidance | Accept for now; candidate improvement: lockfile digest capture in pins row |
+| F21 | degraded-mode-design | Missing lease → boot proceeds, auth fails **late** at request time (explicit `OPENROUTER_API_KEY_FILE` fails fast, exit 78). Identical to upstream claude/codex behavior | Conformance wins over divergence; propose fail-fast option upstream at M4 |
+| F22 | sdlc change-control | CHANGELOG `[Unreleased]` entry was omitted by both commits | Fixed in same commit as this section |
+| F23 | forensics / custody | First failed pilot (`dsh-pilot` v1, Exec-format-error) was `rm`'d without formalized preservation; logs survived only as session-captured text | Going forward: `docker logs` copied to `docs/proposals/evidence/` before instance teardown |
+| F24 | forensics anomaly | Management log recorded **two** `container.created` events for one create call around the first failure — retry semantics undocumented | Inspect executor retry behavior during M3 |
+| F25 | forensics / continuity | Worker PTY transcripts are ephemeral (`/var/lib/dsh`) unless `session record` or tmux pipe-logging is used | Wire `sandboxctl session record` when sessions become forensically relevant |
+
+Custody snapshot (post-pass): `agentic/dsh:latest` = `sha256:023bc7364b9e627069d2919dc4de96e9f8e93a9385953bad29763d05a15de939` (arm64, BuildKit attestation exported at build). Regression sweep: no tests assert the `PLATFORMS` list or probe output shapes — change-set is non-breaking to CI surface found in-tree.
+
