@@ -1987,6 +1987,7 @@ test("QEMU cleanup confines XML disks and removes only the exact authorized stor
         await operation;
         const commands = readFileSync(logPath, "utf8");
         assert.match(commands, new RegExp(`undefine ${uuid}`));
+        assert.match(commands, new RegExp(`undefine ${uuid} --nvram`));
         assert.equal(existsSync(storagePath), false, "the exact authorized directory is removed after undefine");
         assert.equal(existsSync(storageRoot), true, "cleanup must not broaden beyond the exact provider directory");
       }

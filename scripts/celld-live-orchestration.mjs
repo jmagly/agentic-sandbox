@@ -2760,7 +2760,7 @@ export async function removeExactlyObservedProvider(runtime, resource, record, a
   if (!["shut off", "crashed"].includes(beforeUndefine.state)) {
     throw new OrchestrationCleanupResidueError("QEMU cleanup did not observe the exact domain stopped before undefine");
   }
-  run("virsh", ["-c", runtime.config.libvirt_uri, "undefine", beforeUndefine.provider_id], { timeout: 180_000 });
+  run("virsh", ["-c", runtime.config.libvirt_uri, "undefine", beforeUndefine.provider_id, "--nvram"], { timeout: 180_000 });
   removeQuarantinedQemuStorage(runtime, storage, record, qemuPlan, dependencies);
 }
 
