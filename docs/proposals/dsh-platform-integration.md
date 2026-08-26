@@ -126,3 +126,32 @@ Baseline triangulated across Dockerfile.{claude,codex,opencode}. The exemplars t
 
 Custody snapshot (post-pass): `agentic/dsh:latest` = `sha256:023bc7364b9e627069d2919dc4de96e9f8e93a9385953bad29763d05a15de939` (arm64, BuildKit attestation exported at build). Regression sweep: no tests assert the `PLATFORMS` list or probe output shapes — change-set is non-breaking to CI surface found in-tree.
 
+---
+
+## 13. Passes 5–6 (SDLC/Ops) + security-engineering end-to-end battery
+
+### Sync-driven findings (post-rebase onto v2026.8.5 tip)
+
+| ID | Lens | Finding | Disposition |
+|---|---|---|---|
+| F26 | sdlc traceability | Upstream raced +525 commits (v2026.6.28→8.5); branch rebased (`ae4daf5`), fork main synced. **M3 scope shifted**: `agent-rs/src/main.rs` grew ~2100 lines — re-spec required against current tree before Rust work | Open |
+| F27 | ops provisioning | New managed-container bootstrap requires an HTTPS enrollment origin. macOS blocker chain: dev.sh legacy default exports `http://…:8122` AND no TLS listener bound a container-reachable address (192.168.65.254 unbindable on host) | Resolved via `.run/dev.env`: `AGENTIC_CONTAINER_BOOTSTRAP_ENROLLMENT_URL=https://host.docker.internal:8124/api/v1/bootstrap-enrollment/consume` + `AGENTIC_BOOTSTRAP_TLS_LISTEN=0.0.0.0:8124` (listener reuses gRPC mTLS server creds; origin cert SANs match) |
+| F28 | ops local-config | Required writable roots on macOS now three-deep: `SECRETS_DIR`, `AGENTSHARE_ROOT`, bootstrap TLS key material — all via untracked `.run/dev.env`. PR must document these or upstream devs hit the same wall | Fold into getting-started diff at M4 |
+
+### End-to-end battery (all green)
+
+| # | Test | Result |
+|---|---|---|
+| 1 | TLS listener serves `/consume` (app-layer reach over mTLS-server-cert HTTPS) | 422 handler-parse ✅ |
+| 2 | Hardened client consumes enrollment via https origin | Container survives; posture **mtls/secure** ✅ |
+| 3 | Lease mounted ro → readiness flip | `present_unvalidated / none` ✅ |
+| 4 | Repo bind-mount visible in worker session (`~/zta:/workspace`) | proof listing ✅ |
+| 5 | Programmatic keystroke drive (`session input --file`) executes inside tmux pane | `proof.txt` written/read ✅ |
+| 6 | F19-compliant live model call (python reads lease internally — zero argv/host exposure) | `"zta worker linked"` · 95 tok · $0.00002 ✅ |
+
+**M2 status:** every infrastructure gate green including compliant live-model E2E. Remaining human step: operator types the prompt from a Cockpit pane (desktop/iPhone) for the full acceptance photo.
+
+### Operator WIP reconciliation record
+
+Six-file management WIP (stash-archived, `git stash@{0}`) audited hunk-by-hunk against the v2026.8.5 tree: **100% superseded upstream** (`LIBVIRT_URI` configurability ×5 sites; `AGENTIC_LIBVIRT_MONITOR` disable switch; dev.sh restructure). Resolution = theirs-everywhere, compile-gated clean (`agentic-mgmt` release build vs current tree). Fleet restarted onto fresh binary; surviving pilot re-authenticated mtls without recreation.
+
