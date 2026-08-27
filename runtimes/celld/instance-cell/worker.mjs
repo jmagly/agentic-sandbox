@@ -3,6 +3,7 @@ const OPERATION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const REQUEST_HASH = /^[a-f0-9]{64}$/;
 const ACTIONS = new Set(["provision", "start", "stop", "destroy", "observe", "repair"]);
 const TERMINAL_EFFECTS = new Set(["succeeded", "failed", "rejected"]);
+const CALLBACK_EFFECT_STATUSES = new Set([...TERMINAL_EFFECTS, "dispatched", "unknown"]);
 const MAX_EFFECTS = 1_000;
 const TOMBSTONE_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;
 
@@ -167,10 +168,8 @@ export class InstanceCell {
         headers: { "content-type": "application/json", "idempotency-key": pending.operation_id, ...signed },
         body,
       });
-      const result = reply?.ok ? await reply.json().catch(() => ({})) : {};
-      pending.status = ["succeeded", "failed", "rejected", "dispatched", "unknown"].includes(result.status)
-        ? result.status
-        : reply?.ok ? "succeeded" : "unknown";
+      const result = await managementCallbackOutcome(reply);
+      pending.status = result.status;
       pending.management_operation_id = typeof result.management_operation_id === "string" ? result.management_operation_id : pending.management_operation_id;
       pending.terminal_code = typeof result.terminal_code === "string" ? result.terminal_code : pending.terminal_code;
     } catch { pending.status = "unknown"; }
@@ -195,6 +194,24 @@ export class InstanceCell {
     await this.state.storage.put("cell", cell);
     if (pending.status === "unknown" || pending.status === "dispatched") await this.state.storage.setAlarm(Date.now() + Math.min(60_000, 1000 * 2 ** Math.min(pending.attempts, 6)));
   }
+}
+
+export async function managementCallbackOutcome(reply) {
+  if (!reply?.ok) return { status: "unknown", management_operation_id: null, terminal_code: null };
+  let result;
+  try {
+    result = await reply.json();
+  } catch {
+    return { status: "unknown", management_operation_id: null, terminal_code: null };
+  }
+  if (!result || typeof result !== "object" || Array.isArray(result)) {
+    return { status: "unknown", management_operation_id: null, terminal_code: null };
+  }
+  return {
+    status: CALLBACK_EFFECT_STATUSES.has(result.status) ? result.status : "unknown",
+    management_operation_id: typeof result.management_operation_id === "string" ? result.management_operation_id : null,
+    terminal_code: typeof result.terminal_code === "string" ? result.terminal_code : null,
+  };
 }
 
 export async function sendManagementCallback(env, path, init, outboundFetch = fetch) {

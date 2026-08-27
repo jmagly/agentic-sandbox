@@ -3,7 +3,7 @@ import {
   abortAllDurableObjects,
   runDurableObjectAlarm,
 } from "cloudflare:test";
-import { sendManagementCallback } from "../worker.mjs";
+import { managementCallbackOutcome, sendManagementCallback } from "../worker.mjs";
 import { describe, it } from "vitest";
 
 const KEY = "01234567890123456789012345678901";
@@ -47,6 +47,20 @@ describe("signed InstanceCell behavior", () => {
     ]) {
       await expect(sendManagementCallback({ MANAGEMENT_URL: "https://management.internal/" }, path, {}, async () => new Response())).rejects.toThrow("callback path is invalid");
     }
+  });
+
+  it("keeps a successful callback with an unreadable or invalid body outcome-unknown", async ({ expect }) => {
+    const unreadable = await managementCallbackOutcome({
+      ok: true,
+      json: async () => { throw new Error("response body lost"); },
+    });
+    expect(unreadable).toEqual({ status: "unknown", management_operation_id: null, terminal_code: null });
+    expect(await managementCallbackOutcome({ ok: true, json: async () => ({}) })).toEqual(unreadable);
+    expect(await managementCallbackOutcome({ ok: true, json: async () => ({ status: "succeeded", management_operation_id: "management-op", terminal_code: "provider.effect_succeeded" }) })).toEqual({
+      status: "succeeded",
+      management_operation_id: "management-op",
+      terminal_code: "provider.effect_succeeded",
+    });
   });
   it("preserves cell and replay state across a forced Durable Object restart", async ({ expect }) => {
     const instanceId = "instance-eviction";

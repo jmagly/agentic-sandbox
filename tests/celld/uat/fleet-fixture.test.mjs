@@ -350,7 +350,7 @@ test("fleet preparation fixes three exact addressed nodes and one reserve", () =
   assert.deepEqual(config.operator_commands, ["prepare", "deploy", "start", "start-relays", "diagnose", "probe-worker", "cleanup", "janitor-preview", "janitor-reap"]);
   assert.equal(config.pins.celld_channel, "approved");
   assert.equal(config.pins.celld.manifest_digest, "sha256:8634eac20f69ffe99103d403b985c0afd43fd970badadd01435f297ba0df797a");
-  assert.equal(config.pins.worker_digest, "sha256:ee79e3c52deaadd30fe9ab485d7e78d4a9f84447e483e9e4fa86efd2e357d000");
+  assert.equal(config.pins.worker_digest, "sha256:9057aa0debb402c9f8177d1df0c8c06de487c266029f0c5282a8e1cd1076322b");
   assert.equal(config.network.public_publish, "127.0.0.1::8080");
   assert.equal(config.worker_vars_file_ref, join(config.run_root, "fleet/worker-vars"));
   assert.equal(lstatSync(config.worker_vars_file_ref).mode & 0o077, 0);
