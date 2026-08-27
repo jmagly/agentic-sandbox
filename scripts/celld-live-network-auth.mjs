@@ -919,6 +919,23 @@ export function recoverNetworkAuthInventory(inventory, {
   };
 }
 
+export async function recoverNetworkAuthInventoryBounded(inventory, {
+  recover = recoverNetworkAuthInventory,
+  delay = sleep,
+} = {}) {
+  let residueError;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      return recover(inventory);
+    } catch (error) {
+      if (!(error instanceof AggregateError) || error.message !== "exact-run network partition cleanup left residue") throw error;
+      residueError = error;
+      if (attempt < 3) await delay(attempt * 250);
+    }
+  }
+  throw residueError;
+}
+
 export function networkAuthInventoryLocations(config) {
   const errors = validateOrchestrationConfig(config);
   if (errors.length) throw new Error(errors.join("; "));
@@ -1743,7 +1760,7 @@ export async function executeNetworkAuthDriver({ scenarioId, runId, liveProfileP
   } finally {
     try { cleanupProbeResources(runId); cleanupAssertions.push("exact network probe container and network removed"); } catch (error) { cleanupAssertions.push(`network probe cleanup digest ${sha256(error.message)}`); }
     try { await stopManagementAndWait(management, "SIGKILL"); cleanupAssertions.push("network/auth management process terminated"); } catch (error) { cleanupAssertions.push(`management cleanup digest ${sha256(error.message)}`); }
-    try { if (networkInventory) recoverNetworkAuthInventory(networkInventory); cleanupAssertions.push("exact network partitions and mTLS proxies removed"); } catch (error) { cleanupAssertions.push(`network mutation cleanup digest ${sha256(error.message)}`); }
+    try { if (networkInventory) await recoverNetworkAuthInventoryBounded(networkInventory); cleanupAssertions.push("exact network partitions and mTLS proxies removed"); } catch (error) { cleanupAssertions.push(`network mutation cleanup digest ${sha256(error.message)}`); }
     try { if (fleetPath && existsSync(fleetPath)) cleanupFleet(fleetPath); cleanupAssertions.push("exact network/auth fleet removed"); } catch (error) { cleanupAssertions.push(`fleet cleanup digest ${sha256(error.message)}`); }
     try { if (storage) cleanupFixture(storage); cleanupAssertions.push("exact network/auth storage fixture removed"); } catch (error) { cleanupAssertions.push(`storage cleanup digest ${sha256(error.message)}`); }
     cleanupStatus = cleanupAssertions.some((value) => value.includes("digest")) ? "failed" : "passed";

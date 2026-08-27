@@ -32,6 +32,7 @@ import {
   probeMtlsTransportNegatives,
   readManagementProviderCounter,
   recoverNetworkAuthInventory,
+  recoverNetworkAuthInventoryBounded,
   registerNetworkNamespace,
   removeListenerGuard,
   startMtlsProxy,
@@ -752,6 +753,47 @@ test("persisted recovery heals every exact table in reverse plan order", () => {
   assert.equal(persisted.at(-1), "clean");
   assert.equal(result.status, "PASS");
   assert.deepEqual(result.healed_fault_ids, ["e".repeat(32), "f".repeat(32)]);
+});
+
+test("bounded exact cleanup retries typed residue once and converges", async () => {
+  const residue = new AggregateError([new Error("transient exact cleanup failure")], "exact-run network partition cleanup left residue");
+  const inventory = { state: "cleanup_residue" };
+  const delays = [];
+  let attempts = 0;
+  const result = await recoverNetworkAuthInventoryBounded(inventory, {
+    recover: () => {
+      attempts += 1;
+      if (attempts === 1) throw residue;
+      inventory.state = "clean";
+      return { status: "PASS", inventory_state: "clean" };
+    },
+    delay: async (milliseconds) => { delays.push(milliseconds); },
+  });
+  assert.equal(attempts, 2);
+  assert.deepEqual(delays, [250]);
+  assert.deepEqual(result, { status: "PASS", inventory_state: "clean" });
+});
+
+test("bounded exact cleanup fails closed after three residue attempts", async () => {
+  const residue = new AggregateError([new Error("persistent exact cleanup failure")], "exact-run network partition cleanup left residue");
+  const delays = [];
+  let attempts = 0;
+  await assert.rejects(recoverNetworkAuthInventoryBounded({}, {
+    recover: () => { attempts += 1; throw residue; },
+    delay: async (milliseconds) => { delays.push(milliseconds); },
+  }), (error) => error === residue);
+  assert.equal(attempts, 3);
+  assert.deepEqual(delays, [250, 500]);
+});
+
+test("bounded exact cleanup does not retry validation or ownership failures", async () => {
+  const validationError = new Error("inventory run ownership mismatch");
+  let attempts = 0;
+  await assert.rejects(recoverNetworkAuthInventoryBounded({}, {
+    recover: () => { attempts += 1; throw validationError; },
+    delay: async () => { assert.fail("non-residue failures must not be delayed"); },
+  }), (error) => error === validationError);
+  assert.equal(attempts, 1);
 });
 
 test("persisted recovery reports residue without touching an unowned nftables table", () => {
