@@ -162,6 +162,18 @@ Custody snapshot (post-pass): `agentic/dsh:latest` = `sha256:023bc7364b9e627069d
 
 Six-file management WIP (stash-archived, `git stash@{0}`) audited hunk-by-hunk against the v2026.8.5 tree: **100% superseded upstream** (`LIBVIRT_URI` configurability ×5 sites; `AGENTIC_LIBVIRT_MONITOR` disable switch; dev.sh restructure). Resolution = theirs-everywhere, compile-gated clean (`agentic-mgmt` release build vs current tree). Fleet restarted onto fresh binary; surviving pilot re-authenticated mtls without recreation.
 
+### Mission-plane findings (first live MC cycle, 2026-08-27)
+
+| ID | Finding | Disposition |
+|---|---|---|
+| F30a | `aiwg mc start` printed session ids but persisted **no durable state** when run from project roots (dev-channel install); durable store is HOME-anchored `~/.aiwg/ralph-external/` — run MC commands from `$HOME` | Workaround verified: durable session created from HOME |
+| F30b | Bridge Missions projection reads `cwd/.aiwg/ralph-external` (bridge cwd = AIWG dev root) → HOME store invisible | Fixed operator-side: symlink `<aiwg-root>/.aiwg/ralph-external → ~/.aiwg/ralph-external` |
+| F30c | `mc status` shows RUNNING after the loop has archived; truth lives in `archive/<loop>/completion-report.md` | Status-sync gap; check archive as source of truth |
+| F30d | Provider crash surfaced correctly: `failureClass: "crash"`, iteration report, best-output selected, full archive — forensics worked as designed | ✅ |
+| F31 | **Claude provider OAuth expired** on operator Mac → every host-lane mission crashes at spawn (`Session exited with code 1`) until `claude` re-login | Two unblocks: (a) `claude` re-auth; (b) **the G2 generalization (#5/#6) routes missions `provider: dsh` (OpenRouter/GLM) — this crash is the concrete motivation for that refactor** |
+
+First live cycle result: dispatch → budget caps → ralph loop → 2 iterations → best-output → archive → completion report **all functioned**; only the provider credential failed. + agentmemory SessionEnd hook crash noted (separate cosmetic issue in operator releases).
+
 ### Invariants (I-series, governing the five-project rollout)
 
 - **I1 — Git is the sole lane bridge.** Workers deliver via commits/feature-branches; sessions, transcripts, and container fs are disposable (F16/T3).
