@@ -15,7 +15,7 @@ use std::{
     },
 };
 use tokio::{
-    io::{copy, AsyncReadExt, AsyncWriteExt},
+    io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
 };
 use tokio_rustls::{
@@ -186,10 +186,24 @@ async fn relay_connection(
         .context("authenticating management mTLS")?;
     let (mut inbound_read, mut inbound_write) = inbound.into_split();
     let (mut outbound_read, mut outbound_write) = tokio::io::split(outbound);
+    let drop_connection_response = Arc::new(AtomicBool::new(false));
+    let request_response_fault = Arc::clone(&drop_connection_response);
     let request_task = tokio::spawn(async move {
-        let result = copy(&mut inbound_read, &mut outbound_write).await;
-        let _ = outbound_write.shutdown().await;
-        result
+        let mut request_buffer = [0_u8; 16 * 1024];
+        loop {
+            let request = inbound_read.read(&mut request_buffer).await?;
+            if request == 0 {
+                outbound_write.shutdown().await?;
+                return Ok::<(), std::io::Error>(());
+            }
+            // Bind the process-wide one-shot arm to the next request bytes.
+            // Worker fetch pools callback connections, and response bytes from
+            // the previous request can still arrive after the signal.
+            if drop_next_response.swap(false, Ordering::SeqCst) {
+                request_response_fault.store(true, Ordering::SeqCst);
+            }
+            outbound_write.write_all(&request_buffer[..request]).await?;
+        }
     });
     let mut response_buffer = [0_u8; 16 * 1024];
     loop {
@@ -202,10 +216,9 @@ async fn relay_connection(
             request_task.abort();
             return Ok(());
         }
-        // Select the response at its first observable byte, not when the TCP
-        // connection is accepted. Worker fetch keeps callback connections
-        // alive, so an accept-time flag can miss the operation armed by UAT.
-        if drop_next_response.swap(false, Ordering::SeqCst) {
+        // Drop only the response paired with request bytes that consumed the
+        // one-shot arm. Trailing bytes from an earlier pooled response pass.
+        if drop_connection_response.swap(false, Ordering::SeqCst) {
             request_task.abort();
             let _ = inbound_write.shutdown().await;
             eprintln!("Celld callback relay injected one response loss");
@@ -403,6 +416,8 @@ mod tests {
         let loss_target = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let loss_target_addr = loss_target.local_addr().unwrap();
         let loss_acceptor = acceptor.clone();
+        let tail_release = Arc::new(AtomicBool::new(false));
+        let target_tail_release = Arc::clone(&tail_release);
         let loss_target_task = tokio::spawn(async move {
             let (stream, _) = loss_target.accept().await.unwrap();
             let mut stream = loss_acceptor.accept(stream).await.unwrap();
@@ -410,6 +425,10 @@ mod tests {
             stream.read_exact(&mut request).await.unwrap();
             assert_eq!(&request, b"ping");
             stream.write_all(b"pong").await.unwrap();
+            while !target_tail_release.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+            stream.write_all(b"tail").await.unwrap();
             stream.read_exact(&mut request).await.unwrap();
             assert_eq!(&request, b"drop");
             stream.write_all(b"lost").await.unwrap();
@@ -438,6 +457,9 @@ mod tests {
         loss_client.read_exact(&mut returned).await.unwrap();
         assert_eq!(&returned, b"pong");
         response_loss.store(true, Ordering::SeqCst);
+        tail_release.store(true, Ordering::SeqCst);
+        loss_client.read_exact(&mut returned).await.unwrap();
+        assert_eq!(&returned, b"tail");
         loss_client.write_all(b"drop").await.unwrap();
         let read = loss_client.read(&mut returned).await;
         assert!(!matches!(read, Ok(count) if count > 0));

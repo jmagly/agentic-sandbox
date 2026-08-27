@@ -375,6 +375,47 @@ test("owner recovery replaces and closes exact fixture-managed Worker access", a
   assert.deepEqual([...runtime.workerAccesses], [replacement]);
 });
 
+test("owner recovery probes the selected survivor before requiring an advanced owner epoch", async () => {
+  const calls = [];
+  const previousOwner = { owner_target: "node-1", owner_epoch: 7 };
+  const advanced = { owner_target: "node-2", owner_epoch: 8 };
+  const runtime = {
+    workerEndpoint: "http://127.0.0.1:28080",
+    fleet: { worker_vars_file_ref: "/run/celld/worker-vars" },
+    getWorkerOperation: async (request) => {
+      calls.push(["lookup", request]);
+      return { status: 404, body: { error: { code: "operation.missing" } } };
+    },
+    observeCelldOwnership: async (_runtime, request) => {
+      calls.push(["observe", request]);
+      return advanced;
+    },
+  };
+  const result = await liveOrchestration.probeCelldOwnerTakeover(runtime, {
+    instanceId: "123e4567-e89b-42d3-a456-426614174000",
+    operationId: "uat004-qemu-1-before_dispatch-0",
+    generation: 1,
+    previousOwner,
+  });
+  assert.equal(result, advanced);
+  assert.deepEqual(calls.map(([kind]) => kind), ["lookup", "observe"]);
+  assert.deepEqual(calls[0][1], {
+    endpoint: runtime.workerEndpoint,
+    varsFile: runtime.fleet.worker_vars_file_ref,
+    instanceId: "123e4567-e89b-42d3-a456-426614174000",
+    operationId: "uat004-qemu-1-before_dispatch-0",
+    generation: 1,
+  });
+
+  runtime.observeCelldOwnership = async () => ({ owner_target: "node-1", owner_epoch: 8 });
+  assert.equal(await liveOrchestration.probeCelldOwnerTakeover(runtime, {
+    instanceId: "123e4567-e89b-42d3-a456-426614174000",
+    operationId: "uat004-qemu-1-before_dispatch-1",
+    generation: 1,
+    previousOwner,
+  }), false);
+});
+
 test("owner recovery rejects non-loopback replacement access and closes it", async () => {
   let closed = 0;
   const initial = { endpoint: "http://127.0.0.1:18080", close: async () => {} };

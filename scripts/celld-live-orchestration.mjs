@@ -567,6 +567,28 @@ export async function observeCelldOwnership(runtime, { instanceId }, now = new D
   };
 }
 
+export async function probeCelldOwnerTakeover(runtime, {
+  instanceId,
+  operationId: operationIdValue,
+  generation,
+  previousOwner,
+}) {
+  const lookup = runtime.getWorkerOperation ?? getWorkerOperation;
+  await lookup({
+    endpoint: runtime.workerEndpoint,
+    varsFile: runtime.fleet.worker_vars_file_ref,
+    instanceId,
+    operationId: operationIdValue,
+    generation,
+  });
+  const observe = runtime.observeCelldOwnership ?? observeCelldOwnership;
+  const observation = await observe(runtime, { instanceId });
+  return observation.owner_target !== previousOwner.owner_target
+      && observation.owner_epoch > previousOwner.owner_epoch
+    ? observation
+    : false;
+}
+
 function celldOwnershipEvidence(observation) {
   return {
     observed_at: observation.observed_at,
@@ -2142,12 +2164,15 @@ async function runUat004(runtime, timeline) {
           if (fallbackIndex < 0) throw new Error("owner-loss campaign has no surviving Worker endpoint");
           await replaceFleetWorkerAccess(runtime, fallbackIndex);
           recoveryPhase = `${substrate}-${crashPoint}-owner-takeover`;
-          ownershipAfterLoss = await waitFor(async () => {
-            const observation = await observeCelldOwnership(runtime, { instanceId });
-            return observation.owner_target !== ownershipBefore.owner_target && observation.owner_epoch > ownershipBefore.owner_epoch
-              ? observation
-              : false;
-          }, { timeoutMs: 30_000, intervalMs: 250, description: "Celld owner takeover and epoch advance" });
+          ownershipAfterLoss = await waitFor(
+            () => probeCelldOwnerTakeover(runtime, {
+              instanceId,
+              operationId: id,
+              generation: 1,
+              previousOwner: ownershipBefore,
+            }),
+            { timeoutMs: 30_000, intervalMs: 250, description: "Celld owner takeover and epoch advance" },
+          );
 
           recoveryPhase = `${substrate}-${crashPoint}-management-restart`;
           runtime.management = await restartManagement(runtime.management, runtime.config, runtime.fleet, runtime.managementHost, runtime.workerEndpoint);
@@ -3361,6 +3386,8 @@ export async function executeOrchestrationDriver({ scenarioId, runId, liveProfil
       persistedJournalHeadSha256: orchestrationInventory.journal_head_sha256,
       persistInventory: dependencies.persistInventory,
       sendWorkerCommand: dependencies.sendWorkerCommand,
+      getWorkerOperation: dependencies.getWorkerOperation,
+      observeCelldOwnership: dependencies.observeCelldOwnership,
       observeFaultTarget: dependencies.observeFaultTarget ?? observeOrchestrationFaultTarget,
       resolveFaultTarget: dependencies.resolveFaultTarget ?? resolveOrchestrationFaultTarget,
       revalidateFaultTarget: dependencies.revalidateFaultTarget ?? resolveOrchestrationFaultTarget,
