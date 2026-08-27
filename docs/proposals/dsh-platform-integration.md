@@ -165,6 +165,8 @@ Six-file management WIP (stash-archived, `git stash@{0}`) audited hunk-by-hunk a
 ### Mission-plane findings (first live MC cycle, 2026-08-27)
 
 | F32 | ops / silent-failure | **Wall-clock cap not enforced mid-iteration**: a `--max-wall-clock-minutes 6` mission ran 20+ min because the loop timer only fires at iteration boundaries; a single long iteration (GLM-5.3 full-reasoning, 18+ agent steps on a 66-file task) exceeds the cap unchecked. Evidence: live session events `step/start seq≈3409` at elapsed 20:19. | Pair wall-clock with `--max-iterations 1..2` for latency-sensitive work; upstream fix = iteration-level timer |
+| F33 | deepseek-harness bug | **Headless disposal hang**: `dsh --profile headless` finishes generation (session events complete, final text produced) but the CLI process never exits — profile-boot disposal/shutdown hangs post-completion. Ralph loops then wait indefinitely on a done session (compounds F32). Evidence: PID 99687 alive 45+ min after its session stream's final event; session `0060e06b` events end while process persists. | Triage: upstream deepseek-harness issue (profile-boot disposal); operator workaround: iteration/wall-clock kill + accept archived best-output; the loop harness's archive path already captures the completed work |
+
 
 Round-1 execution record: bugs A (dsh adapter over-passed --resume/--model), B (analyzer label/flag mismatch), C (orchestrator `computePIDMetrics`→`collect`) fixed and deployed; `mc-sweep` triage tool shipped (~bin); 4 zombie missions reconciled with evidence-linked reasons; fixed-pipeline mission live-verified mid-execution (step 18, zero stderr).
 
