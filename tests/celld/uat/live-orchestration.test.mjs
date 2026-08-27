@@ -51,8 +51,14 @@ test("response-loss evidence comes from the exact durable unknown event", () => 
     operation_id: operationId, kind: "effect_unknown", sequence: 3, count: 1, sha256: undefined,
   });
   assert.match(observation.sha256, /^[0-9a-f]{64}$/);
-  assert.throws(() => durableEffectHistoryObservation({ history: [] }, operationId, "effect_unknown"), /exactly one durable/);
-  assert.throws(() => durableEffectHistoryObservation({ history: [event, { ...event, sequence: 4 }] }, operationId, "effect_unknown"), /exactly one durable/);
+  assert.throws(
+    () => durableEffectHistoryObservation({ history: [] }, operationId, "effect_unknown"),
+    (error) => error.errorCode === "CELLD_DURABLE_EFFECT_EVENT_MISSING" && /^[0-9a-f]{64}$/.test(error.evidenceSha256),
+  );
+  assert.throws(
+    () => durableEffectHistoryObservation({ history: [event, { ...event, sequence: 4 }] }, operationId, "effect_unknown"),
+    (error) => error.errorCode === "CELLD_DURABLE_EFFECT_EVENT_DUPLICATE" && /^[0-9a-f]{64}$/.test(error.evidenceSha256),
+  );
   assert.doesNotMatch(orchestrationSource, /waitCellEffect\([^\n]+\["unknown"\]\)/);
   assert.match(orchestrationSource, /getWorkerOperation\(/);
 });
@@ -61,6 +67,9 @@ test("recovery and response-loss campaigns expose their exact bounded failure ph
   assert.match(orchestrationSource, /orchestration\.uat004\.\$\{recoveryPhase\}/);
   assert.match(orchestrationSource, /latestDiagnosis\?\.failure\?\.reason_code/);
   assert.match(orchestrationSource, /latestDiagnosis\?\.failure\?\.evidence_sha256/);
+  assert.match(orchestrationSource, /campaignError = annotateDriverError\(error/);
+  assert.match(orchestrationSource, /CELLD_RECOVERY_CLEANUP_/);
+  assert.match(orchestrationSource, /campaignError,/);
   assert.match(orchestrationSource, /orchestration\.uat005\.\$\{substrate\}-\$\{action\}-\$\{responseLossPhase\}/);
   for (const phase of ["response-loss-arm", "issue-command", "worker-terminal", "durable-unknown-observation", "management-replay", "provider-after", "fault-heal"]) {
     assert.match(orchestrationSource, new RegExp(`responseLossPhase = "${phase}"`));

@@ -120,7 +120,12 @@ function canonicalJson(value) {
 export function durableEffectHistoryObservation(cell, operationIdValue, kind) {
   if (!cell || !Array.isArray(cell.history)) throw new Error("Worker cell is missing durable effect history");
   const events = cell.history.filter((event) => event?.operation_id === operationIdValue && event?.kind === kind);
-  if (events.length !== 1) throw new Error(`Worker cell requires exactly one durable ${kind} event for ${operationIdValue}`);
+  if (events.length !== 1) {
+    throw annotateDriverError(new Error(`Worker cell requires exactly one durable ${kind} event for ${operationIdValue}`), {
+      errorCode: events.length === 0 ? "CELLD_DURABLE_EFFECT_EVENT_MISSING" : "CELLD_DURABLE_EFFECT_EVENT_DUPLICATE",
+      evidenceSha256: sha256(canonicalJson({ event_count: events.length, kind })),
+    });
+  }
   const event = events[0];
   if (event.document_type !== "instance-cell-event" || event.schema_version !== "1"
     || !Number.isInteger(event.sequence) || event.sequence < 1 || Number.isNaN(Date.parse(event.recorded_at ?? ""))) {
@@ -2048,6 +2053,7 @@ async function runUat004(runtime, timeline) {
         let nodeFault = null;
         let ownershipAfterLoss = null;
         let recoveryMs = null;
+        let campaignError = null;
         try {
           recoveryPhase = `${substrate}-${crashPoint}-management-fault`;
           if (crashPoint === "before_dispatch") {
@@ -2114,37 +2120,51 @@ async function runUat004(runtime, timeline) {
           recoveryMs = Date.now() - faultStarted;
           if (terminal.body.status !== "succeeded") throw new Error("restart trial did not converge to success");
           effect = { ...effect, terminal, cell };
+        } catch (error) {
+          campaignError = annotateDriverError(error, {
+            operation: `orchestration.uat004.${recoveryPhase}`,
+            errorCode: `CELLD_RECOVERY_CAMPAIGN_${recoveryPhase.toUpperCase().replace(/[^A-Z0-9]+/g, "_").slice(0, 96)}`,
+          });
+          throw campaignError;
         } finally {
-          clearDispatchGate(runtime, id);
-          if (runtime.management.processHandle.exitCode !== null || runtime.management.processHandle.signalCode !== null || runtime.management.processHandle.killed) {
-            recoveryPhase = `${substrate}-${crashPoint}-finally-management-restart`;
-            runtime.management = await restartManagement(runtime.management, runtime.config, runtime.fleet, runtime.managementHost, runtime.workerEndpoint);
-          }
-          recoveryPhase = `${substrate}-${crashPoint}-finally-management-heal`;
-          if (managementFault?.status === "applied") await healPlannedOrchestrationFault(runtime, managementFault, async () => {});
-          if (nodeFault?.status === "applied") {
-            recoveryPhase = `${substrate}-${crashPoint}-finally-owner-heal-authorize`;
-            await healPlannedOrchestrationFault(runtime, nodeFault, async (target) => {
-              recoveryPhase = `${substrate}-${crashPoint}-finally-owner-heal-provider-start`;
-              run("docker", ["start", target.provider_id], { timeout: 30_000 });
-              recoveryPhase = `${substrate}-${crashPoint}-finally-owner-heal-diagnosis`;
-              let latestDiagnosis = null;
-              try {
-                await waitFor(() => {
-                  latestDiagnosis = diagnoseFleet(runtime.fleetPath);
-                  return latestDiagnosis.status === "READY";
-                }, { timeoutMs: 30_000, intervalMs: 250, description: "three-node fleet heal" });
-              } catch (error) {
-                throw annotateDriverError(error, {
-                  operation: `orchestration.uat004.${recoveryPhase}`,
-                  errorCode: latestDiagnosis?.failure?.reason_code ?? "CELLD_DIAGNOSIS_OWNER_HEAL_NOT_READY",
-                  evidenceSha256: latestDiagnosis?.failure?.evidence_sha256,
-                });
-              }
-              recoveryPhase = `${substrate}-${crashPoint}-finally-owner-heal-terminal-observation`;
+          try {
+            clearDispatchGate(runtime, id);
+            if (runtime.management.processHandle.exitCode !== null || runtime.management.processHandle.signalCode !== null || runtime.management.processHandle.killed) {
+              recoveryPhase = `${substrate}-${crashPoint}-finally-management-restart`;
+              runtime.management = await restartManagement(runtime.management, runtime.config, runtime.fleet, runtime.managementHost, runtime.workerEndpoint);
+            }
+            recoveryPhase = `${substrate}-${crashPoint}-finally-management-heal`;
+            if (managementFault?.status === "applied") await healPlannedOrchestrationFault(runtime, managementFault, async () => {});
+            if (nodeFault?.status === "applied") {
+              recoveryPhase = `${substrate}-${crashPoint}-finally-owner-heal-authorize`;
+              await healPlannedOrchestrationFault(runtime, nodeFault, async (target) => {
+                recoveryPhase = `${substrate}-${crashPoint}-finally-owner-heal-provider-start`;
+                run("docker", ["start", target.provider_id], { timeout: 30_000 });
+                recoveryPhase = `${substrate}-${crashPoint}-finally-owner-heal-diagnosis`;
+                let latestDiagnosis = null;
+                try {
+                  await waitFor(() => {
+                    latestDiagnosis = diagnoseFleet(runtime.fleetPath);
+                    return latestDiagnosis.status === "READY";
+                  }, { timeoutMs: 30_000, intervalMs: 250, description: "three-node fleet heal" });
+                } catch (error) {
+                  throw annotateDriverError(error, {
+                    operation: `orchestration.uat004.${recoveryPhase}`,
+                    errorCode: latestDiagnosis?.failure?.reason_code ?? "CELLD_DIAGNOSIS_OWNER_HEAL_NOT_READY",
+                    evidenceSha256: latestDiagnosis?.failure?.evidence_sha256,
+                  });
+                }
+                recoveryPhase = `${substrate}-${crashPoint}-finally-owner-heal-terminal-observation`;
+              });
+            }
+            runtime.workerEndpoint = workerEndpoint(runtime.fleet, 0);
+          } catch (error) {
+            throw annotateDriverError(error, {
+              operation: `orchestration.uat004.${recoveryPhase}`,
+              errorCode: `CELLD_RECOVERY_CLEANUP_${recoveryPhase.toUpperCase().replace(/[^A-Z0-9]+/g, "_").slice(0, 96)}`,
+              campaignError,
             });
           }
-          runtime.workerEndpoint = workerEndpoint(runtime.fleet, 0);
         }
 
         recoveryPhase = `${substrate}-${crashPoint}-healed-ownership`;
