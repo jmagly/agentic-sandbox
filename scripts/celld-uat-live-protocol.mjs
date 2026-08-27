@@ -7,7 +7,11 @@ export const LIVE_PROFILE_SCHEMA = "agentic-sandbox.celld-live-profile/v1";
 export const LIVE_OBSERVATION_SCHEMA = "agentic-sandbox.celld-live-observation/v1";
 
 export const LIVE_DRIVERS = Object.freeze({
-  "celld-live-orchestration": Object.freeze({ program: process.execPath, args: ["scripts/celld-live-orchestration.mjs"], timeout_ms: 120 * 60 * 1000 }),
+  // UAT-005 alone performs 100 response-loss trials for every lifecycle
+  // action on both real substrates (800 provider mutations). Titan needs more
+  // than two hours for that fixed acceptance envelope, so keep this driver
+  // below the workflow shell ceiling without truncating the required trials.
+  "celld-live-orchestration": Object.freeze({ program: process.execPath, args: ["scripts/celld-live-orchestration.mjs"], timeout_ms: 180 * 60 * 1000 }),
   "celld-live-worker": Object.freeze({ program: process.execPath, args: ["scripts/celld-live-worker.mjs"], timeout_ms: 45 * 60 * 1000 }),
   "celld-live-storage-topology": Object.freeze({ program: process.execPath, args: ["scripts/celld-live-storage-topology.mjs"], timeout_ms: 45 * 60 * 1000 }),
   "celld-live-network-auth": Object.freeze({ program: process.execPath, args: ["scripts/celld-live-network-auth.mjs"], timeout_ms: 75 * 60 * 1000 }),

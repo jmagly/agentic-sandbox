@@ -141,8 +141,16 @@ the shared `agentic-sandbox-celld-qualification-titan` concurrency group, so
 none of those CPU- or Docker-heavy Celld campaigns overlap. Each manual
 campaign also reserves the existing VM E2E group. In-flight work is never
 cancelled because cancellation can bypass cleanup. The workflow verifies the
-exact commit and Titan host contract, and
-requires at least 400 GiB free on `/build`, 100 GiB free on `/`, 32 GiB of
+exact commit and Titan host contract.
+
+UAT-005 deliberately executes 800 live response-loss lifecycle mutations (100
+trials for four actions on both QEMU and Docker). Its orchestration driver has
+a 180-minute ceiling; the complete catalog retains the separate 420-minute
+shell ceiling. A two-hour UAT-005 run is therefore expected qualification work,
+not a queue wait, while exceeding three hours is a bounded failure.
+
+The workflow requires at least 400 GiB free on `/build`, 100 GiB free on `/`,
+32 GiB of
 available memory, KVM/libvirt, Docker, a clean checkout, and a manifest-matched
 base image before creating disposable resources. The workflow caps Cargo at
 eight jobs with debug symbols and incrementality disabled, uses a job-scoped

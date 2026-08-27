@@ -19,6 +19,7 @@ import {
 } from "../../../scripts/run-celld-uat.mjs";
 import { REQUIRED_AUTHORITY, validateAuthorityMatrix } from "../../../scripts/celld-uat-contract-check.mjs";
 import {
+  LIVE_DRIVERS,
   LIVE_OBSERVATION_SCHEMA,
   LIVE_PROFILE_SCHEMA,
   evaluateLiveObservation,
@@ -28,6 +29,12 @@ import {
 } from "../../../scripts/celld-uat-live-protocol.mjs";
 
 const catalog = JSON.parse(readFileSync(DEFAULT_CATALOG, "utf8"));
+
+test("live orchestration budget admits the fixed 800-trial response-loss envelope", () => {
+  const responseLoss = catalog.scenarios.find((scenario) => scenario.id === "UAT-CELLD-005");
+  assert.match(responseLoss.when.join(" "), /100 trials per action and substrate/);
+  assert.equal(LIVE_DRIVERS["celld-live-orchestration"].timeout_ms, 180 * 60 * 1000);
+});
 
 test("catalog contains 17 valid scenarios with stable issue coverage", () => {
   assert.deepEqual(validateCatalog(catalog), []);
