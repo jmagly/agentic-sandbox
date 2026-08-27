@@ -152,6 +152,9 @@ Custody snapshot (post-pass): `agentic/dsh:latest` = `sha256:023bc7364b9e627069d
 | 5 | Programmatic keystroke drive (`session input --file`) executes inside tmux pane | `proof.txt` written/read ✅ |
 | 6 | F19-compliant live model call (python reads lease internally — zero argv/host exposure) | `"zta worker linked"` · 95 tok · $0.00002 ✅ |
 | 7 | **Cockpit-pane model round-trip driven from Aside UI** (crypto-edge-worker: Drive grant → typed prompt reading lease in-container → GLM-5.3-Flash reply streamed to pane; screenshot retained in session evidence) | `MODEL: z-ai/glm-5.3-flash` · `REPLY: cockpit e2e linked` ✅ |
+| F29 | ops / trust-posture | "Recreate required" (managed-UDS split-identity badge) persists on freshly recreated containers under Docker Desktop — the UDS control bridge "does not preserve container peer UIDs" (docker_runtime.rs fallback), making the secure-default identity contract structurally unreachable on macOS. Recreate window executed anyway: fresh CA-staged provisioning, mtls/secure held, zero data loss. | Accept mtls/secure as macOS fleet posture; raise platform-limitation question upstream (#5 thread); full badge requires Linux executor host |
+| 7b | forensics | Zombie session records survive container destruction and the session-kill route 404s on them (records, not live sessions) — list shows stale rows alongside live ones | F24 follow-up; cosmetic, noted for executor fix |
+
 
 **M2 status:** every infrastructure gate green including compliant live-model E2E. Remaining human step: operator types the prompt from a Cockpit pane (desktop/iPhone) for the full acceptance photo.
 
