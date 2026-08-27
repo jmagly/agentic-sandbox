@@ -593,6 +593,18 @@ export function managementEnvironment(config, fleet, managementHost, { celldEndp
       errorCode: "CELLD_MANAGEMENT_WORKER_KEY_INVALID",
     });
   }
+  // AF_UNIX socket paths are capped by sockaddr_un.sun_path (108 bytes on
+  // Linux, including the terminator). The Actions checkout plus the
+  // scenario/fleet state root is longer than that, so keep the managed gRPC
+  // socket in the already protected, exact-run orchestration root. Hashing the
+  // fleet root keeps simultaneous scenario fixtures distinct while preserving
+  // the same endpoint across management restarts.
+  const grpcUdsPath = join(config.working_root, `grpc-${sha256(fleet.run_root).slice(0, 32)}.sock`);
+  if (Buffer.byteLength(grpcUdsPath) >= 108) {
+    throw driverOperationError("orchestration.launch-management.environment.grpc-uds", {
+      errorCode: "CELLD_MANAGEMENT_GRPC_UDS_PATH_TOO_LONG",
+    }, "qualification managed gRPC UDS path exceeds the platform boundary");
+  }
   return {
     ...process.env,
     LISTEN_ADDR: `127.0.0.1:${config.management_grpc_port}`,
@@ -612,7 +624,7 @@ export function managementEnvironment(config, fleet, managementHost, { celldEndp
     AGENTIC_CELLD_CALLBACK_MTLS_CN: fleet.callback.client_cn,
     AGENTIC_CELLD_VERSION: managementCelldVersion(fleet.pins.celld.version),
     AGENTIC_CELLD_COMMIT: fleet.pins.celld.commit,
-    AGENTIC_GRPC_UDS: join(secrets, "agent-grpc.sock"),
+    AGENTIC_GRPC_UDS: grpcUdsPath,
     AGENTIC_GRPC_VSOCK_PORT: "0",
     BASE_IMAGES_DIR: config.base_images_dir,
     VM_STORAGE_DIR: config.vm_storage_dir,

@@ -228,6 +228,16 @@ test("management transport can be pinned to the private Celld mTLS proxy", () =>
     assert.equal(environment.AGENTIC_CELLD_TLS_CA_FILE, tlsCa);
     assert.equal(environment.AGENTIC_CELLD_TLS_CLIENT_IDENTITY_FILE, tlsIdentity);
     assert.equal(environment.AIWG_MTLS_ADMIN_ALLOWLIST, "agentic-celld-management");
+    assert.equal(environment.AGENTIC_GRPC_UDS.startsWith(`${liveConfig.working_root}/grpc-`), true);
+    assert.equal(Buffer.byteLength(environment.AGENTIC_GRPC_UDS) < 108, true);
+    assert.equal(environment.AGENTIC_GRPC_UDS.includes(directory), false);
+    assert.equal(
+      managementEnvironment(liveConfig, fleet, "172.30.0.1", {
+        celldEndpoint: "https://172.30.0.20:8443", tlsCaFile: tlsCa, tlsIdentityFile: tlsIdentity,
+        operatorMtlsCn: "agentic-celld-management",
+      }).AGENTIC_GRPC_UDS,
+      environment.AGENTIC_GRPC_UDS,
+    );
     const qualificationKeyRoot = join(directory, "management-state", "secrets", "ssh-keys");
     const keyRootMetadata = lstatSync(qualificationKeyRoot);
     assert.equal(keyRootMetadata.isDirectory(), true);
