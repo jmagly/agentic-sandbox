@@ -334,7 +334,7 @@ pub async fn remove_container(container_id: &str) -> Result<(), String> {
 /// Spawn options for `spawn_container`. Mirrors the smallest useful
 /// subset of `docker run` flags. Future: resource limits (`--memory`,
 /// `--cpus`), security opts, capability drops — track as Section F gaps.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct SpawnOpts {
     pub env: Vec<(String, String)>,
     /// Extra Docker labels as `(key, value)`. The managed
@@ -346,11 +346,28 @@ pub struct SpawnOpts {
     pub network: Option<String>,
     /// Optional command + args overriding the image's default.
     pub cmd: Vec<String>,
+    /// Start the container immediately. Provisioning callers set this false
+    /// when they need the distinct create -> start lifecycle boundary.
+    pub start: bool,
     /// Unique host-visible uid used by the long-lived transport/control
     /// process. When set, the entrypoint starts as root with only SETUID and
     /// SETGID, then re-execs the agent under this uid. Workload children run
     /// under the fixed image uid and clear all capabilities before exec.
     pub control_uid: Option<u32>,
+}
+
+impl Default for SpawnOpts {
+    fn default() -> Self {
+        Self {
+            env: Vec::new(),
+            labels: Vec::new(),
+            mounts: Vec::new(),
+            network: None,
+            cmd: Vec::new(),
+            start: true,
+            control_uid: None,
+        }
+    }
 }
 
 const CONTAINER_RUNTIME_USER: &str = "10001:10001";
@@ -471,14 +488,17 @@ fn build_run_args(
         }
     }
 
-    let mut args: Vec<String> = vec![
-        "run".into(),
-        "-d".into(),
+    let mut args: Vec<String> = if opts.start {
+        vec!["run".into(), "-d".into()]
+    } else {
+        vec!["create".into()]
+    };
+    args.extend([
         "--label".into(),
         "agentic-sandbox=true".into(),
         "--name".into(),
         name.into(),
-    ];
+    ]);
     args.extend([
         "--user".into(),
         if opts.control_uid.is_some() {
@@ -575,9 +595,10 @@ fn build_run_args(
     Ok(args)
 }
 
-/// Spawn a container in detached mode tagged with our `agentic-sandbox=true`
-/// label so the existing monitor + cleanup loop find it. Returns the
-/// container ID. The caller is responsible for emitting the
+/// Create a container tagged with our `agentic-sandbox=true` label and start
+/// it only when requested so the existing monitor + cleanup loop finds both
+/// stopped and running managed instances. Returns the container ID. The caller
+/// is responsible for emitting the
 /// `container.created` event on success — the monitor will pick it up
 /// on its next tick anyway, but emitting from the spawn site closes the
 /// observability gap noted in #173 Section F.
@@ -649,7 +670,7 @@ pub async fn spawn_container(name: &str, image: &str, opts: &SpawnOpts) -> Resul
         .args(&args)
         .output()
         .await
-        .map_err(|e| format!("failed to run docker run: {e}"))?;
+        .map_err(|e| format!("failed to create Docker container: {e}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -670,6 +691,16 @@ pub async fn spawn_container(name: &str, image: &str, opts: &SpawnOpts) -> Resul
         return Err(stderr);
     }
     let id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let bootstrap_requires_temporary_start =
+        !opts.start && opts.env.iter().any(|(key, _)| key == BOOTSTRAP_TOKEN_ENV);
+    if bootstrap_requires_temporary_start {
+        if let Err(error) = start_container(&id).await {
+            let _ = remove_container(&id).await;
+            return Err(format!(
+                "failed to start Docker container for protected bootstrap provisioning: {error}"
+            ));
+        }
+    }
     if let Some((_, token)) = opts.env.iter().find(|(key, _)| key == BOOTSTRAP_TOKEN_ENV) {
         let exec_user = opts
             .control_uid
@@ -720,6 +751,14 @@ pub async fn spawn_container(name: &str, image: &str, opts: &SpawnOpts) -> Resul
             ));
         }
     }
+    if bootstrap_requires_temporary_start {
+        if let Err(error) = stop_container(&id, 10).await {
+            let _ = remove_container(&id).await;
+            return Err(format!(
+                "failed to stop Docker container after protected bootstrap provisioning: {error}"
+            ));
+        }
+    }
     Ok(id)
 }
 
@@ -758,6 +797,18 @@ mod platform_tests {
         assert!(joined.contains("--user 10001:10001"));
         assert!(joined.contains("--cap-drop ALL"));
         assert!(joined.contains("--security-opt no-new-privileges:true"));
+    }
+
+    #[test]
+    fn stopped_spawn_uses_docker_create_without_starting_the_container() {
+        let opts = SpawnOpts {
+            start: false,
+            ..SpawnOpts::default()
+        };
+        let args = build_run_args(DockerHostPlatform::Linux, "agent-a", "image", &opts).unwrap();
+        assert_eq!(args.first().map(String::as_str), Some("create"));
+        assert!(!args.iter().any(|arg| arg == "-d"));
+        assert!(!args.iter().any(|arg| arg == "run"));
     }
 
     #[test]

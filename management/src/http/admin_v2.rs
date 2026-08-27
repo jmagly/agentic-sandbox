@@ -3552,6 +3552,7 @@ async fn provision_instance_inner(
                     mounts,
                     network: req.network.clone(),
                     cmd: Vec::new(),
+                    start,
                     control_uid: Some(control_uid),
                 };
                 match crate::docker_runtime::spawn_container(&req_name, image_ref, &opts).await {
@@ -3562,7 +3563,7 @@ async fn provision_instance_inner(
                             "runtime": "docker",
                             "container_id": container_id,
                             "provisioned": true,
-                            "started": true,
+                            "started": start,
                             "startup_profile_id": startup_profile_id_for_task,
                             "transport": transport,
                             "control_uid": control_uid,
@@ -7276,7 +7277,7 @@ set -eu
   printf '%s\n' '---'
   printf '%s\n' "$@"
 } >> "$FAKE_DOCKER_ARGS"
-if [ "${1:-}" = "run" ]; then
+if [ "${1:-}" = "create" ]; then
   printf 'fake-container-id-123\n'
 elif [ "${1:-}" = "exec" ]; then
   cat >/dev/null
@@ -7314,6 +7315,7 @@ fi
             "runtime": "docker",
             "image": "agentic/codex:latest",
             "agentshare": true,
+            "start": false,
             "mounts": [format!("{}:/workspace", workspace_root.path().display())],
             "labels": {
                 "mission": "M011"
@@ -7346,6 +7348,7 @@ fi
         let result = terminal.result.expect("result body");
         assert_eq!(result["runtime"], "docker");
         assert_eq!(result["container_id"], "fake-container-id-123");
+        assert_eq!(result["started"], false);
         assert_eq!(result["bootstrap_token_issued"], false);
         assert_eq!(result["transport"], "uds");
         assert_eq!(result["workload_uid"], 10001);
@@ -7358,7 +7361,8 @@ fi
         );
 
         let args = std::fs::read_to_string(&docker_args_path).expect("fake docker args");
-        assert!(args.contains("run\n"), "{args}");
+        assert!(args.contains("create\n"), "{args}");
+        assert!(!args.contains("run\n"), "{args}");
         assert!(
             args.contains("AGENT_ID=agent-docker-bootstrap-ok"),
             "{args}"

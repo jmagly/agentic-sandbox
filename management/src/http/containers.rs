@@ -426,6 +426,7 @@ pub async fn create(
         mounts,
         network: req.network.clone(),
         cmd: req.cmd.clone(),
+        start: true,
         control_uid,
     };
 
