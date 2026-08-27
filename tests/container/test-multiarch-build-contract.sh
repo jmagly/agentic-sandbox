@@ -65,6 +65,12 @@ grep -F 'CARGO_DOCKER_BUILD_JOBS: "8"' .gitea/workflows/ci.yaml >/dev/null
 [[ "$(grep -c -- 'docker build \\' .gitea/workflows/ci.yaml)" -ge 2 ]]
 [[ "$(grep -c -- 'docker push "${tag}"' .gitea/workflows/ci.yaml)" -ge 2 ]]
 grep -F 'CARGO_BUILD_JOBS=${CARGO_DOCKER_BUILD_JOBS}' .gitea/workflows/ci.yaml >/dev/null
+for workflow in .gitea/workflows/ci.yaml .gitea/workflows/release.yml; do
+  grep -F 'timeout --signal=TERM --kill-after=30s 10m \' "$workflow" >/dev/null
+  grep -F 'docker pull --platform linux/amd64 "$1"' "$workflow" >/dev/null
+  grep -F 'timeout --signal=TERM --kill-after=30s 5m \' "$workflow" >/dev/null
+  grep -F 'tests/container/smoke.sh "$v"' "$workflow" >/dev/null
+done
 grep -F 'AGENT_IMAGE_CARGO_BUILD_JOBS:-8' scripts/build-multiarch-agent-images.sh >/dev/null
 grep -q 'COPY --from=agent-builder' images/container/Dockerfile.base
 grep -q 'codex-linux-arm64' images/container/Dockerfile.codex

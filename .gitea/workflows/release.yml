@@ -368,20 +368,26 @@ jobs:
 
       - name: Smoke-test agent images
         run: |
+          set -euo pipefail
+          pull_image() {
+            timeout --signal=TERM --kill-after=30s 10m \
+              docker pull --platform linux/amd64 "$1"
+          }
           if [[ "${{ steps.pub.outputs.publish }}" == "true" ]]; then
             REG="${{ env.REGISTRY }}/roctinam/agentic-sandbox"
             SHA="${{ github.sha }}"
-            docker pull --platform linux/amd64 "$REG/agent:base-$SHA"
+            pull_image "$REG/agent:base-$SHA"
             docker tag "$REG/agent:base-$SHA" agentic/agent:base
-            docker pull --platform linux/amd64 "$REG/agent:dev-$SHA"
+            pull_image "$REG/agent:dev-$SHA"
             docker tag "$REG/agent:dev-$SHA" agentic/agent:dev
             for image in claude codex opencode automation-control; do
-              docker pull --platform linux/amd64 "$REG/$image:$SHA"
+              pull_image "$REG/$image:$SHA"
               docker tag "$REG/$image:$SHA" "agentic/$image:latest"
             done
           fi
           for v in base dev claude codex opencode automation-control; do
-            tests/container/smoke.sh "$v"
+            timeout --signal=TERM --kill-after=30s 5m \
+              tests/container/smoke.sh "$v"
           done
 
       - name: Verify minimal container security baseline
