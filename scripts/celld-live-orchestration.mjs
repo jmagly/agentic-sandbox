@@ -2097,10 +2097,25 @@ async function runUat004(runtime, timeline) {
           recoveryPhase = `${substrate}-${crashPoint}-finally-management-heal`;
           if (managementFault?.status === "applied") await healPlannedOrchestrationFault(runtime, managementFault, async () => {});
           if (nodeFault?.status === "applied") {
-            recoveryPhase = `${substrate}-${crashPoint}-finally-owner-heal`;
+            recoveryPhase = `${substrate}-${crashPoint}-finally-owner-heal-authorize`;
             await healPlannedOrchestrationFault(runtime, nodeFault, async (target) => {
+              recoveryPhase = `${substrate}-${crashPoint}-finally-owner-heal-provider-start`;
               run("docker", ["start", target.provider_id], { timeout: 30_000 });
-              await waitFor(() => diagnoseFleet(runtime.fleetPath).status === "READY", { timeoutMs: 30_000, intervalMs: 250, description: "three-node fleet heal" });
+              recoveryPhase = `${substrate}-${crashPoint}-finally-owner-heal-diagnosis`;
+              let latestDiagnosis = null;
+              try {
+                await waitFor(() => {
+                  latestDiagnosis = diagnoseFleet(runtime.fleetPath);
+                  return latestDiagnosis.status === "READY";
+                }, { timeoutMs: 30_000, intervalMs: 250, description: "three-node fleet heal" });
+              } catch (error) {
+                throw annotateDriverError(error, {
+                  operation: `orchestration.uat004.${recoveryPhase}`,
+                  errorCode: latestDiagnosis?.failure?.reason_code ?? "CELLD_DIAGNOSIS_OWNER_HEAL_NOT_READY",
+                  evidenceSha256: latestDiagnosis?.failure?.evidence_sha256,
+                });
+              }
+              recoveryPhase = `${substrate}-${crashPoint}-finally-owner-heal-terminal-observation`;
             });
           }
           runtime.workerEndpoint = workerEndpoint(runtime.fleet, 0);
@@ -2196,26 +2211,38 @@ async function runUat005(runtime, timeline) {
     for (let generation = 1; generation <= 100; generation += 1) {
       const payloads = { provision: provisionPayload(runtime.config, substrate, name), start: {}, stop: {}, destroy: {} };
       for (const action of ACTIONS) {
+        let responseLossPhase = "plan-resource";
         try {
           if (action === "provision") planProviderResource(runtime, { instanceId, name, substrate });
+          responseLossPhase = "provider-before";
           const providerBefore = observeOrchestrationProvider(runtime, { instanceId, name, substrate });
           const id = operationId("uat005", substrate, generation, action);
           const started = Date.now();
           let originalEffect;
           let unknown;
           let terminal;
+          responseLossPhase = "fault-apply";
           const responseLossFault = await applyPlannedOrchestrationFault(runtime, { kind: "callback_response_loss", target: relayName(runtime.fleet) }, async (target) => {
+            responseLossPhase = "response-loss-arm";
             await signalExactCallbackResponseLoss(runtime, target);
+            responseLossPhase = "issue-command";
             originalEffect = await issueCommand(runtime, { instanceId, generation, operationId: id, action, payload: payloads[action] });
+            responseLossPhase = "worker-terminal";
             terminal = await waitCellEffect(runtime, instanceId, generation, id, ["succeeded", "failed", "rejected"]);
+            responseLossPhase = "durable-unknown-observation";
             unknown = durableEffectHistoryObservation(terminal.cell, id, "effect_unknown");
+            responseLossPhase = "fault-terminal-observation";
           });
+          responseLossPhase = "terminal-status";
           if (terminal.effect.status !== "succeeded") throw new Error(`${substrate} ${action} response-loss recovery failed`);
+          responseLossPhase = "management-replay";
           const managementReplay = await callbackRequest(callbackContext(runtime.fleet, runtime.managementHost, instanceId, generation), originalEffect);
+          responseLossPhase = "provider-after";
           const providerAfter = await waitForObservedProviderEffect(runtime, {
             resource: { instanceId, name, substrate },
             action,
           });
+          responseLossPhase = "provider-mutation-terminal";
           await completeObservedProviderMutation(runtime, { effect: originalEffect, instanceId, generation, action, observation: providerAfter });
           const record = {
             substrate,
@@ -2240,10 +2267,13 @@ async function runUat005(runtime, timeline) {
           };
           cases.push(record);
           timeline.push({ scenario: "UAT-CELLD-005", kind: "response_loss_trial", ...record });
+          responseLossPhase = "fault-heal";
           await healPlannedOrchestrationFault(runtime, responseLossFault, async () => {});
         } catch (error) {
+          const phase = responseLossPhase.toUpperCase().replace(/[^A-Z0-9]+/g, "_");
           throw annotateDriverError(error, {
-            errorCode: `CELLD_RESPONSE_LOSS_${substrate.toUpperCase()}_${action.toUpperCase()}`,
+            operation: `orchestration.uat005.${substrate}-${action}-${responseLossPhase}`,
+            errorCode: `CELLD_RESPONSE_LOSS_${substrate.toUpperCase()}_${action.toUpperCase()}_${phase}`.slice(0, 160),
           });
         }
       }
@@ -3398,8 +3428,18 @@ export function cleanupOrchestrationRoot(configPath, options = {}) {
       });
       throw new OrchestrationCleanupResidueError(`orchestration cleanup inventory retains ${activeResources.length} resources and ${activeFaults.length} faults`);
     }
+    const grpcSocketNames = [];
     for (const entry of readdirSync(`/proc/self/fd/${lifecycle.root.descriptor}`, { withFileTypes: true })) {
       if (["orchestration.json", "orchestration-inventory.json", ".orchestration-inventory.lock"].includes(entry.name)) continue;
+      if (/^grpc-[0-9a-f]{32}\.sock$/.test(entry.name)) {
+        const socketPath = `/proc/self/fd/${lifecycle.root.descriptor}/${entry.name}`;
+        const socketMetadata = lstatSync(socketPath);
+        if (!entry.isSocket() || !socketMetadata.isSocket() || socketMetadata.isSymbolicLink() || socketMetadata.nlink !== 1) {
+          throw new OrchestrationCleanupResidueError("orchestration cleanup found ambiguous managed gRPC socket residue");
+        }
+        grpcSocketNames.push(entry.name);
+        continue;
+      }
       if (!entry.isDirectory() || entry.isSymbolicLink()) throw new OrchestrationCleanupResidueError("orchestration cleanup found ambiguous residue");
       const scenarioRoot = `/proc/self/fd/${lifecycle.root.descriptor}/${entry.name}`;
       if (readdirSync(scenarioRoot).length !== 0) throw new OrchestrationCleanupResidueError(`orchestration scenario residue remains: ${entry.name}`);
@@ -3407,6 +3447,14 @@ export function cleanupOrchestrationRoot(configPath, options = {}) {
     inventory.state = "clean";
     inventory.updated_at = new Date().toISOString();
     commitOrchestrationInventory(config.inventory_path, inventory, { config, lifecycle });
+    for (const name of grpcSocketNames) {
+      const socketPath = `/proc/self/fd/${lifecycle.root.descriptor}/${name}`;
+      const socketMetadata = lstatSync(socketPath);
+      if (!socketMetadata.isSocket() || socketMetadata.isSymbolicLink() || socketMetadata.nlink !== 1) {
+        throw new OrchestrationCleanupResidueError("orchestration managed gRPC socket identity changed before deletion");
+      }
+      rmSync(socketPath, { force: false });
+    }
     options.beforeRootDelete?.();
     let pathMetadata;
     try {

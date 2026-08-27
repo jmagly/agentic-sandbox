@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
@@ -54,6 +55,16 @@ test("response-loss evidence comes from the exact durable unknown event", () => 
   assert.throws(() => durableEffectHistoryObservation({ history: [event, { ...event, sequence: 4 }] }, operationId, "effect_unknown"), /exactly one durable/);
   assert.doesNotMatch(orchestrationSource, /waitCellEffect\([^\n]+\["unknown"\]\)/);
   assert.match(orchestrationSource, /getWorkerOperation\(/);
+});
+
+test("recovery and response-loss campaigns expose their exact bounded failure phases", () => {
+  assert.match(orchestrationSource, /orchestration\.uat004\.\$\{recoveryPhase\}/);
+  assert.match(orchestrationSource, /latestDiagnosis\?\.failure\?\.reason_code/);
+  assert.match(orchestrationSource, /latestDiagnosis\?\.failure\?\.evidence_sha256/);
+  assert.match(orchestrationSource, /orchestration\.uat005\.\$\{substrate\}-\$\{action\}-\$\{responseLossPhase\}/);
+  for (const phase of ["response-loss-arm", "issue-command", "worker-terminal", "durable-unknown-observation", "management-replay", "provider-after", "fault-heal"]) {
+    assert.match(orchestrationSource, new RegExp(`responseLossPhase = "${phase}"`));
+  }
 });
 
 test("response-loss injection waits until the exact relay acknowledges arming", async () => {
@@ -806,6 +817,41 @@ test("protected clean no-op orchestration recovery and cleanup do not require de
     const cleaned = liveOrchestration.cleanupOrchestrationRoot(fixture.configPath);
     assert.equal(cleaned.status, "PASS");
     assert.equal(existsSync(fixture.root), false);
+  } finally {
+    if (existsSync(fixture.root)) rmSync(fixture.root, { recursive: true, force: true });
+    if (existsSync(fixture.profileRoot)) rmSync(fixture.profileRoot, { recursive: true, force: true });
+  }
+});
+
+test("orchestration cleanup removes only an exact verified managed gRPC socket", () => {
+  const fixture = protectedRuntimeFixture({ destructive: false, active: false });
+  const socketPath = join(fixture.root, `grpc-${"a".repeat(32)}.sock`);
+  try {
+    const bound = spawnSync("python3", ["-c", "import socket,sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); s.close()", socketPath], {
+      encoding: "utf8",
+      shell: false,
+    });
+    assert.equal(bound.status, 0, bound.stderr);
+    assert.equal(lstatSync(socketPath).isSocket(), true);
+    const cleaned = liveOrchestration.cleanupOrchestrationRoot(fixture.configPath);
+    assert.equal(cleaned.status, "PASS");
+    assert.equal(existsSync(fixture.root), false);
+  } finally {
+    if (existsSync(fixture.root)) rmSync(fixture.root, { recursive: true, force: true });
+    if (existsSync(fixture.profileRoot)) rmSync(fixture.profileRoot, { recursive: true, force: true });
+  }
+});
+
+test("orchestration cleanup rejects a regular file disguised as a managed gRPC socket", () => {
+  const fixture = protectedRuntimeFixture({ destructive: false, active: false });
+  const lookalikePath = join(fixture.root, `grpc-${"b".repeat(32)}.sock`);
+  try {
+    writeFileSync(lookalikePath, "not a socket\n", { mode: 0o600 });
+    assert.throws(
+      () => liveOrchestration.cleanupOrchestrationRoot(fixture.configPath),
+      /ambiguous managed gRPC socket residue/,
+    );
+    assert.equal(existsSync(lookalikePath), true);
   } finally {
     if (existsSync(fixture.root)) rmSync(fixture.root, { recursive: true, force: true });
     if (existsSync(fixture.profileRoot)) rmSync(fixture.profileRoot, { recursive: true, force: true });
