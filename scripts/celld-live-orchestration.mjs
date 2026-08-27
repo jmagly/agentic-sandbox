@@ -2196,7 +2196,6 @@ async function runUat004(runtime, timeline) {
                 recoveryPhase = `${substrate}-${crashPoint}-finally-owner-heal-terminal-observation`;
               });
             }
-            await replaceFleetWorkerAccess(runtime, 0);
           } catch (error) {
             throw annotateDriverError(error, {
               operation: `orchestration.uat004.${recoveryPhase}`,

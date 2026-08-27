@@ -351,6 +351,8 @@ test("orchestration driver uses fixture-managed Worker access for live managemen
 });
 
 test("owner recovery replaces and closes exact fixture-managed Worker access", async () => {
+  assert.match(orchestrationSource, /await replaceFleetWorkerAccess\(runtime, fallbackIndex\)/);
+  assert.doesNotMatch(orchestrationSource, /runtime\.workerEndpoint = workerEndpoint\(/);
   const opened = [];
   const closed = [];
   const initial = { endpoint: "http://127.0.0.1:18080", close: async () => closed.push("initial") };
