@@ -1300,9 +1300,14 @@ export async function healPlannedOrchestrationFault(runtime, record, heal) {
       target_identity_sha256: record.target_identity_sha256,
       target_ownership_sha256: record.target_ownership_sha256,
     } : null;
-    const effectBinding = runtime.revalidateFaultTarget
-      ? exactFaultBinding(await runtime.revalidateFaultTarget({ runtime, fault: record, plan: planned.entry, authorized: authorizedBinding }), "fault heal effect revalidation")
-      : null;
+    let effectBinding;
+    try {
+      effectBinding = runtime.revalidateFaultTarget
+        ? exactFaultBinding(await runtime.revalidateFaultTarget({ runtime, fault: record, plan: planned.entry, authorized: authorizedBinding }), "fault heal effect revalidation")
+        : null;
+    } catch (error) {
+      throw annotateDriverError(error, { errorCode: "CELLD_FAULT_HEAL_REVALIDATION_FAILED" });
+    }
     let targetTransition;
     if (authorizedBinding && !sameFaultBinding(authorizedBinding, effectBinding)) {
       if (record.kind !== "management_process_kill" || effectBinding?.spawn_identity?.run_id !== runtime.runId) {
@@ -1317,13 +1322,34 @@ export async function healPlannedOrchestrationFault(runtime, record, heal) {
       };
     }
     await heal(effectBinding);
-    const observation = await runtime.observeFaultTarget({ runtime, plan: planned.entry, fault: record, subject: planned.entry.subject });
-    if (!observation || observation.owned !== true || observation.present !== false) {
-      throw new Error("fault heal effect was not independently observed absent on the exact-owned target");
+    let observation;
+    try {
+      observation = await runtime.observeFaultTarget({ runtime, plan: planned.entry, fault: record, subject: planned.entry.subject });
+    } catch (error) {
+      throw annotateDriverError(error, { errorCode: "CELLD_FAULT_HEAL_OBSERVATION_FAILED" });
     }
-    if (authorizedBinding && !sameFaultBinding(targetTransition ? effectBinding : authorizedBinding, observation)) throw new Error("fault heal terminal observation substituted the authorized identity binding");
-    finishOrchestrationMutation(runtime.orchestrationInventory, planned.entry, { outcome: "healed", targetTransition });
-    persistOrchestrationInventory(runtime);
+    if (!observation || observation.owned !== true || observation.present !== false) {
+      throw annotateDriverError(new Error("fault heal effect was not independently observed absent on the exact-owned target"), {
+        errorCode: "CELLD_FAULT_HEAL_OBSERVATION_PRESENT",
+        evidenceSha256: sha256(canonicalJson({ owned: observation?.owned === true, present: observation?.present ?? null })),
+      });
+    }
+    if (authorizedBinding && !sameFaultBinding(targetTransition ? effectBinding : authorizedBinding, observation)) {
+      throw annotateDriverError(new Error("fault heal terminal observation substituted the authorized identity binding"), {
+        errorCode: "CELLD_FAULT_HEAL_OBSERVATION_SUBSTITUTED",
+        evidenceSha256: sha256(canonicalJson({
+          target_identity_matches: (targetTransition ? effectBinding : authorizedBinding)?.target_identity_sha256 === observation.target_identity_sha256,
+          target_ownership_matches: (targetTransition ? effectBinding : authorizedBinding)?.target_ownership_sha256 === observation.target_ownership_sha256,
+          provider_identity_matches: effectBinding?.provider_id === undefined || observation.provider_id === undefined || effectBinding.provider_id === observation.provider_id,
+        })),
+      });
+    }
+    try {
+      finishOrchestrationMutation(runtime.orchestrationInventory, planned.entry, { outcome: "healed", targetTransition });
+      persistOrchestrationInventory(runtime);
+    } catch (error) {
+      throw annotateDriverError(error, { errorCode: "CELLD_FAULT_HEAL_JOURNAL_TERMINAL_FAILED" });
+    }
     return;
   }
   await heal();

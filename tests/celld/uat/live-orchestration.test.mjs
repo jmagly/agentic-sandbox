@@ -1417,9 +1417,51 @@ test("fault journal completion refuses an independently observed mismatched term
     );
     await assert.rejects(
       healPlannedOrchestrationFault(runtime, record, async () => { healCalls += 1; }),
-      /observ|effect|absent/,
+      (error) => {
+        assert.match(error.message, /observ|effect|absent/);
+        assert.equal(error.errorCode, "CELLD_FAULT_HEAL_OBSERVATION_PRESENT");
+        assert.match(error.evidenceSha256, /^[0-9a-f]{64}$/);
+        return true;
+      },
     );
     assert.equal(healCalls, 1);
+    assert.equal(document.incomplete_mutation_ids.length, 1);
+  });
+
+  await t.test("heal classifies an unavailable terminal observer", async () => {
+    let observeCalls = 0;
+    const document = inventoryV2({ includeProvision: false });
+    const binding = exactFaultBinding();
+    const runtime = {
+      scenarioId: "UAT-CELLD-006",
+      runId: "test-run",
+      config: config({
+        run_id: "test-run",
+        working_root: "/dev/shm/agentic-celld-orchestration/test-run",
+        inventory_path: "/dev/shm/agentic-celld-orchestration/test-run/orchestration-inventory.json",
+      }),
+      orchestrationInventory: document,
+      resolveFaultTarget: async () => binding,
+      revalidateFaultTarget: async () => binding,
+      persistInventory: () => {},
+      observeFaultTarget: async () => {
+        observeCalls += 1;
+        if (observeCalls > 1) throw new Error("observer unavailable");
+        return { ...binding, present: true };
+      },
+    };
+    const record = await applyPlannedOrchestrationFault(
+      runtime,
+      { kind: "callback_relay_pause", target: "celld-test-relay" },
+      async () => {},
+    );
+    await assert.rejects(
+      healPlannedOrchestrationFault(runtime, record, async () => {}),
+      (error) => {
+        assert.equal(error.errorCode, "CELLD_FAULT_HEAL_OBSERVATION_FAILED");
+        return true;
+      },
+    );
     assert.equal(document.incomplete_mutation_ids.length, 1);
   });
 });
