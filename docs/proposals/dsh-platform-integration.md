@@ -164,6 +164,10 @@ Six-file management WIP (stash-archived, `git stash@{0}`) audited hunk-by-hunk a
 
 ### Mission-plane findings (first live MC cycle, 2026-08-27)
 
+| F32 | ops / silent-failure | **Wall-clock cap not enforced mid-iteration**: a `--max-wall-clock-minutes 6` mission ran 20+ min because the loop timer only fires at iteration boundaries; a single long iteration (GLM-5.3 full-reasoning, 18+ agent steps on a 66-file task) exceeds the cap unchecked. Evidence: live session events `step/start seq≈3409` at elapsed 20:19. | Pair wall-clock with `--max-iterations 1..2` for latency-sensitive work; upstream fix = iteration-level timer |
+
+Round-1 execution record: bugs A (dsh adapter over-passed --resume/--model), B (analyzer label/flag mismatch), C (orchestrator `computePIDMetrics`→`collect`) fixed and deployed; `mc-sweep` triage tool shipped (~bin); 4 zombie missions reconciled with evidence-linked reasons; fixed-pipeline mission live-verified mid-execution (step 18, zero stderr).
+
 | ID | Finding | Disposition |
 |---|---|---|
 | F30a | `aiwg mc start` printed session ids but persisted **no durable state** when run from project roots (dev-channel install); durable store is HOME-anchored `~/.aiwg/ralph-external/` — run MC commands from `$HOME` | Workaround verified: durable session created from HOME |
