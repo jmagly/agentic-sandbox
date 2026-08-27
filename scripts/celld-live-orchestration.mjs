@@ -428,6 +428,45 @@ export function workerEndpoint(config, nodeIndex = 0) {
   return `http://127.0.0.1:${match[1]}`;
 }
 
+export async function replaceFleetWorkerAccess(runtime, nodeIndex) {
+  if (!runtime?.fleetPath || !runtime?.fleet?.nodes?.[nodeIndex]) {
+    throw new Error("Celld Worker access replacement requires an exact fleet node");
+  }
+  const accessFactory = runtime.openFleetWorkerAccess ?? openFleetWorkerAccess;
+  const next = await accessFactory(runtime.fleetPath, { nodeIndex });
+  const previous = runtime.workerAccess;
+  runtime.workerAccesses ??= new Set(previous ? [previous] : []);
+  if (typeof next?.close === "function") runtime.workerAccesses.add(next);
+  let endpoint;
+  try {
+    endpoint = new URL(next?.endpoint);
+  } catch {
+    endpoint = null;
+  }
+  const port = Number(endpoint?.port);
+  if (!endpoint || endpoint.protocol !== "http:" || endpoint.hostname !== "127.0.0.1"
+      || endpoint.username || endpoint.password || endpoint.pathname !== "/"
+      || endpoint.search || endpoint.hash || !Number.isSafeInteger(port) || port < 1 || port > 65_535
+      || typeof next.close !== "function" || next.node !== runtime.fleet.nodes[nodeIndex].name) {
+    if (typeof next?.close === "function") {
+      try {
+        await next.close();
+        runtime.workerAccesses.delete(next);
+      } catch (error) {
+        throw new OrchestrationCleanupResidueError("invalid Celld Worker access cleanup failed", { cause: error });
+      }
+    }
+    throw new Error("Celld Worker access replacement is not exact host-loopback access");
+  }
+  runtime.workerAccess = next;
+  runtime.workerEndpoint = next.endpoint;
+  if (previous && previous !== next) {
+    await previous.close();
+    runtime.workerAccesses.delete(previous);
+  }
+  return next;
+}
+
 function boundedInternalJson(url) {
   return new Promise((resolvePromise, rejectPromise) => {
     const request = httpRequest(url, { method: "GET", timeout: 10_000 }, (response) => {
@@ -2101,7 +2140,7 @@ async function runUat004(runtime, timeline) {
           nodeFault = await applyPlannedOrchestrationFault(runtime, { kind: "fleet_node_stop", target: ownershipBefore.owner_target }, (target) => run("docker", ["stop", "--time", "5", target.provider_id], { timeout: 30_000 }));
           const fallbackIndex = runtime.fleet.nodes.findIndex((node) => node.name !== ownershipBefore.owner_target);
           if (fallbackIndex < 0) throw new Error("owner-loss campaign has no surviving Worker endpoint");
-          runtime.workerEndpoint = workerEndpoint(runtime.fleet, fallbackIndex);
+          await replaceFleetWorkerAccess(runtime, fallbackIndex);
           recoveryPhase = `${substrate}-${crashPoint}-owner-takeover`;
           ownershipAfterLoss = await waitFor(async () => {
             const observation = await observeCelldOwnership(runtime, { instanceId });
@@ -2157,7 +2196,7 @@ async function runUat004(runtime, timeline) {
                 recoveryPhase = `${substrate}-${crashPoint}-finally-owner-heal-terminal-observation`;
               });
             }
-            runtime.workerEndpoint = workerEndpoint(runtime.fleet, 0);
+            await replaceFleetWorkerAccess(runtime, 0);
           } catch (error) {
             throw annotateDriverError(error, {
               operation: `orchestration.uat004.${recoveryPhase}`,
@@ -3315,7 +3354,10 @@ export async function executeOrchestrationDriver({ scenarioId, runId, liveProfil
     await withDriverOperation("orchestration.start-callback-relays", errorFields, () => startCallbackRelays(fleetPath, { relayBinaryPath: config.callback_relay_binary_path, enableFaultSignal: ["UAT-CELLD-005"].includes(scenarioId) }));
     const activeResources = orchestrationInventory.resources.filter((resource) => resource.status !== "removed").map((resource) => [resource.instance_id, { instanceId: resource.instance_id, name: resource.name, substrate: resource.substrate }]);
     runtime = {
-      config, fleet, fleetPath, management, managementHost, workerEndpoint: workerAccess.endpoint, runId, scenarioId,
+      config, fleet, fleetPath, management, managementHost,
+      workerAccess, workerAccesses: new Set([workerAccess]), workerEndpoint: workerAccess.endpoint,
+      openFleetWorkerAccess: dependencies.openFleetWorkerAccess,
+      runId, scenarioId,
       orchestrationInventory, providerResources: new Map(activeResources),
       persistedJournalHeadSha256: orchestrationInventory.journal_head_sha256,
       persistInventory: dependencies.persistInventory,
@@ -3341,7 +3383,13 @@ export async function executeOrchestrationDriver({ scenarioId, runId, liveProfil
     };
     try { cleanupAssertions.push(...await cleanupOwnedOrchestrationFaults(runtime)); } catch (error) { retainCleanupError("faults", error); }
     try { await stopManagementAndWait(runtime?.management ?? management, "SIGKILL"); cleanupAssertions.push("management process terminated"); } catch (error) { retainCleanupError("management", error); }
-    try { if (workerAccess) { await workerAccess.close(); cleanupAssertions.push("Worker loopback access closed"); } } catch (error) { retainCleanupError("worker-access", error); }
+    const workerAccesses = runtime?.workerAccesses ?? new Set(workerAccess ? [workerAccess] : []);
+    for (const access of workerAccesses) {
+      try {
+        await access.close();
+        cleanupAssertions.push("Worker loopback access closed");
+      } catch (error) { retainCleanupError("worker-access", error); }
+    }
     try { cleanupAssertions.push(...await cleanupOwnedProviderResources(runtime)); } catch (error) { retainCleanupError("provider", error); }
     try { if (fleetPath && existsSync(fleetPath)) cleanupFleet(fleetPath); cleanupAssertions.push("exact fleet containers and protected fleet state removed"); } catch (error) { retainCleanupError("fleet", error); }
     try { if (fixture) cleanupFixture(fixture); cleanupAssertions.push("exact storage services, network, volumes, and run directory removed"); } catch (error) { retainCleanupError("storage", error); }

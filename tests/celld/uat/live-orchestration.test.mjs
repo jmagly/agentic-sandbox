@@ -347,7 +347,69 @@ test("orchestration driver uses fixture-managed Worker access for live managemen
   assert.match(orchestrationSource, /openFleetWorkerAccess\(fleetPath\)/);
   assert.match(orchestrationSource, /celldEndpoint: workerAccess\.endpoint/);
   assert.match(orchestrationSource, /workerEndpoint: workerAccess\.endpoint/);
-  assert.match(orchestrationSource, /workerAccess\.close\(\)/);
+  assert.match(orchestrationSource, /for \(const access of workerAccesses\)/);
+});
+
+test("owner recovery replaces and closes exact fixture-managed Worker access", async () => {
+  const opened = [];
+  const closed = [];
+  const initial = { endpoint: "http://127.0.0.1:18080", close: async () => closed.push("initial") };
+  const runtime = {
+    fleetPath: "/run/celld/fleet.json",
+    fleet: { nodes: [{ name: "node-1" }, { name: "node-2" }] },
+    workerAccess: initial,
+    workerAccesses: new Set([initial]),
+    workerEndpoint: initial.endpoint,
+    openFleetWorkerAccess: async (path, { nodeIndex }) => {
+      opened.push([path, nodeIndex]);
+      return { endpoint: "http://127.0.0.1:28080", node: "node-2", close: async () => closed.push("replacement") };
+    },
+  };
+  const replacement = await liveOrchestration.replaceFleetWorkerAccess(runtime, 1);
+  assert.deepEqual(opened, [[runtime.fleetPath, 1]]);
+  assert.deepEqual(closed, ["initial"]);
+  assert.equal(runtime.workerAccess, replacement);
+  assert.equal(runtime.workerEndpoint, replacement.endpoint);
+  assert.deepEqual([...runtime.workerAccesses], [replacement]);
+});
+
+test("owner recovery rejects non-loopback replacement access and closes it", async () => {
+  let closed = 0;
+  const initial = { endpoint: "http://127.0.0.1:18080", close: async () => {} };
+  const runtime = {
+    fleetPath: "/run/celld/fleet.json",
+    fleet: { nodes: [{ name: "node-1" }, { name: "node-2" }] },
+    workerAccess: initial,
+    workerEndpoint: initial.endpoint,
+    openFleetWorkerAccess: async () => ({ endpoint: "http://192.0.2.10:8080", node: "node-2", close: async () => { closed += 1; } }),
+  };
+  await assert.rejects(liveOrchestration.replaceFleetWorkerAccess(runtime, 1), /host-loopback access/);
+  assert.equal(closed, 1);
+  assert.equal(runtime.workerAccess, initial);
+  assert.equal(runtime.workerEndpoint, initial.endpoint);
+});
+
+test("owner recovery retains a replacement whose invalid-access cleanup fails", async () => {
+  const initial = { endpoint: "http://127.0.0.1:18080", close: async () => {} };
+  const invalid = {
+    endpoint: "http://127.0.0.1:28080",
+    node: "substituted-node",
+    close: async () => { throw new Error("listener still active"); },
+  };
+  const runtime = {
+    fleetPath: "/run/celld/fleet.json",
+    fleet: { nodes: [{ name: "node-1" }, { name: "node-2" }] },
+    workerAccess: initial,
+    workerEndpoint: initial.endpoint,
+    openFleetWorkerAccess: async () => invalid,
+  };
+  await assert.rejects(
+    liveOrchestration.replaceFleetWorkerAccess(runtime, 1),
+    (error) => error.exitCode === 4 && /cleanup failed/.test(error.message),
+  );
+  assert.equal(runtime.workerAccesses.has(invalid), true);
+  assert.equal(runtime.workerAccess, initial);
+  assert.equal(runtime.workerEndpoint, initial.endpoint);
 });
 
 test("management restart preserves the exact fixture-managed Worker transport", () => {

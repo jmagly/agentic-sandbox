@@ -15,7 +15,7 @@ use std::{
     },
 };
 use tokio::{
-    io::{copy, copy_bidirectional, AsyncReadExt},
+    io::{copy, AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
 };
 use tokio_rustls::{
@@ -171,11 +171,11 @@ fn tls_connector(config: &RelayConfig) -> Result<TlsConnector> {
 }
 
 async fn relay_connection(
-    mut inbound: TcpStream,
+    inbound: TcpStream,
     connector: TlsConnector,
     target: SocketAddr,
     server_name: ServerName<'static>,
-    drop_response: bool,
+    drop_next_response: Arc<AtomicBool>,
 ) -> Result<()> {
     let outbound = TcpStream::connect(target)
         .await
@@ -184,28 +184,38 @@ async fn relay_connection(
         .connect(server_name, outbound)
         .await
         .context("authenticating management mTLS")?;
-    if !drop_response {
-        let mut outbound = outbound;
-        copy_bidirectional(&mut inbound, &mut outbound)
-            .await
-            .context("relaying callback")?;
-        return Ok(());
-    }
-    let (mut inbound_read, _inbound_write) = inbound.into_split();
+    let (mut inbound_read, mut inbound_write) = inbound.into_split();
     let (mut outbound_read, mut outbound_write) = tokio::io::split(outbound);
-    let request_task =
-        tokio::spawn(async move { copy(&mut inbound_read, &mut outbound_write).await });
-    let mut response_byte = [0_u8; 1];
-    let response = outbound_read
-        .read(&mut response_byte)
-        .await
-        .context("waiting for management response before injected loss")?;
-    request_task.abort();
-    if response == 0 {
-        return Err(anyhow!("management closed before producing a response"));
+    let request_task = tokio::spawn(async move {
+        let result = copy(&mut inbound_read, &mut outbound_write).await;
+        let _ = outbound_write.shutdown().await;
+        result
+    });
+    let mut response_buffer = [0_u8; 16 * 1024];
+    loop {
+        let response = outbound_read
+            .read(&mut response_buffer)
+            .await
+            .context("reading management response")?;
+        if response == 0 {
+            let _ = inbound_write.shutdown().await;
+            request_task.abort();
+            return Ok(());
+        }
+        // Select the response at its first observable byte, not when the TCP
+        // connection is accepted. Worker fetch keeps callback connections
+        // alive, so an accept-time flag can miss the operation armed by UAT.
+        if drop_next_response.swap(false, Ordering::SeqCst) {
+            request_task.abort();
+            let _ = inbound_write.shutdown().await;
+            eprintln!("Celld callback relay injected one response loss");
+            return Ok(());
+        }
+        inbound_write
+            .write_all(&response_buffer[..response])
+            .await
+            .context("relaying management response")?;
     }
-    eprintln!("Celld callback relay injected one response loss");
-    Ok(())
 }
 
 async fn serve(config: RelayConfig) -> Result<()> {
@@ -241,10 +251,10 @@ async fn serve(config: RelayConfig) -> Result<()> {
         let target = config.target;
         let server_name =
             ServerName::try_from(config.server_name.clone()).expect("validated TLS server name");
-        let drop_response = drop_next_response.swap(false, Ordering::SeqCst);
+        let connection_fault = Arc::clone(&drop_next_response);
         tokio::spawn(async move {
             let result =
-                relay_connection(inbound, connector, target, server_name, drop_response).await;
+                relay_connection(inbound, connector, target, server_name, connection_fault).await;
             if result.is_err() {
                 eprintln!("Celld callback relay connection failed");
             }
@@ -400,11 +410,16 @@ mod tests {
             stream.read_exact(&mut request).await.unwrap();
             assert_eq!(&request, b"ping");
             stream.write_all(b"pong").await.unwrap();
+            stream.read_exact(&mut request).await.unwrap();
+            assert_eq!(&request, b"drop");
+            stream.write_all(b"lost").await.unwrap();
         });
         let loss_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let loss_relay_addr = loss_listener.local_addr().unwrap();
         relay_config.target = loss_target_addr;
         let loss_connector = tls_connector(&relay_config).unwrap();
+        let response_loss = Arc::new(AtomicBool::new(false));
+        let relay_response_loss = Arc::clone(&response_loss);
         let loss_relay_task = tokio::spawn(async move {
             let (inbound, _) = loss_listener.accept().await.unwrap();
             relay_connection(
@@ -412,7 +427,7 @@ mod tests {
                 loss_connector,
                 loss_target_addr,
                 ServerName::try_from("management.internal").unwrap(),
-                true,
+                relay_response_loss,
             )
             .await
             .unwrap();
@@ -420,6 +435,10 @@ mod tests {
         let mut loss_client = TcpStream::connect(loss_relay_addr).await.unwrap();
         loss_client.write_all(b"ping").await.unwrap();
         let mut returned = [0_u8; 4];
+        loss_client.read_exact(&mut returned).await.unwrap();
+        assert_eq!(&returned, b"pong");
+        response_loss.store(true, Ordering::SeqCst);
+        loss_client.write_all(b"drop").await.unwrap();
         let read = loss_client.read(&mut returned).await;
         assert!(!matches!(read, Ok(count) if count > 0));
         loss_target_task.await.unwrap();
