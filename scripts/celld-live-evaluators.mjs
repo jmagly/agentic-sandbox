@@ -110,8 +110,8 @@ const lifecycleProviderStates = Object.freeze({
     destroy: Object.freeze(["shut off", "absent"]),
   }),
   docker: Object.freeze({
-    provision: Object.freeze(["absent", "running"]),
-    start: Object.freeze(["running", "running"]),
+    provision: Object.freeze(["absent", "created"]),
+    start: Object.freeze(["created", "running"]),
     stop: Object.freeze(["running", "exited"]),
     destroy: Object.freeze(["exited", "absent"]),
   }),

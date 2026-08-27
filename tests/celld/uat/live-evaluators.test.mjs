@@ -47,7 +47,7 @@ const matrixCases = (dimensions, build) => {
 const uniqueDigest = (index) => (index + 1).toString(16).padStart(64, "0");
 const providerStates = {
   qemu: { provision: ["absent", "shut off"], start: ["shut off", "running"], stop: ["running", "shut off"], destroy: ["shut off", "absent"] },
-  docker: { provision: ["absent", "running"], start: ["running", "running"], stop: ["running", "exited"], destroy: ["exited", "absent"] },
+  docker: { provision: ["absent", "created"], start: ["created", "running"], stop: ["running", "exited"], destroy: ["exited", "absent"] },
 };
 const providerFixture = (substrate, state, second) => ({
   observed_at: new Date(Date.UTC(2026, 7, 23, 0, 0, second)).toISOString(),
