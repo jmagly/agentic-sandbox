@@ -8,6 +8,19 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+## [2026.8.8] — 2026-08-29
+
+Follow-up release for Gitea 1.25 matrix scheduling discovered by the live
+v2026.8.7 release E2E gate.
+
+### Fixed
+
+- Removed redundant job-level concurrency groups from CI/release E2E and the
+  process-backed conformance workflows. Gitea 1.25 could leave matrix children
+  permanently waiting or cancel a newly queued cross-workflow job. E2E remains
+  serialized with `strategy.max-parallel: 1`, and each qualified host runner
+  retains capacity one for host-local isolation.
+
 ## [2026.8.7] — 2026-08-29
 
 Follow-up release for Gitea Runner 3 process cleanup discovered by the live
@@ -3286,7 +3299,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.8.7...HEAD
+[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.8.8...HEAD
+[2026.8.8]: https://github.com/jmagly/agentic-sandbox/compare/v2026.8.7...v2026.8.8
 [2026.8.7]: https://github.com/jmagly/agentic-sandbox/compare/v2026.8.6...v2026.8.7
 [2026.8.6]: https://github.com/jmagly/agentic-sandbox/compare/v2026.8.5...v2026.8.6
 [2026.8.5]: https://github.com/jmagly/agentic-sandbox/compare/v2026.8.4...v2026.8.5
