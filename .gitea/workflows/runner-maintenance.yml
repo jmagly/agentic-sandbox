@@ -246,11 +246,14 @@ jobs:
           chmod 0755 "${staging_file}"
           "${staging_file}" --version
 
-          current_version="$(gitea-runner --version 2>/dev/null || true)"
-          if [[ "${current_version}" != *"${version}"* ]]; then
-            sudo -n install -o root -g root -m 0755 "${staging_file}" /usr/local/bin/gitea-runner
-          fi
+          # Titan's established systemd unit still uses the historical
+          # /usr/local/bin/act_runner path. Install the current runner at both
+          # names so the scheduled service restart actually activates it while
+          # operators and new units can use the canonical gitea-runner name.
+          sudo -n install -o root -g root -m 0755 "${staging_file}" /usr/local/bin/gitea-runner
+          sudo -n install -o root -g root -m 0755 "${staging_file}" /usr/local/bin/act_runner
           /usr/local/bin/gitea-runner --version
+          /usr/local/bin/act_runner --version
 
       - name: Normalize toolchain, storage, and runner mapping
         run: |
