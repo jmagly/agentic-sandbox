@@ -282,6 +282,38 @@ jobs:
             --report-format markdown,junit \
             --report-out conformance.report.md
 
+          # The AIWG harness intentionally qualifies the configured bearer
+          # boundary above. The upstream TCK does not accept custom
+          # authorization headers, so restart the same exact binary against a
+          # separate empty secrets directory for its loopback-only protocol
+          # qualification. Reusing the selected ports keeps the advertised
+          # Agent Card origin and all TCK URLs internally consistent.
+          kill "${SERVER_PID}" 2>/dev/null || true
+          wait "${SERVER_PID}" 2>/dev/null || true
+          rm -rf /tmp/a2a-tck-run
+          mkdir -p /tmp/a2a-tck-run/secrets
+          export SECRETS_DIR=/tmp/a2a-tck-run/secrets
+          ./management/target/debug/agentic-mgmt > /tmp/a2a-tck-run/server.log 2>&1 &
+          SERVER_PID=$!
+
+          for i in $(seq 1 120); do
+            if curl -fsS "${MGMT_BASE}/healthz/http" > /dev/null 2>&1; then
+              echo "TCK server healthy after ${i}s"
+              break
+            fi
+            if ! kill -0 "${SERVER_PID}" 2>/dev/null; then
+              echo "TCK server exited before becoming healthy"
+              tail -n 200 /tmp/a2a-tck-run/server.log || true
+              exit 1
+            fi
+            sleep 1
+            if [ "$i" -eq 120 ]; then
+              echo "TCK server did not become healthy in 120s"
+              tail -n 200 /tmp/a2a-tck-run/server.log || true
+              exit 1
+            fi
+          done
+
           # Upstream v1.0 TCK pinned above. The TCK sends A2A-Version: 1.0,
           # exercises the unprefixed HTTP+JSON operation paths, and retains
           # HTML, JUnit, and compatibility reports under a2a-tck/reports.
@@ -349,6 +381,7 @@ jobs:
             conformance.report.md
             conformance.report.junit.xml
             /tmp/conformance-run/server.log
+            /tmp/a2a-tck-run/server.log
             conformance.restart-durability.report.md
             conformance.restart-durability.server.log
             a2a-tck/reports/
