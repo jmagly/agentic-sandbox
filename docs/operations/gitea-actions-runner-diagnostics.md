@@ -73,5 +73,7 @@ job failure.
 
 The harness performs no release, VM, container, or provider mutation. It owns
 only `/tmp/agentic-sandbox-concurrency-<run-id>` and removes that exact path.
+It targets the upgraded Titan runner so retained artifact evidence uses the
+same runner generation as the supported production qualification lane.
 Do not use release, E2E, or live qualification workflows to test scheduler
 concurrency.

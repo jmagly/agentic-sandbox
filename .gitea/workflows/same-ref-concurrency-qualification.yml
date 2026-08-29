@@ -28,7 +28,9 @@ concurrency:
 jobs:
   bounded-holder:
     name: Bounded same-ref holder
-    runs-on: ubuntu-latest
+    # Keep evidence on the upgraded Titan runner. The generic ubuntu-latest
+    # pool still contains a legacy runner without compatible artifact support.
+    runs-on: titan
     timeout-minutes: 4
     env:
       QUALIFICATION_ROOT: /tmp/agentic-sandbox-concurrency-${{ github.run_id }}
