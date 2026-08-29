@@ -1,5 +1,9 @@
 name: Runner Maintenance
 
+env:
+  GITEA_RUNNER_VERSION: "3.3.1"
+  GITEA_RUNNER_LINUX_AMD64_SHA256: "71031feb288e53c4c86c06eeb75df9cc94b7ceb1b927b45644d4f9d230c80734"
+
 on:
   workflow_dispatch:
 
@@ -226,6 +230,28 @@ jobs:
     runs-on: titan
     timeout-minutes: 20
     steps:
+      - name: Upgrade Titan to the current Gitea Runner
+        run: |
+          set -euo pipefail
+          version="${GITEA_RUNNER_VERSION}"
+          expected_sha256="${GITEA_RUNNER_LINUX_AMD64_SHA256}"
+          download_url="https://dl.gitea.com/gitea-runner/${version}/gitea-runner-${version}-linux-amd64"
+          staging_file="$(mktemp)"
+          trap 'rm -f "${staging_file}"' EXIT
+
+          curl --fail --location --silent --show-error \
+            --retry 4 --retry-delay 2 \
+            --output "${staging_file}" "${download_url}"
+          printf '%s  %s\n' "${expected_sha256}" "${staging_file}" | sha256sum --check --status
+          chmod 0755 "${staging_file}"
+          "${staging_file}" --version
+
+          current_version="$(gitea-runner --version 2>/dev/null || true)"
+          if [[ "${current_version}" != *"${version}"* ]]; then
+            sudo -n install -o root -g root -m 0755 "${staging_file}" /usr/local/bin/gitea-runner
+          fi
+          /usr/local/bin/gitea-runner --version
+
       - name: Normalize toolchain, storage, and runner mapping
         run: |
           set -euo pipefail
