@@ -45,8 +45,9 @@ jobs:
           for path in /build/agentic-sandbox/base-images /build/agentic-sandbox/vms; do
             bounded_path_probe "$path"
           done
-          ps -eo pid,user,args | grep '[a]ct_runner' || true
-          runner_pid="$(pgrep -f '/usr/local/bin/act_runner daemon --config /srv/gitea-runner-host/config.yaml' | head -n1 || true)"
+          command -v gitea-runner && gitea-runner --version
+          ps -eo pid,user,args | grep '[g]itea-runner' || true
+          runner_pid="$(pgrep -f '/usr/local/bin/gitea-runner daemon --config ' | head -n1 || true)"
           if test -n "$runner_pid"; then
             ps -o pid,ppid,user,lstart,args -p "$runner_pid"
             cat "/proc/${runner_pid}/cgroup" || true
@@ -57,10 +58,10 @@ jobs:
           if test -r /srv/gitea-runner-host/config.yaml; then
             sed -n '/^[[:space:]]*labels:/,/^[^[:space:]]/p' /srv/gitea-runner-host/config.yaml
           fi
-          systemctl --user list-unit-files --type=service 2>/dev/null | grep -Ei 'gitea|act.runner' || true
-          sudo -n systemctl list-unit-files --type=service 2>/dev/null | grep -Ei 'gitea|act.runner' || true
-          systemctl --user --no-pager --full status act_runner 2>/dev/null || true
-          sudo -n systemctl --no-pager --full status act_runner 2>/dev/null || true
+          systemctl --user list-unit-files --type=service 2>/dev/null | grep -Ei 'gitea|runner' || true
+          sudo -n systemctl list-unit-files --type=service 2>/dev/null | grep -Ei 'gitea|runner' || true
+          systemctl --user --no-pager --full status gitea-runner 2>/dev/null || true
+          sudo -n systemctl --no-pager --full status gitea-act-runner-build01 2>/dev/null || true
 
   audit-titan:
     name: Audit Titan toolchain and host contract
@@ -103,8 +104,9 @@ jobs:
           for path in /build/agentic-sandbox/base-images /build/agentic-sandbox/vms; do
             bounded_path_probe "$path"
           done
-          ps -eo pid,user,args | grep '[a]ct_runner' || true
-          runner_pid="$(pgrep -f '/usr/local/bin/act_runner daemon --config /srv/gitea-runner-host/config.yaml' | head -n1 || true)"
+          command -v gitea-runner && gitea-runner --version
+          ps -eo pid,user,args | grep '[g]itea-runner' || true
+          runner_pid="$(pgrep -f '/usr/local/bin/gitea-runner daemon --config ' | head -n1 || true)"
           if test -n "$runner_pid"; then
             ps -o pid,ppid,user,lstart,args -p "$runner_pid"
             cat "/proc/${runner_pid}/cgroup" || true
@@ -115,10 +117,10 @@ jobs:
           if test -r /srv/gitea-runner-host/config.yaml; then
             sed -n '/^[[:space:]]*labels:/,/^[^[:space:]]/p' /srv/gitea-runner-host/config.yaml
           fi
-          systemctl --user list-unit-files --type=service 2>/dev/null | grep -Ei 'gitea|act.runner' || true
-          sudo -n systemctl list-unit-files --type=service 2>/dev/null | grep -Ei 'gitea|act.runner' || true
-          systemctl --user --no-pager --full status act_runner 2>/dev/null || true
-          sudo -n systemctl --no-pager --full status act_runner 2>/dev/null || true
+          systemctl --user list-unit-files --type=service 2>/dev/null | grep -Ei 'gitea|runner' || true
+          sudo -n systemctl list-unit-files --type=service 2>/dev/null | grep -Ei 'gitea|runner' || true
+          systemctl --user --no-pager --full status gitea-runner 2>/dev/null || true
+          sudo -n systemctl --no-pager --full status gitea-runner-host 2>/dev/null || true
 
   configure-build01:
     name: Normalize build01 stable Rust toolchain

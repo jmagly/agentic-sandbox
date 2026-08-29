@@ -13,7 +13,7 @@ Environment=HOME=/home/deploy
 Environment=XDG_CACHE_HOME=/build/gitea-runner/data/xdg-cache
 Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 Environment=LIBVIRT_DEFAULT_URI=qemu:///system
-ExecStart=/usr/local/bin/act_runner daemon --config /opt/gitea-runner/config.yaml
+ExecStart=/usr/local/bin/gitea-runner daemon --config /opt/gitea-runner/config.yaml
 Restart=always
 RestartSec=5s
 TimeoutStopSec=5min

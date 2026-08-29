@@ -93,7 +93,7 @@ test("Celld qualification uploads authoritative evidence without claiming operat
   assert.match(workflow, /CELLD_QUALIFICATION_EXPECTED_COUNT/);
   assert.match(workflow, /--id "\$\{selected_ids\}"/);
   assert.doesNotMatch(workflow, /--trigger automated/);
-  assert.match(workflow, /actions\/upload-artifact@c6a366c94c3e0affe28c06c8df20a878f24da3cf/);
+  assert.match(workflow, /actions\/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02/);
   assert.match(workflow, /sha256sum --check manifest\.sha256/);
   assert.match(workflow, /Report bounded qualification verdict/);
   assert.match(workflow, /stdout_tail: \.command\.stdout_tail/);

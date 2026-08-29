@@ -59,10 +59,8 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
 
       - name: Checkout conformance harness
-        # act_runner v0.6.1 races its shared action cache when the same host
-        # job declares actions/checkout twice. The conformance repository is
-        # public, so a shallow clone avoids that runner bug without adding a
-        # credential path.
+        # The conformance repository is public. Keep this as a shallow clone
+        # to avoid a second action invocation and an unnecessary credential path.
         run: |
           set -euo pipefail
           git clone \
@@ -319,7 +317,7 @@ jobs:
         # `GHESNotSupportedError`. Use @v3 until Gitea ships v4 support.
         if: always()
         continue-on-error: true
-        uses: actions/upload-artifact@c6a366c94c3e0affe28c06c8df20a878f24da3cf  # v3.2.2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: conformance-reports
           path: |

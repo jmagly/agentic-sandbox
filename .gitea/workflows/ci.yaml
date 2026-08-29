@@ -250,9 +250,8 @@ jobs:
           fi
 
       - name: Build agent client image
-        # act_runner v0.6.1 races its action cache when one host job invokes
-        # the same action twice. Buildx was configured by the pinned setup
-        # action above, so invoke it directly for this second image.
+        # Keep the second image on the already-configured Buildx instance to
+        # avoid duplicate action setup and preserve the established build path.
         env:
           PUBLISH_IMAGE: ${{ steps.pub.outputs.publish }}
           RELEASE_TAG: ${{ steps.pub.outputs.tag_name }}
@@ -327,7 +326,7 @@ jobs:
 
       - name: Upload multi-platform manifest evidence
         if: steps.pub.outputs.publish == 'true'
-        uses: actions/upload-artifact@c6a366c94c3e0affe28c06c8df20a878f24da3cf  # v3.2.2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: multiarch-agent-images-${{ github.sha }}
           path: multiarch-agent-images.jsonl
@@ -370,10 +369,9 @@ jobs:
       LIBVIRT_DEFAULT_URI: qemu:///system
       AGENTSHARE_ROOT: /var/tmp/agentic-ci-agentshare-${{ github.run_id }}-${{ matrix.vm_slot }}/mount
       AGENTSHARE_BACKING_FILE: /var/tmp/agentic-ci-agentshare-${{ github.run_id }}-${{ matrix.vm_slot }}/agentshare.xfs
-    # NOTE: this Gitea act_runner does NOT enforce job-level timeout-minutes
-    # (run #887's E2E ran ~183m past this 90m cap before failing). Kept for
-    # compliant runners; the *effective* backstop is the shell `timeout`
-    # around `make test-e2e` below. The accepted repo-local titan policy from
+    # Gitea Runner 3 enforces job-level timeout-minutes. Retain the shorter
+    # shell timeout around `make test-e2e` so VM cleanup receives SIGTERM and
+    # a bounded grace period before the runner cancels the whole job. The accepted repo-local titan policy from
     # #363/#367 is serialized E2E, runner preflight evidence, and bounded
     # release build parallelism rather than host-runner label mutation.
     timeout-minutes: 90
@@ -554,22 +552,20 @@ jobs:
           AGENTIC_GRPC_VSOCK_PORT: "8120"
           AIWG_QCOW2_VERIFY_SHA256: "0"
         run: |
-          # Job-level `timeout-minutes` is NOT honored by this Gitea act_runner
-          # (run #887's E2E ran ~183m past a 90m cap before failing). Bound the
-          # E2E lane with a real shell timeout instead. SIGTERM first so make's
+          # Bound the E2E lane below the job timeout. SIGTERM first so make's
           # E2E_CLEANUP_VM trap can tear the VM down, then SIGKILL after grace.
           #
           # Redirect the entire VM orchestration tree to a regular file. QEMU,
           # libvirt, cloud-hypervisor, or a short-lived helper may outlive the
           # command that spawned it and retain inherited stdout/stderr. If that
-          # descriptor is act_runner's step pipe, the runner waits forever even
+          # descriptor is the runner's step pipe, the runner may wait for EOF
           # after every test passes. A regular file has no pipe EOF dependency;
           # replay it after make returns so the Actions record stays complete.
           # Tune only after recording new shared-runner capacity evidence.
           e2e_log="$(mktemp "${TMPDIR:-/tmp}/agentic-e2e-step.XXXXXX.log")"
           # Give the complete E2E tree its own session/process group. Some VM
           # helpers can survive their direct parent after a successful test;
-          # act_runner tracks those descendants and otherwise holds the job
+          # the runner tracks those descendants and can otherwise hold the job
           # open even though the regular-file log has already replayed. Reap
           # only this run-scoped group after its leader returns.
           setsid timeout --signal=TERM --kill-after=180s 75m make test-e2e \
@@ -629,7 +625,7 @@ jobs:
 
       - name: Upload libvirt restore-latency evidence
         if: matrix.backend == 'libvirt' && always()
-        uses: actions/upload-artifact@c6a366c94c3e0affe28c06c8df20a878f24da3cf  # v3.2.2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: libvirt-restore-latency-${{ github.run_id }}
           path: artifacts/libvirt-restore-latency.json
@@ -720,7 +716,7 @@ jobs:
         # Gitea Actions speaks the GHES artifact API — v4+ is rejected
         # with `GHESNotSupportedError`. Keep v3 until Gitea ships v4.
         continue-on-error: true
-        uses: actions/upload-artifact@c6a366c94c3e0affe28c06c8df20a878f24da3cf  # v3.2.2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: trivy-results
           path: trivy-results.sarif
