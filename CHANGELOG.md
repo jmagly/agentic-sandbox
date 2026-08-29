@@ -8,6 +8,34 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+## [2026.8.6] — 2026-08-29
+
+Patch release completing the Gitea Runner 3 rollout and hardening the protected
+Celld live-qualification and release paths discovered during full CI/CD
+validation.
+
+### Changed
+
+- Upgraded the qualified Linux build runners to Gitea Runner 3.3.1, including
+  checksum-pinned installation, cache service v2, and artifact v4 support.
+- Split branch CI from tag-only release publication so ordinary main builds do
+  not occupy the protected release queue.
+
+### Fixed
+
+- Hardened Celld live qualification across response-loss, recovery, cleanup,
+  private transport, authenticated readiness, migration, and evidence-retention
+  paths.
+- Bounded registry smoke pulls, Docker/BuildKit operations, and resource-stress
+  tests so failed infrastructure terminates with actionable evidence.
+- Corrected the Titan service rollout to replace the active historical
+  `act_runner` executable as well as the canonical `gitea-runner` path.
+
+### Operator notes
+
+- Titan and build01 must report Gitea Runner 3.3.1 before running workflows that
+  use `actions/upload-artifact@v4` or `actions/download-artifact@v4`.
+
 ## [2026.8.5] — 2026-08-23
 
 Patch release adding the protected Celld live-qualification implementation and
@@ -3247,7 +3275,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.8.5...HEAD
+[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.8.6...HEAD
+[2026.8.6]: https://github.com/jmagly/agentic-sandbox/compare/v2026.8.5...v2026.8.6
 [2026.8.5]: https://github.com/jmagly/agentic-sandbox/compare/v2026.8.4...v2026.8.5
 [2026.8.4]: https://github.com/jmagly/agentic-sandbox/compare/v2026.8.3...v2026.8.4
 [2026.8.3]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.20...v2026.8.3
