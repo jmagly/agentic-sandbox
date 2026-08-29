@@ -33,11 +33,9 @@ jobs:
     name: Run conformance harness against this build
     # The harness uses loopback processes only; no KVM/libvirt substrate.
     runs-on: rust
-    # Serialize with host-runtime.yml because both use host-global process
-    # cleanup and fixed /tmp roots on the host executor.
-    concurrency:
-      group: agentic-sandbox-process-tests
-      cancel-in-progress: false
+    # Each qualified host runner has capacity one. Avoid a cross-workflow
+    # job-level concurrency group: Gitea 1.25 can cancel the newly queued job
+    # rather than serialize it. Fixed /tmp roots remain host-local.
     timeout-minutes: 25
     env:
       CARGO_BUILD_JOBS: "2"

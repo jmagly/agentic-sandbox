@@ -34,11 +34,9 @@ jobs:
     name: Host runtime tier (opt-in supervisor wired)
     # This tier exercises a process-backed host supervisor and requires no VM.
     runs-on: rust
-    # Both process-backed workflows use host-global cleanup (`pkill` and fixed
-    # /tmp roots), so never overlap them on the shared runner pool.
-    concurrency:
-      group: agentic-sandbox-process-tests
-      cancel-in-progress: false
+    # Each qualified host runner has capacity one. Avoid a cross-workflow
+    # job-level concurrency group: Gitea 1.25 can cancel the newly queued job
+    # rather than serialize it. Fixed /tmp roots remain host-local.
     timeout-minutes: 25
     env:
       CARGO_BUILD_JOBS: "2"
