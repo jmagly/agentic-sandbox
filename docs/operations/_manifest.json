@@ -4,6 +4,7 @@
   "collapsed": false,
   "order": [
     "overview",
+    "a2a-push-callbacks",
     "gitea-actions-runner-diagnostics",
     "macos-host-runtime-keychain"
   ]

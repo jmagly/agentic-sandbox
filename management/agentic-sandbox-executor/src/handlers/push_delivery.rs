@@ -28,8 +28,8 @@
 //!
 //! ## Retry policy
 //!
-//! Exponential backoff: 1, 2, 4, 8, 16, 32, 64 seconds (7 attempts total).
-//! After 7 failed attempts the delivery is dropped and a `tracing::warn!` is
+//! Exponential backoff: 1, 2, 4 seconds (3 attempts total).
+//! After 3 failed attempts the delivery is dropped and a `tracing::warn!` is
 //! emitted with the task_id, config_id, and the last status code observed.
 //! Future work (#211 follow-up) may persist a dead-letter row for replay.
 //!
@@ -50,12 +50,16 @@ use serde_json::{json, Value};
 use sha2::Sha256;
 use tokio::sync::mpsc;
 
+use crate::handlers::push_callback_policy::{
+    build_pinned_client, resolve_public_destination, validate_callback_url,
+    MAX_CONCURRENT_DELIVERIES, MAX_CONFIGS_PER_TASK,
+};
 use crate::store::task_store::{PushNotificationConfigRow, TaskStore};
 
 type HmacSha256 = Hmac<Sha256>;
 
 /// Maximum number of delivery attempts before giving up.
-const MAX_ATTEMPTS: u32 = 7;
+const MAX_ATTEMPTS: u32 = 3;
 
 /// Backoff schedule in seconds, one entry per attempt index (0-based).
 /// `delay_for_attempt(n)` is `BACKOFF_SECS[n]` clamped to the last entry.
@@ -64,9 +68,9 @@ const MAX_ATTEMPTS: u32 = 7;
 /// retry tests don't wall-clock the suite. Production (non-test) builds
 /// use the real exponential schedule (1, 2, 4, 8, 16, 32, 64s).
 #[cfg(not(test))]
-const BACKOFF_SECS: &[u64] = &[1, 2, 4, 8, 16, 32, 64];
+const BACKOFF_SECS: &[u64] = &[1, 2, 4];
 #[cfg(test)]
-const BACKOFF_SECS: &[u64] = &[0, 0, 0, 0, 0, 0, 0];
+const BACKOFF_SECS: &[u64] = &[0, 0, 0];
 
 /// Channel capacity for the delivery mpsc.
 const CHANNEL_CAPACITY: usize = 1024;
@@ -84,21 +88,33 @@ pub struct DeliveryEvent {
 /// Cheaply cloneable; the inner [`reqwest::Client`] holds a connection pool.
 pub struct PushDelivery {
     store: Arc<TaskStore>,
-    http: reqwest::Client,
+    // Production always resolves and pins a fresh client per attempt. Tests
+    // may inject a redirect-disabled local client for wiremock transport tests.
+    test_http: Option<reqwest::Client>,
 }
 
 impl PushDelivery {
     /// Build a delivery worker bound to the given store.
     pub fn new(store: Arc<TaskStore>) -> Self {
-        // `connect_timeout` keeps a hung subscriber from blocking the worker
-        // for the whole 30s default; per-attempt overall timeout caps a slow
-        // body read.
+        Self {
+            store,
+            test_http: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn new_for_test(store: Arc<TaskStore>) -> Self {
         let http = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(15))
+            .pool_max_idle_per_host(0)
             .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
-        Self { store, http }
+            .expect("test HTTP client");
+        Self {
+            store,
+            test_http: Some(http),
+        }
     }
 
     /// Spawn the worker on the current Tokio runtime and return the sender
@@ -116,7 +132,7 @@ impl PushDelivery {
 
     /// Look up every active config for `ev.task_id` and dispatch in parallel.
     async fn deliver_event(&self, ev: DeliveryEvent) {
-        let configs = match self.store.list_push_configs(&ev.task_id) {
+        let mut configs = match self.store.list_push_configs(&ev.task_id) {
             Ok(rows) => rows,
             Err(e) => {
                 tracing::warn!(task_id = %ev.task_id, error = %e, "push: list_push_configs failed");
@@ -126,6 +142,15 @@ impl PushDelivery {
         if configs.is_empty() {
             return;
         }
+        if configs.len() > MAX_CONFIGS_PER_TASK {
+            tracing::warn!(
+                task_id = %ev.task_id,
+                configured = configs.len(),
+                limit = MAX_CONFIGS_PER_TASK,
+                "push: legacy callback count exceeds policy; truncating delivery set"
+            );
+            configs.truncate(MAX_CONFIGS_PER_TASK);
+        }
         let body = build_body(&ev);
         let body_bytes = match serde_json::to_vec(&body) {
             Ok(b) => b,
@@ -134,17 +159,19 @@ impl PushDelivery {
                 return;
             }
         };
-        let mut joins = Vec::with_capacity(configs.len());
-        for cfg in configs {
-            let http = self.http.clone();
-            let body_bytes = body_bytes.clone();
-            let task_id = ev.task_id.clone();
-            joins.push(tokio::spawn(async move {
-                deliver_to_subscriber(&http, &cfg, &task_id, &body_bytes).await;
-            }));
-        }
-        for j in joins {
-            let _ = j.await;
+        for batch in configs.chunks(MAX_CONCURRENT_DELIVERIES) {
+            let mut joins = Vec::with_capacity(batch.len());
+            for cfg in batch.iter().cloned() {
+                let test_http = self.test_http.clone();
+                let body_bytes = body_bytes.clone();
+                let task_id = ev.task_id.clone();
+                joins.push(tokio::spawn(async move {
+                    deliver_to_subscriber(test_http, &cfg, &task_id, &body_bytes).await;
+                }));
+            }
+            for join in joins {
+                let _ = join.await;
+            }
         }
     }
 
@@ -225,19 +252,71 @@ fn decode_auth(auth: &Option<Value>) -> (String, Option<String>) {
 /// - non-2xx or transport error → retry up to `MAX_ATTEMPTS - 1` more times.
 /// - After all attempts fail → log a warning and return.
 async fn deliver_to_subscriber(
-    http: &reqwest::Client,
+    test_http: Option<reqwest::Client>,
     cfg: &PushNotificationConfigRow,
     task_id: &str,
     body: &[u8],
 ) {
     let (scheme, secret) = decode_auth(&cfg.auth_json);
+    let target = if test_http.is_none() {
+        match validate_callback_url(&cfg.url) {
+            Ok(target) => Some(target),
+            Err(reason) => {
+                tracing::warn!(
+                    task_id = %task_id,
+                    config_id = %cfg.config_id,
+                    policy = %reason,
+                    "push: stored callback rejected by destination policy"
+                );
+                return;
+            }
+        }
+    } else {
+        None
+    };
 
     let mut last_status: Option<u16> = None;
 
     for attempt in 0..MAX_ATTEMPTS {
+        let http = match &test_http {
+            Some(client) => client.clone(),
+            None => {
+                let target = target.as_ref().expect("production target validated");
+                let address = match resolve_public_destination(target, attempt).await {
+                    Ok(address) => address,
+                    Err(reason) => {
+                        tracing::warn!(
+                            task_id = %task_id,
+                            config_id = %cfg.config_id,
+                            attempt,
+                            policy = %reason,
+                            "push: callback resolution rejected"
+                        );
+                        return;
+                    }
+                };
+                match build_pinned_client(target, address) {
+                    Ok(client) => client,
+                    Err(reason) => {
+                        tracing::warn!(
+                            task_id = %task_id,
+                            config_id = %cfg.config_id,
+                            attempt,
+                            policy = %reason,
+                            "push: callback client rejected"
+                        );
+                        return;
+                    }
+                }
+            }
+        };
+        let request_url = target
+            .as_ref()
+            .map(|target| target.url().as_str())
+            .unwrap_or(cfg.url.as_str());
         let ts = chrono::Utc::now().timestamp();
         let mut req = http
-            .post(&cfg.url)
+            .post(request_url)
             .header("content-type", "application/json")
             .body(body.to_vec());
 
@@ -274,11 +353,20 @@ async fn deliver_to_subscriber(
                 );
             }
             Err(e) => {
+                let error_kind = if e.is_timeout() {
+                    "timeout"
+                } else if e.is_connect() {
+                    "connect"
+                } else if e.is_request() {
+                    "request"
+                } else {
+                    "transport"
+                };
                 tracing::debug!(
                     task_id = %task_id,
                     config_id = %cfg.config_id,
                     attempt = attempt,
-                    error = %e,
+                    error_kind,
                     "push: transport error, will retry"
                 );
             }
@@ -289,7 +377,7 @@ async fn deliver_to_subscriber(
             let secs = BACKOFF_SECS
                 .get(attempt as usize)
                 .copied()
-                .unwrap_or(*BACKOFF_SECS.last().unwrap_or(&64));
+                .unwrap_or(*BACKOFF_SECS.last().unwrap_or(&4));
             tokio::time::sleep(Duration::from_secs(secs)).await;
         }
     }
@@ -388,7 +476,7 @@ mod tests {
             None,
         );
 
-        let pd = PushDelivery::new(store);
+        let pd = PushDelivery::new_for_test(store);
         pd.deliver_one(DeliveryEvent {
             task_id: "t-1".to_string(),
             status_event: serde_json::json!({"state": "working"}),
@@ -403,7 +491,7 @@ mod tests {
 
     #[tokio::test]
     async fn retry_on_5xx() {
-        // 500, 500, 500, 200 → 4 attempts.
+        // 500, 500, 200 → 3 attempts.
         //
         // wiremock matches mocks by priority then by insertion order. To
         // get a deterministic 500-500-500-200 sequence we use `up_to_n_times`
@@ -413,7 +501,7 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/hook"))
             .respond_with(ResponseTemplate::new(500))
-            .up_to_n_times(3)
+            .up_to_n_times(2)
             .with_priority(1)
             .mount(&server)
             .await;
@@ -435,7 +523,7 @@ mod tests {
         );
 
         // In test builds BACKOFF_SECS is zeroed so this completes promptly.
-        let pd = PushDelivery::new(store);
+        let pd = PushDelivery::new_for_test(store);
         pd.deliver_one(DeliveryEvent {
             task_id: "t-1".to_string(),
             status_event: serde_json::json!({"state": "working"}),
@@ -445,13 +533,13 @@ mod tests {
         let received = server.received_requests().await.unwrap();
         assert_eq!(
             received.len(),
-            4,
-            "should retry 3 times after failures, then succeed on 4th"
+            3,
+            "should retry twice after failures, then succeed on the third attempt"
         );
     }
 
     #[tokio::test]
-    async fn give_up_after_7_attempts() {
+    async fn give_up_after_3_attempts() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/hook"))
@@ -469,7 +557,7 @@ mod tests {
             None,
         );
 
-        let pd = PushDelivery::new(store);
+        let pd = PushDelivery::new_for_test(store);
         pd.deliver_one(DeliveryEvent {
             task_id: "t-1".to_string(),
             status_event: serde_json::json!({"state": "working"}),
@@ -479,7 +567,7 @@ mod tests {
         let received = server.received_requests().await.unwrap();
         assert_eq!(
             received.len(),
-            7,
+            3,
             "should attempt MAX_ATTEMPTS times before giving up"
         );
     }
@@ -503,7 +591,7 @@ mod tests {
             None,
         );
 
-        let pd = PushDelivery::new(store);
+        let pd = PushDelivery::new_for_test(store);
         pd.deliver_one(DeliveryEvent {
             task_id: "t-1".to_string(),
             status_event: serde_json::json!({"state": "working", "timestamp": "2026-01-01T00:00:00Z"}),
@@ -546,7 +634,7 @@ mod tests {
             Some(serde_json::json!({"type": "hmac", "secret": "shh"})),
         );
 
-        let pd = PushDelivery::new(store);
+        let pd = PushDelivery::new_for_test(store);
         pd.deliver_one(DeliveryEvent {
             task_id: "t-1".to_string(),
             status_event: serde_json::json!({"state": "working"}),
@@ -564,5 +652,46 @@ mod tests {
             "header must start with t=, got {val}"
         );
         assert!(val.contains(",v1="), "header must contain ,v1=, got {val}");
+    }
+
+    #[tokio::test]
+    async fn redirects_are_not_followed() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/hook"))
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .insert_header("location", format!("{}/internal", server.uri())),
+            )
+            .expect(3)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/internal"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let store = Arc::new(TaskStore::open_in_memory().unwrap());
+        seed_task(&store, "t-redirect");
+        seed_config(
+            &store,
+            "c-redirect",
+            "t-redirect",
+            &format!("{}/hook", server.uri()),
+            None,
+        );
+
+        PushDelivery::new_for_test(store)
+            .deliver_one(DeliveryEvent {
+                task_id: "t-redirect".to_string(),
+                status_event: serde_json::json!({"state": "working"}),
+            })
+            .await;
+
+        let received = server.received_requests().await.unwrap();
+        assert_eq!(received.len(), 3);
+        assert!(received.iter().all(|request| request.url.path() == "/hook"));
     }
 }

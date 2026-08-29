@@ -27,6 +27,8 @@ to deploy, monitor, troubleshoot, and harden a sandbox fleet.
   operator unblock.
 - [Telemetry](../telemetry.md) - metrics and textfile collector pipeline.
 - [Transport Audit](../transport-audit.md) - operator-facing event/log streams.
+- [A2A Push Callback Security](a2a-push-callbacks.md) - public-HTTPS
+  destination enforcement and deployment egress controls.
 - [Gitea Actions Runner Diagnostics](gitea-actions-runner-diagnostics.md) -
   metadata-only inventory, token exposure response, and safe rotation evidence.
 - [macOS Host Runtime and Keychain](macos-host-runtime-keychain.md) - opt-in

@@ -250,6 +250,14 @@ pub struct PushNotificationConfigRow {
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PushConfigWriteOutcome {
+    Created,
+    Updated,
+    Conflict,
+    LimitReached,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IdempotencyEntry {
     pub message_id: String,
@@ -691,6 +699,74 @@ impl TaskStore {
         )
         .context("put_push_config")?;
         Ok(())
+    }
+
+    /// Create or update a callback config while atomically preserving task
+    /// ownership and the per-task registration limit.
+    pub fn put_push_config_bounded(
+        &self,
+        cfg: &PushNotificationConfigRow,
+        max_per_task: usize,
+    ) -> Result<PushConfigWriteOutcome> {
+        let conn = self.lock();
+        let tx = conn
+            .unchecked_transaction()
+            .context("begin push config tx")?;
+        let existing_task = tx
+            .query_row(
+                "SELECT task_id FROM push_notification_configs WHERE config_id = ?1",
+                params![cfg.config_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .context("inspect push config owner")?;
+
+        let outcome = match existing_task {
+            Some(task_id) if task_id != cfg.task_id => PushConfigWriteOutcome::Conflict,
+            Some(_) => {
+                tx.execute(
+                    "UPDATE push_notification_configs SET url = ?2, auth_json = ?3 \
+                     WHERE config_id = ?1 AND task_id = ?4",
+                    params![
+                        cfg.config_id,
+                        cfg.url,
+                        cfg.auth_json.as_ref().map(json_to_string).transpose()?,
+                        cfg.task_id,
+                    ],
+                )
+                .context("update bounded push config")?;
+                PushConfigWriteOutcome::Updated
+            }
+            None => {
+                let count: i64 = tx
+                    .query_row(
+                        "SELECT COUNT(*) FROM push_notification_configs WHERE task_id = ?1",
+                        params![cfg.task_id],
+                        |row| row.get(0),
+                    )
+                    .context("count bounded push configs")?;
+                if count >= max_per_task as i64 {
+                    PushConfigWriteOutcome::LimitReached
+                } else {
+                    tx.execute(
+                        "INSERT INTO push_notification_configs \
+                         (config_id, task_id, url, auth_json, created_at) \
+                         VALUES (?1, ?2, ?3, ?4, ?5)",
+                        params![
+                            cfg.config_id,
+                            cfg.task_id,
+                            cfg.url,
+                            cfg.auth_json.as_ref().map(json_to_string).transpose()?,
+                            fmt_ts(&cfg.created_at),
+                        ],
+                    )
+                    .context("insert bounded push config")?;
+                    PushConfigWriteOutcome::Created
+                }
+            }
+        };
+        tx.commit().context("commit push config tx")?;
+        Ok(outcome)
     }
 
     pub fn get_push_config(&self, config_id: &str) -> Result<Option<PushNotificationConfigRow>> {
@@ -1482,6 +1558,48 @@ mod tests {
         assert_eq!(listed.len(), 1);
         assert!(s.delete_push_config("c1").unwrap());
         assert!(s.get_push_config("c1").unwrap().is_none());
+    }
+
+    #[test]
+    fn bounded_push_config_write_preserves_owner_and_limit() {
+        let s = TaskStore::open_in_memory().unwrap();
+        s.upsert_task(&task("owner", TaskState::Working, ts(2026, 1, 1)))
+            .unwrap();
+        s.upsert_task(&task("other", TaskState::Working, ts(2026, 1, 1)))
+            .unwrap();
+        let mut cfg = PushNotificationConfigRow {
+            config_id: "bounded".into(),
+            task_id: "owner".into(),
+            url: "https://example.com/first".into(),
+            auth_json: None,
+            created_at: ts(2026, 1, 2),
+        };
+
+        assert_eq!(
+            s.put_push_config_bounded(&cfg, 1).unwrap(),
+            PushConfigWriteOutcome::Created
+        );
+        cfg.url = "https://example.com/updated".into();
+        assert_eq!(
+            s.put_push_config_bounded(&cfg, 1).unwrap(),
+            PushConfigWriteOutcome::Updated
+        );
+
+        let mut second = cfg.clone();
+        second.config_id = "overflow".into();
+        assert_eq!(
+            s.put_push_config_bounded(&second, 1).unwrap(),
+            PushConfigWriteOutcome::LimitReached
+        );
+
+        cfg.task_id = "other".into();
+        assert_eq!(
+            s.put_push_config_bounded(&cfg, 1).unwrap(),
+            PushConfigWriteOutcome::Conflict
+        );
+        let persisted = s.get_push_config("bounded").unwrap().unwrap();
+        assert_eq!(persisted.task_id, "owner");
+        assert_eq!(persisted.url, "https://example.com/updated");
     }
 
     #[test]

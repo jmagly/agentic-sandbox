@@ -31,9 +31,9 @@
 //! - `task.not_found` (404) — the task referenced by `{tid}` does not exist.
 //! - `push.config_not_found` (404) — the config referenced by `{cid}` does
 //!   not exist (or belongs to a different task — see cross-task isolation).
-//! - `push.invalid_url` (400) — the request body is missing `url` or `url`
-//!   is empty. (Scheme validation is permissive in tests; production
-//!   deployments should enforce HTTPS via deployment policy.)
+//! - `push.invalid_url` (400) — the callback is not a canonical public HTTPS
+//!   destination on port 443.
+//! - `push.config_limit` (429) — the task already has 16 callback configs.
 
 use axum::body::Body;
 use axum::extract::{Extension, Path, State};
@@ -45,9 +45,10 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::bindings::rest::{error_response, AppState};
+use crate::handlers::push_callback_policy::{validate_callback_url, MAX_CONFIGS_PER_TASK};
 use crate::instance::InstanceExt;
 use crate::protocol::ProtocolVersion;
-use crate::store::task_store::PushNotificationConfigRow;
+use crate::store::task_store::{PushConfigWriteOutcome, PushNotificationConfigRow};
 
 // ---------- shape helpers ----------
 
@@ -118,7 +119,20 @@ fn parse_create_body(
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
     let url = match url {
-        Some(u) => u,
+        Some(u) => match validate_callback_url(&u) {
+            Ok(target) => target.canonical_url(),
+            Err(reason) => {
+                return Err(error_response(
+                    StatusCode::BAD_REQUEST,
+                    "https://agentic-sandbox.aiwg.io/errors/push-invalid-url",
+                    "Invalid push subscriber URL",
+                    reason.to_string(),
+                    "push.invalid_url",
+                    None,
+                    Some(instance_id),
+                ));
+            }
+        },
         None => {
             return Err(error_response(
                 StatusCode::BAD_REQUEST,
@@ -160,6 +174,46 @@ fn parse_create_body(
     Ok((config_id, url, auth))
 }
 
+fn persist_bounded_config(
+    state: &AppState,
+    instance_id: &str,
+    cfg: &PushNotificationConfigRow,
+) -> Result<(), Response> {
+    match state
+        .store
+        .put_push_config_bounded(cfg, MAX_CONFIGS_PER_TASK)
+    {
+        Ok(PushConfigWriteOutcome::Created | PushConfigWriteOutcome::Updated) => Ok(()),
+        Ok(PushConfigWriteOutcome::Conflict) => Err(error_response(
+            StatusCode::CONFLICT,
+            "https://agentic-sandbox.aiwg.io/errors/push-config-conflict",
+            "Push notification config conflict",
+            "The supplied config id is unavailable",
+            "push.config_conflict",
+            None,
+            Some(instance_id),
+        )),
+        Ok(PushConfigWriteOutcome::LimitReached) => Err(error_response(
+            StatusCode::TOO_MANY_REQUESTS,
+            "https://agentic-sandbox.aiwg.io/errors/push-config-limit",
+            "Push notification config limit reached",
+            format!("A task may register at most {MAX_CONFIGS_PER_TASK} callback configs"),
+            "push.config_limit",
+            None,
+            Some(instance_id),
+        )),
+        Err(error) => Err(error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "https://agentic-sandbox.aiwg.io/errors/internal",
+            "Internal server error",
+            format!("Failed to persist push config: {error}"),
+            "internal.error",
+            None,
+            Some(instance_id),
+        )),
+    }
+}
+
 pub(crate) fn persist_inline_config(
     state: &AppState,
     instance_id: &str,
@@ -167,26 +221,17 @@ pub(crate) fn persist_inline_config(
     body: &Value,
 ) -> Result<(), Response> {
     let (config_id, url, auth_json) = parse_create_body(body, instance_id)?;
-    state
-        .store
-        .put_push_config(&PushNotificationConfigRow {
+    persist_bounded_config(
+        state,
+        instance_id,
+        &PushNotificationConfigRow {
             config_id,
             task_id: task_id.to_string(),
             url,
             auth_json,
             created_at: Utc::now(),
-        })
-        .map_err(|error| {
-            error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "https://agentic-sandbox.aiwg.io/errors/internal",
-                "Internal server error",
-                format!("Failed to persist push config: {error}"),
-                "internal.error",
-                None,
-                Some(instance_id),
-            )
-        })
+        },
+    )
 }
 
 // ---------- handlers ----------
@@ -246,16 +291,8 @@ pub async fn create_config(
         created_at: Utc::now(),
     };
 
-    if let Err(e) = state.store.put_push_config(&cfg) {
-        return error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "https://agentic-sandbox.aiwg.io/errors/internal",
-            "Internal server error",
-            format!("Failed to persist push config: {e}"),
-            "internal.error",
-            None,
-            Some(&instance_id),
-        );
+    if let Err(response) = persist_bounded_config(&state, &instance_id, &cfg) {
+        return response;
     }
 
     let wire = config_to_protocol_wire(&cfg, version);
@@ -642,6 +679,78 @@ mod tests {
         let v = read_body(resp).await;
         let arr = v["configs"].as_array().unwrap();
         assert_eq!(arr.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn create_config_enforces_per_task_limit() {
+        let (reg, store, idem) = mk_state();
+        seed_task(&store, "t-limited");
+        let app = router(reg, store, idem);
+
+        for index in 0..MAX_CONFIGS_PER_TASK {
+            let req = test_request_with_runtime_ext()
+                .method("POST")
+                .uri("/agents/inst-1/v1/tasks/t-limited/pushNotificationConfigs")
+                .header("content-type", "application/json")
+                .body(body_json(serde_json::json!({
+                    "url": format!("https://93.184.216.34/hook/{index}"),
+                })))
+                .unwrap();
+            let response = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(response.status(), StatusCode::CREATED);
+        }
+
+        let req = test_request_with_runtime_ext()
+            .method("POST")
+            .uri("/agents/inst-1/v1/tasks/t-limited/pushNotificationConfigs")
+            .header("content-type", "application/json")
+            .body(body_json(serde_json::json!({
+                "url": "https://93.184.216.34/hook/overflow",
+            })))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(read_body(response).await["code"], "push.config_limit");
+    }
+
+    #[tokio::test]
+    async fn client_supplied_config_id_cannot_cross_task_boundary() {
+        let (reg, store, idem) = mk_state();
+        seed_task(&store, "t-owner");
+        seed_task(&store, "t-attacker");
+        let app = router(reg, store.clone(), idem);
+
+        let create = |task: &str, url: &str| {
+            test_request_with_runtime_ext()
+                .method("POST")
+                .uri(format!(
+                    "/agents/inst-1/v1/tasks/{task}/pushNotificationConfigs"
+                ))
+                .header("content-type", "application/json")
+                .body(body_json(serde_json::json!({
+                    "id": "shared-config-id",
+                    "url": url,
+                })))
+                .unwrap()
+        };
+
+        let response = app
+            .clone()
+            .oneshot(create("t-owner", "https://93.184.216.34/owner"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        let response = app
+            .oneshot(create("t-attacker", "https://93.184.216.34/attacker"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(read_body(response).await["code"], "push.config_conflict");
+
+        let persisted = store.get_push_config("shared-config-id").unwrap().unwrap();
+        assert_eq!(persisted.task_id, "t-owner");
+        assert_eq!(persisted.url, "https://93.184.216.34/owner");
     }
 
     #[tokio::test]
