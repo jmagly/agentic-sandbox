@@ -4,6 +4,7 @@
 #   - npm install -g pin policy (issue #266) — scripts/lint-npm-pins.sh
 #   - workflow uses:/container: pin policy (issue #261) — scripts/lint-ci-pins.sh
 #   - project runner policy (issues #626/#666) — scripts/lint-ci-runner-policy.sh
+#   - A2A SDK update-gate policy (issue #786) — scripts/lint-a2a-dependency-source.sh
 # Policies live in those scripts and the manifests under ci/.
 #
 # Action `uses:` references in this file are SHA-pinned per ci/digests.txt.
@@ -52,3 +53,8 @@ jobs:
         run: |
           set -euo pipefail
           bash scripts/lint-ci-runner-policy.sh
+
+      - name: Verify A2A SDK dependency authority (#786)
+        run: |
+          set -euo pipefail
+          bash scripts/lint-a2a-dependency-source.sh

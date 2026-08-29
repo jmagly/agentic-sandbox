@@ -1,6 +1,6 @@
 //! Transport bindings for the executor.
 //!
-//! - [`rest`]: A2A REST + JSON-RPC over HTTP (#210).
+//! - [`rest`]: version-negotiated A2A HTTP+JSON (#210, #787).
 //! - [`pty_ws`]: PTY-over-WebSocket binding (Wave 4 W4.1).
 //! - [`pty_bridge`]: Source-of-output abstraction for `pty-ws/v1` sessions
 //!   (#237). Lets management swap in a real agent-backed bridge while the

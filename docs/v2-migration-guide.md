@@ -68,6 +68,11 @@ WS frames → SSE-encoded `TaskStatusUpdate` / `TaskArtifactUpdate`).
 
 ## A2A Surface (Surface 2)
 
+> **Version names:** agentic-sandbox v2, the historical `/v1` route alias,
+> local contracts such as `pty-ws/v1`, and upstream A2A 1.0 are independent
+> namespaces. The complete negotiation and codec matrix is documented in
+> [A2A protocol compatibility](a2a-protocol-compatibility.md).
+
 ### AgentCard discovery
 
 Every instance publishes a signed AgentCard at:
@@ -79,8 +84,9 @@ GET https://{host}/agents/{instance_id}/.well-known/agent-card.json
 The card is JCS-canonicalized JSON signed with JWS (Ed25519). It
 declares:
 
-- `name`, `description`, `version`, `protocolVersion`
-- `supportedInterfaces` — explicit list of bindings (REST + `pty-ws/v1`)
+- legacy 0.3 compatibility fields plus product `version`
+- `supportedInterfaces` — explicit binding, protocol version, and URL tuples
+  for A2A 0.3, A2A 1.0, and custom bindings
 - `securitySchemes` — auth schemes accepted by this instance
 - `capabilities` — including which A2A extensions are advertised /
   required / activated
@@ -93,8 +99,11 @@ signing.
 
 ### Core REST operations
 
-All routes are `Content-Type: application/json` unless an extension
-overrides.
+The table below is the A2A 0.3 compatibility surface. Headerless requests use
+these semantics and `application/json`. A2A 1.0 clients select the unprefixed
+routes with `A2A-Version: 1.0`, use `application/a2a+json`, and use colon
+actions such as `/tasks/{tid}:cancel`. The server never treats requested 1.0
+content as 0.3.
 
 | Operation                              | Method | Path                                                                 |
 |----------------------------------------|--------|----------------------------------------------------------------------|

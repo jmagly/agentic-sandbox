@@ -1,0 +1,18 @@
+{
+  "message": {
+    "messageId": "6dbc13b5-bd57-4c2b-b503-24e381b6c8d6",
+    "role": "ROLE_USER",
+    "parts": [
+      { "text": "Analyze the attached inputs.", "mediaType": "text/plain" },
+      { "raw": "aGVsbG8=", "filename": "hello.txt", "mediaType": "text/plain" },
+      { "url": "https://example.test/document.pdf", "filename": "document.pdf", "mediaType": "application/pdf" },
+      { "data": { "priority": 3, "review": true }, "mediaType": "application/json" }
+    ],
+    "extensions": ["https://example.test/extensions/review/v1"],
+    "metadata": { "fixtureSource": "A2A-v1.0.1-ProtoJSON" }
+  },
+  "configuration": {
+    "acceptedOutputModes": ["text/plain", "application/json"],
+    "returnImmediately": true
+  }
+}

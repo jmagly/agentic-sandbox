@@ -73,6 +73,7 @@ mod tests {
             task_id: None,
             message_id: None,
             request_body: &body,
+            protocol_version: "0.3",
         };
         assert!(matches!(ext.pre_request(&ctx), ExtensionOutcome::Continue));
     }
@@ -87,6 +88,7 @@ mod tests {
             task_id: None,
             message_id: None,
             request_body: &body,
+            protocol_version: "0.3",
         };
         assert!(matches!(ext.pre_request(&ctx), ExtensionOutcome::Continue));
     }
@@ -101,6 +103,7 @@ mod tests {
             task_id: None,
             message_id: None,
             request_body: &body,
+            protocol_version: "0.3",
         };
         assert!(matches!(ext.pre_request(&ctx), ExtensionOutcome::Continue));
     }

@@ -1,0 +1,14 @@
+{
+  "schema_version": "agentic-sandbox.a2a-sdk-baseline/v1",
+  "reviewed_at": "2026-08-29",
+  "upstream": {
+    "url": "https://github.com/jmagly/a2a-rs.git",
+    "commit": "ea1014ae34e6deb7b8420d5dfc903d08cf70db99"
+  },
+  "mirror": {
+    "url": "https://git.integrolabs.net/roctinam/a2a-rs.git",
+    "tag": "agentic-sandbox-v2.0.0",
+    "tag_object": "7d946968de7e913b03c699a2675dbc15718689b0",
+    "commit": "ea1014ae34e6deb7b8420d5dfc903d08cf70db99"
+  }
+}

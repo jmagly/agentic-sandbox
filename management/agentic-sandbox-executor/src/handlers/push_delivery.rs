@@ -160,12 +160,24 @@ impl PushDelivery {
     }
 }
 
-/// Build the A2A StreamResponse-shaped delivery body.
+/// Build the A2A v1 StreamResponse-shaped delivery body.
 fn build_body(ev: &DeliveryEvent) -> Value {
-    json!({
-        "task_id": ev.task_id,
-        "status_event": ev.status_event,
-    })
+    let mut update = serde_json::Map::new();
+    update.insert("taskId".to_string(), Value::String(ev.task_id.clone()));
+    if let Some(context_id) = ev.status_event.get("context_id").and_then(Value::as_str) {
+        update.insert(
+            "contextId".to_string(),
+            Value::String(context_id.to_string()),
+        );
+    }
+    let legacy_status = ev
+        .status_event
+        .get("status")
+        .cloned()
+        .unwrap_or_else(|| ev.status_event.clone());
+    let encoded = crate::protocol::encode_v1_response(json!({"status": legacy_status}));
+    update.insert("status".to_string(), encoded["status"].clone());
+    json!({"statusUpdate": Value::Object(update)})
 }
 
 /// HMAC-SHA256 over `<ts>.<body>`, hex-encoded.
@@ -502,9 +514,15 @@ mod tests {
         assert_eq!(received.len(), 1);
         let req = &received[0];
         let body: Value = serde_json::from_slice(&req.body).unwrap();
-        assert_eq!(body["task_id"], "t-1");
-        assert_eq!(body["status_event"]["state"], "working");
-        assert_eq!(body["status_event"]["timestamp"], "2026-01-01T00:00:00Z");
+        assert_eq!(body["statusUpdate"]["taskId"], "t-1");
+        assert_eq!(
+            body["statusUpdate"]["status"]["state"],
+            "TASK_STATE_WORKING"
+        );
+        assert_eq!(
+            body["statusUpdate"]["status"]["timestamp"],
+            "2026-01-01T00:00:00Z"
+        );
     }
 
     #[tokio::test]

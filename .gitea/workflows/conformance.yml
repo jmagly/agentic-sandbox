@@ -1,10 +1,9 @@
-# Run the agentic-sandbox-conformance harness against this build (Wave 5 W5.4, #220).
+# Run independent A2A 0.3 and A2A 1.0 conformance suites against this build.
 #
 # Boots the v2 management server with a tmpfs-backed TaskStore, then runs the
-# harness from roctinam/agentic-sandbox-conformance against an ephemeral
-# loopback port block.
-# and uploads the markdown + JUnit reports as artifacts. Non-zero harness exit
-# blocks merge.
+# The AIWG harness protects the headerless 0.3 compatibility surface. The
+# upstream A2A TCK protects the negotiated 1.0 HTTP+JSON surface. Both target
+# the same ephemeral loopback server and retain their reports as artifacts.
 
 name: Conformance
 
@@ -68,6 +67,24 @@ jobs:
             https://git.integrolabs.net/roctinam/agentic-sandbox-conformance.git \
             conformance-harness
           git -C conformance-harness rev-parse HEAD
+
+      - name: Checkout pinned upstream A2A TCK
+        env:
+          A2A_TCK_REF: 5996b79f9cefa6fc390980e383e358a66fb9e49e
+        run: |
+          set -euo pipefail
+          git init a2a-tck
+          git -C a2a-tck remote add origin https://github.com/a2aproject/a2a-tck.git
+          git -C a2a-tck fetch --depth=1 origin "${A2A_TCK_REF}"
+          git -C a2a-tck checkout --detach FETCH_HEAD
+          test "$(git -C a2a-tck rev-parse HEAD)" = "${A2A_TCK_REF}"
+
+      - name: Install pinned A2A TCK environment
+        run: |
+          set -euo pipefail
+          python3 -m venv .a2a-tck-bootstrap
+          .a2a-tck-bootstrap/bin/pip install --disable-pip-version-check uv==0.8.14
+          .a2a-tck-bootstrap/bin/uv sync --frozen --project a2a-tck
 
       - name: Prepare job-scoped compiler scratch
         run: |
@@ -137,7 +154,7 @@ jobs:
           mkdir -p ../bin
           go build -o ../bin/agentic-sandbox-conformance ./cmd/agentic-sandbox-conformance
 
-      - name: Run conformance against ephemeral server
+      - name: Run independent A2A 0.3 and 1.0 conformance suites
         id: harness
         env:
           SECRETS_DIR: /tmp/conformance-run/secrets
@@ -265,6 +282,16 @@ jobs:
             --report-format markdown,junit \
             --report-out conformance.report.md
 
+          # Upstream v1.0 TCK pinned above. The TCK sends A2A-Version: 1.0,
+          # exercises the unprefixed HTTP+JSON operation paths, and retains
+          # HTML, JUnit, and compatibility reports under a2a-tck/reports.
+          (
+            cd a2a-tck
+            .venv/bin/python run_tck.py \
+              --sut-host "${EXECUTOR_URL}" \
+              --transport http_json
+          )
+
       - name: Run restart durability tier
         env:
           TEST_TOKEN: conformance-test-token
@@ -324,6 +351,7 @@ jobs:
             /tmp/conformance-run/server.log
             conformance.restart-durability.report.md
             conformance.restart-durability.server.log
+            a2a-tck/reports/
             aiwg-fleet-uat/test-results/fleet-sandbox-live.junit.xml
             aiwg-fleet-uat/test-results/fleet-sandbox-live.evidence.json
           if-no-files-found: warn

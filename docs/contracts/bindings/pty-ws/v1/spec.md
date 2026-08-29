@@ -27,7 +27,7 @@ Per the A2A custom-binding specification §5, this binding satisfies:
 
 ### 1.2 Non-conformance / non-goals
 
-- The binding does **NOT** support `PushNotificationConfig` CRUD efficiently. Implementations **MAY** accept those operations but **SHOULD** advertise REST/JSON-RPC as the preferred transport for control-plane operations. See §10.
+- The binding does **NOT** support `PushNotificationConfig` CRUD efficiently. Implementations **MAY** accept those operations but **SHOULD** advertise HTTP+JSON as the preferred transport for control-plane operations. See §10.
 - The binding is scoped to **one session per connection**. Cross-session multiplexing on a single WebSocket is **NOT** supported in v1; clients open one WS per `(instance_id, session_id)`.
 
 ---
@@ -100,7 +100,7 @@ Every frame sent on this binding **MUST** match the following envelope:
 | `sequence`           | integer  | server-only | Monotonic per-session frame counter assigned by the server on every server→client frame. Clients **MUST NOT** set `sequence` on outbound frames. See §8 (replay). |
 | `replay_from`        | integer  | optional | Client-only. Set on the first `SubscribeToTask` or extension `join_session` after a reconnect to request frames since `sequence`. See §8. |
 | `service_parameters` | object   | optional | A2A service parameters (trace context, auth hints). Present on the **first** client frame; cached by the server for the lifetime of the connection. |
-| `extensions`         | string[] | optional | A2A-Extensions activation list. Equivalent to the `A2A-Extensions` HTTP header on REST/JSON-RPC bindings. Sent on the first client frame. |
+| `extensions`         | string[] | optional | A2A-Extensions activation list. Equivalent to the `A2A-Extensions` header on the HTTP+JSON binding. Sent on the first client frame. |
 | `payload`            | object   | yes      | Operation-specific body. Schema varies by `op`; see §4 and `frames.schema.json`. |
 
 The full envelope schema is published as [`frames.schema.json`](./frames.schema.json) (JSON Schema 2020-12).
@@ -209,7 +209,7 @@ Response:
 { "op": "ListTasks.Response", "id": "...", "payload": { "tasks": [<a2a.Task>], "next_page_token": "..." } }
 ```
 
-Implementations **MAY** scope `ListTasks` results to the current session only; this is a documented binding-level deviation from the A2A core (which scopes to the agent). Clients that need full agent-scoped listing **SHOULD** use the REST/JSON-RPC binding. The deviation **MUST** be advertised in the AgentCard `bindings[].notes` field.
+Implementations **MAY** scope `ListTasks` results to the current session only; this is a documented binding-level deviation from the A2A core (which scopes to the agent). Clients that need full agent-scoped listing **SHOULD** use the HTTP+JSON binding. The deviation **MUST** be documented by the custom binding specification.
 
 ### 4.5 `CancelTask`
 
@@ -253,7 +253,7 @@ Server response: `{ "op": "Unsubscribe.Response", "id": "..." }`.
 
 ### 4.7 `PushNotificationConfig` (degraded)
 
-Implementations **MAY** support `SetTaskPushNotificationConfig`, `GetTaskPushNotificationConfig`, `ListTaskPushNotificationConfig`, and `DeleteTaskPushNotificationConfig` as request/response frames mirroring the A2A core shapes. If unsupported, servers **MUST** respond with the `UNSUPPORTED_OPERATION` error (§6) and clients **MUST** fall back to REST/JSON-RPC for these operations.
+Implementations **MAY** support `SetTaskPushNotificationConfig`, `GetTaskPushNotificationConfig`, `ListTaskPushNotificationConfig`, and `DeleteTaskPushNotificationConfig` as request/response frames mirroring the A2A core shapes. If unsupported, servers **MUST** respond with the `UNSUPPORTED_OPERATION` error (§6) and clients **MUST** fall back to HTTP+JSON for these operations.
 
 ---
 
@@ -421,7 +421,7 @@ Codes in the `4400`–`4499` range are application-defined per RFC 6455 §7.4.2.
 
 This binding inherits the agent's A2A `securitySchemes`. Supported schemes:
 
-1. **Bearer token** — `Authorization: Bearer <token>` HTTP header on the WebSocket upgrade request. **REQUIRED** for production. Tokens **MUST** be validated against the same identity provider as the agent's REST/JSON-RPC bindings.
+1. **Bearer token** — `Authorization: Bearer <token>` HTTP header on the WebSocket upgrade request. **REQUIRED** for production. Tokens **MUST** be validated against the same identity provider as the agent's HTTP+JSON binding.
 2. **mTLS** — client certificate validated during the TLS handshake of `wss://`. Agents that publish mTLS in `securitySchemes` **MUST** enforce certificate identity claims as the caller principal.
 3. **Subprotocol-embedded token** — for browser clients that cannot set `Authorization` headers, the bearer token **MAY** be passed as `Sec-WebSocket-Protocol: pty-ws.v1, bearer.<base64url-token>`. Servers **MUST** strip the bearer half before echoing the subprotocol.
 
@@ -502,13 +502,11 @@ Agents that support this binding **MUST** declare it in their AgentCard:
 
 ```json
 {
-  "bindings": [
+  "supportedInterfaces": [
     {
-      "uri": "https://agentic-sandbox.aiwg.io/bindings/pty-ws/v1",
-      "endpoint": "wss://host.example/agents/inst-42/sessions/{session_id}/attach",
-      "preference": "secondary",
-      "operations": ["SendMessage", "SendStreamingMessage", "GetTask", "ListTasks", "CancelTask", "SubscribeToTask"],
-      "notes": "Optimal for interactive PTY attach; control-plane operations preferred via REST."
+      "url": "wss://host.example/agents/inst-42/sessions/{session_id}/attach",
+      "protocolBinding": "https://agentic-sandbox.aiwg.io/bindings/pty-ws/v1",
+      "protocolVersion": "1.0"
     }
   ],
   "capabilities": {
@@ -522,7 +520,11 @@ Agents that support this binding **MUST** declare it in their AgentCard:
 }
 ```
 
-`preference: "secondary"` signals that clients **SHOULD** prefer REST/JSON-RPC for `ListTasks`, `PushNotificationConfig`, and other control-plane operations, reserving `pty-ws/v1` for actual session attach.
+The custom binding URI suffix `/v1` versions this WebSocket contract; it is not
+the upstream A2A version selector. `protocolVersion: "1.0"` declares the A2A
+core model carried by the binding. Clients **SHOULD** prefer the AgentCard's
+HTTP+JSON interface for `ListTasks`, push configuration, and other control-plane
+operations, reserving `pty-ws/v1` for interactive session attach.
 
 ---
 

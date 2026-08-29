@@ -14,7 +14,7 @@
 use std::convert::Infallible;
 
 use async_stream::stream;
-use axum::extract::{Path, State};
+use axum::extract::{Extension, Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Response};
@@ -26,6 +26,7 @@ use uuid::Uuid;
 
 use crate::bindings::rest::{error_response, AppState};
 use crate::instance::InstanceExt;
+use crate::protocol::{encode_v1_response, ProtocolVersion};
 use crate::store::task_store::{TaskRow, TaskState};
 
 use super::task_row_to_a2a;
@@ -35,6 +36,7 @@ pub async fn handler(
     Path((instance_id,)): Path<(String,)>,
     State(state): State<AppState>,
     InstanceExt(_ctx): InstanceExt,
+    Extension(version): Extension<ProtocolVersion>,
     _headers: HeaderMap,
     body: Option<Json<Value>>,
 ) -> Response {
@@ -94,7 +96,10 @@ pub async fn handler(
         );
     }
 
-    let task_json = task_row_to_a2a(&row);
+    let task_json = match version {
+        ProtocolVersion::V0_3 => task_row_to_a2a(&row),
+        ProtocolVersion::V1_0 => json!({"task": encode_v1_response(task_row_to_a2a(&row))}),
+    };
     let stream = stub_stream(task_json);
     Sse::new(stream).into_response()
 }

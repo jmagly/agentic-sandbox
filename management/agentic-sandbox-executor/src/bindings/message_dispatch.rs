@@ -15,6 +15,8 @@
 //! forwarding work to the runtime.
 
 use async_trait::async_trait;
+use chrono::Utc;
+use serde_json::json;
 use serde_json::Value;
 use std::sync::Arc;
 use thiserror::Error;
@@ -140,6 +142,153 @@ impl MessageDispatch for AcceptingMessageDispatch {
 /// Convenience constructor for the test-only accepting dispatch.
 pub fn accepting() -> Arc<dyn MessageDispatch> {
     Arc::new(AcceptingMessageDispatch)
+}
+
+/// Test-only official-TCK scenario dispatcher.
+///
+/// The upstream TCK specifies message-id prefixes as in-band triggers for its
+/// synthetic SUT. This implementation is available only by explicit wiring
+/// from `AIWG_CONFORMANCE_MODE`; production continues to use runtime dispatch.
+pub struct ConformanceMessageDispatch {
+    store: Arc<crate::store::task_store::TaskStore>,
+}
+
+impl ConformanceMessageDispatch {
+    pub fn new(store: Arc<crate::store::task_store::TaskStore>) -> Self {
+        Self { store }
+    }
+}
+
+#[async_trait]
+impl MessageDispatch for ConformanceMessageDispatch {
+    async fn dispatch(
+        &self,
+        instance: &InstanceContext,
+        task_id: &str,
+        body: &Value,
+    ) -> Result<DispatchOutcome, DispatchError> {
+        use crate::store::task_store::TaskState;
+
+        let message_id = body
+            .get("message")
+            .and_then(|message| message.get("messageId"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let mut row = self
+            .store
+            .get_task_for_instance(&instance.instance_id, task_id)
+            .map_err(|error| DispatchError::DispatchFailed(error.to_string()))?
+            .ok_or_else(|| {
+                DispatchError::DispatchFailed("task disappeared before dispatch".into())
+            })?;
+        let now = Utc::now();
+
+        if message_id.starts_with("tck-reject-task") {
+            row.state = TaskState::Rejected;
+            row.status_json = json!({"state": "rejected", "timestamp": now.to_rfc3339()});
+            row.updated_at = now;
+            row.terminal_at = Some(now);
+            self.store
+                .upsert_task(&row)
+                .map_err(|error| DispatchError::DispatchFailed(error.to_string()))?;
+            return Ok(DispatchOutcome::Accepted);
+        }
+
+        let next_state = if message_id.starts_with("tck-input-required") {
+            Some(TaskState::InputRequired)
+        } else if message_id.starts_with("tck-complete-task")
+            || message_id.starts_with("tck-artifact-")
+            || message_id.starts_with("tck-message-response")
+        {
+            Some(TaskState::Completed)
+        } else {
+            None
+        };
+        let Some(next_state) = next_state else {
+            return Ok(DispatchOutcome::Accepted);
+        };
+
+        row.state = next_state;
+        row.status_json = json!({
+            "state": next_state.as_str(),
+            "timestamp": now.to_rfc3339(),
+            "message": {
+                "messageId": format!("tck-agent-{task_id}"),
+                "taskId": task_id,
+                "contextId": row.context_id,
+                "role": "agent",
+                "parts": [{"kind": "text", "text": "Hello from TCK"}]
+            }
+        });
+        row.updated_at = now;
+        row.terminal_at = next_state.is_terminal().then_some(now);
+
+        let root = row.metadata_json.get_or_insert_with(|| json!({}));
+        let root = root.as_object_mut().ok_or_else(|| {
+            DispatchError::DispatchFailed("task metadata is not an object".into())
+        })?;
+        let internal = root.entry("_a2a").or_insert_with(|| json!({}));
+        let internal = internal.as_object_mut().ok_or_else(|| {
+            DispatchError::DispatchFailed("internal task metadata is not an object".into())
+        })?;
+
+        let artifact = if message_id.starts_with("tck-artifact-file-url") {
+            Some(json!({
+                "artifactId": format!("artifact-{task_id}"),
+                "name": "output.txt",
+                "parts": [{
+                    "kind": "file",
+                    "file": {"uri": "https://example.com/output.txt", "name": "output.txt", "mimeType": "text/plain"}
+                }]
+            }))
+        } else if message_id.starts_with("tck-artifact-file") {
+            Some(json!({
+                "artifactId": format!("artifact-{task_id}"),
+                "name": "output.txt",
+                "parts": [{
+                    "kind": "file",
+                    "file": {"bytes": "R2VuZXJhdGVkIGZpbGUgY29udGVudA==", "name": "output.txt", "mimeType": "text/plain"}
+                }]
+            }))
+        } else if message_id.starts_with("tck-artifact-text") {
+            Some(json!({
+                "artifactId": format!("artifact-{task_id}"),
+                "parts": [{"kind": "text", "text": "Generated text content"}]
+            }))
+        } else if message_id.starts_with("tck-artifact-data") {
+            Some(json!({
+                "artifactId": format!("artifact-{task_id}"),
+                "parts": [{"kind": "data", "data": {"key": "value", "count": 42}}]
+            }))
+        } else {
+            None
+        };
+        if let Some(artifact) = artifact {
+            internal.insert("artifacts".into(), Value::Array(vec![artifact]));
+        }
+        if message_id.starts_with("tck-message-response") {
+            internal.insert(
+                "responseMessage".into(),
+                json!({
+                    "messageId": format!("tck-agent-{task_id}"),
+                    "taskId": task_id,
+                    "contextId": row.context_id,
+                    "role": "agent",
+                    "parts": [{"kind": "text", "text": "Direct message response"}]
+                }),
+            );
+        }
+
+        self.store
+            .upsert_task(&row)
+            .map_err(|error| DispatchError::DispatchFailed(error.to_string()))?;
+        Ok(DispatchOutcome::Accepted)
+    }
+}
+
+/// Construct the explicit, test-only upstream-TCK dispatcher.
+pub fn conformance(store: Arc<crate::store::task_store::TaskStore>) -> Arc<dyn MessageDispatch> {
+    Arc::new(ConformanceMessageDispatch::new(store))
 }
 
 #[cfg(test)]

@@ -23,6 +23,13 @@ path was retired in #412.
 
 ### Common Response Format
 
+The standard A2A surface is the exception to the project-wide envelope below.
+A2A 1.0 HTTP+JSON supports the v1.0.1 `application/a2a+json` correction,
+`google.rpc.Status` errors, and per-request `A2A-Version` negotiation.
+Headerless requests retain A2A 0.3 semantics. See
+[A2A protocol compatibility](a2a-protocol-compatibility.md) for the exact
+interface, route, codec, and error matrix.
+
 All HTTP endpoints return JSON. Error responses follow this structure:
 
 ```json

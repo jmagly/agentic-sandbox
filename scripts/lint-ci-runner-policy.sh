@@ -15,6 +15,25 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
+# Runner registration tokens are reusable credentials. Diagnostics must only
+# call runner inventory endpoints; retrieving a registration token is a
+# provisioning/rotation operation and must never appear in repository
+# automation. Keep the endpoint assembled so this guard does not match itself.
+runner_token_endpoint='actions/runners/'"registration-token"
+mapfile -t runner_token_endpoint_findings < <(
+  grep -rnF -- "$runner_token_endpoint" .gitea/ scripts/ Makefile \
+    --exclude='lint-ci-runner-policy.sh' 2>/dev/null || true
+)
+
+if [ "${#runner_token_endpoint_findings[@]}" -ne 0 ]; then
+  echo "✗ lint-ci-runner-policy: automation must not retrieve runner registration tokens"
+  printf '  %s\n' "${runner_token_endpoint_findings[@]}"
+  echo "Use scripts/audit-gitea-runner-inventory.sh for metadata-only diagnostics."
+  exit 1
+fi
+
+echo "✓ lint-ci-runner-policy: diagnostics avoid runner registration-token endpoints"
+
 mapfile -t findings < <(
   grep -rnE '^[[:space:]]*runs-on:[[:space:]]*teroknor([[:space:]#]|$)' \
     .gitea/workflows/ 2>/dev/null || true
@@ -91,6 +110,23 @@ if [ "$integration_runner" != "rust" ]; then
 fi
 
 echo "✓ lint-ci-runner-policy: VM-backed integration uses the shared build01/Titan pool"
+
+integration_max_parallel="$(
+  awk '
+    /^  integration:$/ { in_job=1; next }
+    in_job && /^  [[:alnum:]_-]+:$/ { exit }
+    in_job && /^      max-parallel:/ { print $2; exit }
+  ' .gitea/workflows/ci.yaml
+)"
+
+if [ "$integration_max_parallel" != "2" ]; then
+  echo "✗ lint-ci-runner-policy: E2E matrix must expose both host-isolated capacity lanes"
+  echo "  observed max-parallel: ${integration_max_parallel:-<missing>}"
+  echo "Gitea does not enforce max-parallel=1 across runners; two capacity-one hosts are explicitly allowed to overlap (#796)."
+  exit 1
+fi
+
+echo "✓ lint-ci-runner-policy: E2E matrix uses two explicit host-isolated capacity lanes"
 
 vm_root_forward_count="$(
   grep -F -c -- '--vm-root "${VM_STORAGE_DIR}"' .gitea/workflows/ci.yaml || true

@@ -50,6 +50,7 @@ pub mod bindings;
 pub mod extensions;
 pub mod handlers;
 pub mod instance;
+pub mod protocol;
 pub mod server;
 pub mod store;
 

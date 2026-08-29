@@ -36,7 +36,7 @@
 //!   deployments should enforce HTTPS via deployment policy.)
 
 use axum::body::Body;
-use axum::extract::{Path, State};
+use axum::extract::{Extension, Path, State};
 use axum::http::header::{HeaderValue, CONTENT_TYPE};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -46,6 +46,7 @@ use uuid::Uuid;
 
 use crate::bindings::rest::{error_response, AppState};
 use crate::instance::InstanceExt;
+use crate::protocol::ProtocolVersion;
 use crate::store::task_store::PushNotificationConfigRow;
 
 // ---------- shape helpers ----------
@@ -80,9 +81,37 @@ fn config_to_wire(row: &PushNotificationConfigRow) -> Value {
     })
 }
 
+fn config_to_v1_wire(row: &PushNotificationConfigRow) -> Value {
+    let mut wire = json!({
+        "id": row.config_id,
+        "taskId": row.task_id,
+        "url": row.url,
+    });
+    if let Some(scheme) = row
+        .auth_json
+        .as_ref()
+        .and_then(|auth| auth.get("type"))
+        .and_then(Value::as_str)
+        .filter(|scheme| !scheme.eq_ignore_ascii_case("none"))
+    {
+        wire["authentication"] = json!({"scheme": scheme});
+    }
+    wire
+}
+
+fn config_to_protocol_wire(row: &PushNotificationConfigRow, version: ProtocolVersion) -> Value {
+    match version {
+        ProtocolVersion::V0_3 => config_to_wire(row),
+        ProtocolVersion::V1_0 => config_to_v1_wire(row),
+    }
+}
+
 /// Parse and validate the POST body. Returns `(url, auth_json)` or an error
 /// `Response` ready to return to the client.
-fn parse_create_body(body: &Value, instance_id: &str) -> Result<(String, Option<Value>), Response> {
+fn parse_create_body(
+    body: &Value,
+    instance_id: &str,
+) -> Result<(String, String, Option<Value>), Response> {
     let url = body
         .get("url")
         .and_then(|v| v.as_str())
@@ -103,10 +132,61 @@ fn parse_create_body(body: &Value, instance_id: &str) -> Result<(String, Option<
         }
     };
 
-    // `auth` is optional. If present, store as-is — the secret is persisted
-    // in auth_json and redacted on read by `config_to_wire`.
-    let auth = body.get("auth").cloned();
-    Ok((url, auth))
+    let config_id = body
+        .get("id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| Uuid::now_v7().to_string());
+
+    // Normalize the v1 `authentication` shape to the legacy internal
+    // descriptor used by the delivery worker. The persisted credential is
+    // deliberately redacted from all read responses.
+    let auth = if let Some(authentication) = body.get("authentication") {
+        let scheme = authentication
+            .get("scheme")
+            .and_then(Value::as_str)
+            .unwrap_or("none")
+            .to_ascii_lowercase();
+        let secret = authentication
+            .get("credentials")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        Some(json!({"type": scheme, "secret": secret}))
+    } else {
+        body.get("auth").cloned()
+    };
+    Ok((config_id, url, auth))
+}
+
+pub(crate) fn persist_inline_config(
+    state: &AppState,
+    instance_id: &str,
+    task_id: &str,
+    body: &Value,
+) -> Result<(), Response> {
+    let (config_id, url, auth_json) = parse_create_body(body, instance_id)?;
+    state
+        .store
+        .put_push_config(&PushNotificationConfigRow {
+            config_id,
+            task_id: task_id.to_string(),
+            url,
+            auth_json,
+            created_at: Utc::now(),
+        })
+        .map_err(|error| {
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "https://agentic-sandbox.aiwg.io/errors/internal",
+                "Internal server error",
+                format!("Failed to persist push config: {error}"),
+                "internal.error",
+                None,
+                Some(instance_id),
+            )
+        })
 }
 
 // ---------- handlers ----------
@@ -116,6 +196,7 @@ pub async fn create_config(
     Path((instance_id, tid)): Path<(String, String)>,
     State(state): State<AppState>,
     InstanceExt(_ctx): InstanceExt,
+    Extension(version): Extension<ProtocolVersion>,
     body: Option<axum::Json<Value>>,
 ) -> Response {
     // Body is required; treat missing body as invalid_url since `url` is
@@ -125,7 +206,7 @@ pub async fn create_config(
         None => Value::Null,
     };
 
-    let (url, auth) = match parse_create_body(&body, &instance_id) {
+    let (config_id, url, auth) = match parse_create_body(&body, &instance_id) {
         Ok(parts) => parts,
         Err(resp) => return resp,
     };
@@ -158,7 +239,7 @@ pub async fn create_config(
     }
 
     let cfg = PushNotificationConfigRow {
-        config_id: Uuid::now_v7().to_string(),
+        config_id,
         task_id: tid.clone(),
         url,
         auth_json: auth,
@@ -177,7 +258,7 @@ pub async fn create_config(
         );
     }
 
-    let wire = config_to_wire(&cfg);
+    let wire = config_to_protocol_wire(&cfg, version);
     Response::builder()
         .status(StatusCode::CREATED)
         .header(CONTENT_TYPE, HeaderValue::from_static("application/json"))
@@ -191,13 +272,14 @@ pub async fn get_config(
     Path((instance_id, tid, cid)): Path<(String, String, String)>,
     State(state): State<AppState>,
     InstanceExt(_ctx): InstanceExt,
+    Extension(version): Extension<ProtocolVersion>,
 ) -> Response {
     if let Err(response) = require_owned_task(&state, &instance_id, &tid) {
         return response;
     }
     match state.store.get_push_config(&cid) {
         Ok(Some(row)) if row.task_id == tid => {
-            let wire = config_to_wire(&row);
+            let wire = config_to_protocol_wire(&row, version);
             Response::builder()
                 .status(StatusCode::OK)
                 .header(CONTENT_TYPE, HeaderValue::from_static("application/json"))
@@ -233,13 +315,17 @@ pub async fn list_configs(
     Path((instance_id, tid)): Path<(String, String)>,
     State(state): State<AppState>,
     InstanceExt(_ctx): InstanceExt,
+    Extension(version): Extension<ProtocolVersion>,
 ) -> Response {
     if let Err(response) = require_owned_task(&state, &instance_id, &tid) {
         return response;
     }
     match state.store.list_push_configs(&tid) {
         Ok(rows) => {
-            let items: Vec<Value> = rows.iter().map(config_to_wire).collect();
+            let items: Vec<Value> = rows
+                .iter()
+                .map(|row| config_to_protocol_wire(row, version))
+                .collect();
             let body = json!({ "configs": items });
             Response::builder()
                 .status(StatusCode::OK)
@@ -265,6 +351,7 @@ pub async fn delete_config(
     Path((instance_id, tid, cid)): Path<(String, String, String)>,
     State(state): State<AppState>,
     InstanceExt(_ctx): InstanceExt,
+    Extension(version): Extension<ProtocolVersion>,
 ) -> Response {
     if let Err(response) = require_owned_task(&state, &instance_id, &tid) {
         return response;
@@ -276,7 +363,25 @@ pub async fn delete_config(
         Ok(Some(row)) if row.task_id == tid => {
             // fall through and delete
         }
-        Ok(Some(_)) | Ok(None) => {
+        Ok(Some(_)) => {
+            return error_response(
+                StatusCode::NOT_FOUND,
+                "https://agentic-sandbox.aiwg.io/errors/push-config-not-found",
+                "Push notification config not found",
+                format!("Config '{}' not found for task '{}'", cid, tid),
+                "push.config_not_found",
+                None,
+                Some(&instance_id),
+            );
+        }
+        Ok(None) if version == ProtocolVersion::V1_0 => {
+            return Response::builder()
+                .status(StatusCode::NO_CONTENT)
+                .body(Body::empty())
+                .unwrap()
+                .into_response();
+        }
+        Ok(None) => {
             return error_response(
                 StatusCode::NOT_FOUND,
                 "https://agentic-sandbox.aiwg.io/errors/push-config-not-found",

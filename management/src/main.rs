@@ -1038,7 +1038,7 @@ async fn main() -> Result<()> {
                 "AIWG_CONFORMANCE_MODE=1: binding AcceptingMessageDispatch (test-only). \
                  Do NOT set this env var in production."
             );
-            agentic_sandbox_executor::bindings::message_dispatch::accepting()
+            agentic_sandbox_executor::bindings::message_dispatch::conformance(store.clone())
         } else {
             Arc::new(crate::agent_message_dispatch::AgentMessageDispatch::new(
                 registry.clone(),
@@ -1059,7 +1059,10 @@ async fn main() -> Result<()> {
                 .and_then(|value| value.parse::<usize>().ok())
                 .filter(|size| (1..=16).contains(size))
                 .unwrap_or(1);
-            let host_for_card = http_addr.to_string();
+            // Conformance mode intentionally serves loopback HTTP. Preserve
+            // that explicit scheme in AgentInterface URLs so external TCKs do
+            // not infer production HTTPS for a plaintext test listener.
+            let host_for_card = format!("http://{http_addr}");
             for index in 0..fleet_size {
                 let instance_id = format!("00000000-0000-7000-8000-{:012}", index + 1);
                 let runtime_kind = match index % 3 {

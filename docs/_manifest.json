@@ -76,6 +76,7 @@
     "task-run-lifecycle",
     "SESSION_RECONCILIATION",
     "aiwg-executor",
+    "a2a-protocol-compatibility",
     "v2-migration-guide",
     "cli-design",
     "security/resource-quota-design",

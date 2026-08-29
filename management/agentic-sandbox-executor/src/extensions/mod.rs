@@ -101,6 +101,8 @@ pub struct PreRequestCtx<'a> {
     pub task_id: Option<&'a str>,
     pub message_id: Option<&'a str>,
     pub request_body: &'a Value,
+    /// Canonical Major.Minor A2A protocol version selected at the boundary.
+    pub protocol_version: &'a str,
 }
 
 /// Post-response hook context. The handler may mutate `response_body`
@@ -420,6 +422,7 @@ mod tests {
             task_id: None,
             message_id: None,
             request_body: &body,
+            protocol_version: "0.3",
         };
         match r.pre_request(&ctx) {
             ExtensionOutcome::Replay { status, .. } => assert_eq!(status, 200),

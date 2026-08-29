@@ -310,8 +310,8 @@ If a release is cut with broken content (wrong version, missing CHANGELOG sectio
 
 | Runner | Labels | What lands here |
 |---|---|---|
-| **`build01`** (CI/KVM runner) | `s9-build, rust` (plus container/tooling labels) | Shared validation, builds, and serialized libvirt/cloud-hypervisor E2E |
-| **`titan`** (CI/KVM and release runner) | `titan, rust, gpu, matric-builder, ubuntu-latest, node-20, deploy` | Shared validation, builds, and serialized VM E2E; GPU, macOS bridge, and release-only jobs |
+| **`build01`** (CI/KVM runner) | `s9-build, rust` (plus container/tooling labels) | Shared validation, builds, and one host-local VM E2E capacity lane |
+| **`titan`** (CI/KVM and release runner) | `titan, rust, gpu, matric-builder, ubuntu-latest, node-20, deploy` | Shared validation, builds, and one host-local VM E2E capacity lane; GPU, macOS bridge, and release-only jobs |
 | **`teroknor`** (infrastructure endpoint) | `teroknor` | **None for this project.** Do not assign builds, tests, lint, security scans, or release jobs to teroknor. |
 | ~~`grissom`~~ | `self-hosted, ubuntu-*` | **Never** — workstation, NOT a build server. No CI job in this repo targets `runs-on: self-hosted`. |
 
@@ -319,14 +319,19 @@ Portable and VM-backed workflows use the shared `rust` capability label;
 release and Apple orchestration use `titan`. No project workflow uses
 `teroknor` or `self-hosted`. `scripts/lint-ci-runner-policy.sh` enforces this
 split. Both eligible Linux runners expose
-`/build/agentic-sandbox/base-images` and `/build/agentic-sandbox/vms`; E2E
-remains serialized with the `agentic-sandbox-vm-e2e` concurrency group.
+`/build/agentic-sandbox/base-images` and `/build/agentic-sandbox/vms`.
+The two E2E matrix children may overlap when Gitea assigns them to different
+hosts. This is an intentional two-lane capacity model, not cross-runner
+serialization: each host runner has capacity one, VM/libvirt/docker state is
+host-local, and the workflow gives each backend a distinct run-scoped
+`vm_slot` agentshare path. Never add a second concurrent VM executor on either
+host without revisiting this isolation proof.
 `XDG_CACHE_HOME` is rooted under
 `/build/gitea-runner/data` so host-executor checkouts and Cargo targets do not
 consume the small OS disk. Docker publishing still writes BuildKit cache to the
-OS volume, so the serialized integration job prunes completed build cache after
-the Docker dependency succeeds and before VM provisioning. This keeps `/tmp`
-and libvirt writable without racing an active image build.
+OS volume, so each integration child prunes its own host's completed build
+cache after the Docker dependency succeeds and before VM provisioning. This
+keeps `/tmp` and libvirt writable without racing an active image build.
 Each shared runner's virtualization package set must include `virtiofsd` and
 `genisoimage` in addition to libvirt, QEMU, OVMF, and XFS tooling. Ubuntu 24.04
 installs virtiofsd at `/usr/libexec/virtiofsd`; the Cloud Hypervisor backend

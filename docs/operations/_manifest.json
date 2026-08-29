@@ -4,6 +4,7 @@
   "collapsed": false,
   "order": [
     "overview",
+    "gitea-actions-runner-diagnostics",
     "macos-host-runtime-keychain"
   ]
 }

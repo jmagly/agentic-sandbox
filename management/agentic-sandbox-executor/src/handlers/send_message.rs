@@ -14,7 +14,7 @@
 //! [`TaskStore`]: crate::store::task_store::TaskStore
 
 use axum::body::Body;
-use axum::extract::{Path, State};
+use axum::extract::{Extension, Path, State};
 use axum::http::header::{HeaderValue, CONTENT_TYPE, LOCATION};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -26,11 +26,12 @@ use crate::bindings::rest::{error_response, AppState};
 use crate::extensions::{
     flow_graph,
     hitl_prompt::{validate_hitl_response, URI as HITL_PROMPT_URI},
-    idempotency::URI as IDEMPOTENCY_URI,
+    idempotency::{versioned_request_body, URI as IDEMPOTENCY_URI},
     ActivatedExtensions, ExtensionOutcome, PostResponseCtx, PreRequestCtx,
 };
 use crate::handlers::push_delivery::DeliveryEvent;
 use crate::instance::InstanceExt;
+use crate::protocol::ProtocolVersion;
 use crate::store::task_store::{TaskRow, TaskState};
 
 use super::task_row_to_a2a;
@@ -40,6 +41,7 @@ pub async fn handler(
     Path((instance_id,)): Path<(String,)>,
     State(state): State<AppState>,
     InstanceExt(inst_ctx): InstanceExt,
+    Extension(protocol_version): Extension<ProtocolVersion>,
     headers: HeaderMap,
     body_bytes: axum::body::Bytes,
 ) -> Response {
@@ -119,6 +121,7 @@ pub async fn handler(
         task_id: None,
         message_id: message_id.as_deref(),
         request_body: &body,
+        protocol_version: protocol_version.as_header_value(),
     };
     match state.extensions.pre_request(&pre_ctx) {
         ExtensionOutcome::Continue => {}
@@ -167,14 +170,80 @@ pub async fn handler(
         }
     }
 
-    // --- main handler: create the task ---
+    // --- main handler: create or continue the task ---
     let now = Utc::now();
-    let task_id = Uuid::now_v7().to_string();
-    let context_id = body
+    let requested_task_id = body
         .get("message")
-        .and_then(|m| m.get("contextId"))
+        .and_then(|message| message.get("taskId"))
         .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
+        .filter(|value| !value.is_empty());
+    let existing = if let Some(task_id) = requested_task_id {
+        match state.store.get_task_for_instance(&instance_id, task_id) {
+            Ok(Some(row)) => Some(row),
+            Ok(None) => {
+                return error_response(
+                    StatusCode::NOT_FOUND,
+                    "https://agentic-sandbox.aiwg.io/errors/task-not-found",
+                    "Task not found",
+                    "The referenced task does not exist".to_string(),
+                    "task.not_found",
+                    None,
+                    Some(&instance_id),
+                );
+            }
+            Err(error) => {
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "https://agentic-sandbox.aiwg.io/errors/internal",
+                    "Internal server error",
+                    format!("Failed to read referenced task: {error}"),
+                    "internal.error",
+                    None,
+                    Some(&instance_id),
+                );
+            }
+        }
+    } else {
+        None
+    };
+    if existing.as_ref().is_some_and(|row| row.state.is_terminal()) {
+        return error_response(
+            StatusCode::CONFLICT,
+            "https://agentic-sandbox.aiwg.io/errors/task-terminal",
+            "Task is terminal",
+            "Messages cannot be sent to a task that has reached a terminal state".to_string(),
+            "task.terminal",
+            None,
+            Some(&instance_id),
+        );
+    }
+    let supplied_context_id = body
+        .get("message")
+        .and_then(|message| message.get("contextId"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty());
+    if let (Some(existing), Some(supplied)) = (existing.as_ref(), supplied_context_id) {
+        if existing.context_id.as_deref() != Some(supplied) {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "https://agentic-sandbox.aiwg.io/errors/invalid-params",
+                "Invalid params",
+                "message.contextId does not match the referenced task".to_string(),
+                "request.context_task_mismatch",
+                None,
+                Some(&instance_id),
+            );
+        }
+    }
+    let task_id = existing
+        .as_ref()
+        .map(|row| row.task_id.clone())
+        .unwrap_or_else(|| Uuid::now_v7().to_string());
+    let context_id = existing
+        .as_ref()
+        .and_then(|row| row.context_id.clone())
+        .or_else(|| supplied_context_id.map(str::to_string))
+        .or_else(|| Some(Uuid::now_v7().to_string()));
 
     let status_json = json!({
         "state": TaskState::Submitted.as_str(),
@@ -206,7 +275,7 @@ pub async fn handler(
             );
         }
     };
-    let task_metadata = graph_identity.map(|graph| {
+    let mut task_metadata = graph_identity.map(|graph| {
         flow_graph::task_metadata_with_lineage(
             graph,
             &task_id,
@@ -216,6 +285,13 @@ pub async fn handler(
             resume_lineage,
         )
     });
+    if task_metadata.is_none() {
+        task_metadata = existing.as_ref().and_then(|row| row.metadata_json.clone());
+    }
+    append_protocol_history(
+        &mut task_metadata,
+        body.get("message").cloned().unwrap_or(Value::Null),
+    );
 
     let row = TaskRow {
         task_id: task_id.clone(),
@@ -226,7 +302,7 @@ pub async fn handler(
         fail_kind: None,
         status_json,
         metadata_json: task_metadata,
-        created_at: now,
+        created_at: existing.as_ref().map_or(now, |row| row.created_at),
         updated_at: now,
         terminal_at: None,
     };
@@ -242,6 +318,17 @@ pub async fn handler(
             None,
             Some(&instance_id),
         );
+    }
+
+    if let Some(config) = body
+        .get("configuration")
+        .and_then(|configuration| configuration.get("taskPushNotificationConfig"))
+    {
+        if let Err(response) =
+            super::push_notification::persist_inline_config(&state, &instance_id, &task_id, config)
+        {
+            return response;
+        }
     }
 
     // #269: hand the message off to the dispatch seam. The previous
@@ -319,6 +406,25 @@ pub async fn handler(
     };
 
     let mut task_json = task_row_to_a2a(&row_after);
+    if let Some(message) = internal_response_message(&row_after) {
+        task_json = json!({"message": message});
+    }
+    if let Some(limit) = body
+        .get("configuration")
+        .and_then(|configuration| configuration.get("historyLength"))
+        .and_then(Value::as_u64)
+        .and_then(|limit| usize::try_from(limit).ok())
+    {
+        if let Some(history) = task_json.get_mut("history").and_then(Value::as_array_mut) {
+            let remove = history.len().saturating_sub(limit);
+            history.drain(..remove);
+        }
+        if limit == 0 {
+            task_json
+                .as_object_mut()
+                .map(|object| object.remove("history"));
+        }
+    }
 
     // --- post_response: extensions may mutate the body ---
     let status = match &dispatch_error {
@@ -344,7 +450,11 @@ pub async fn handler(
     // body, so a replay returns the same body the original client saw.
     if activated.contains(IDEMPOTENCY_URI) {
         if let Some(mid) = &message_id {
-            if let Err(e) = state.idem.record(mid, &body, status.as_u16(), &task_json) {
+            let versioned = versioned_request_body(protocol_version.as_header_value(), &body);
+            if let Err(e) = state
+                .idem
+                .record(mid, &versioned, status.as_u16(), &task_json)
+            {
                 tracing::warn!(error = %e, "failed to record idempotency entry");
             }
         }
@@ -356,6 +466,7 @@ pub async fn handler(
     let status_event = json!({
         "kind": "task_status",
         "task_id": task_id,
+        "context_id": row_after.context_id,
         "status": task_json["status"].clone(),
     });
     if let Err(e) = state.delivery.try_send(DeliveryEvent {
@@ -392,6 +503,33 @@ pub async fn handler(
 
     let location = format!("/agents/{}/v1/tasks/{}", instance_id, task_id);
     build_fresh_response(status, task_json, &echoed, Some(location))
+}
+
+fn append_protocol_history(metadata: &mut Option<Value>, message: Value) {
+    if metadata.is_none() {
+        *metadata = Some(json!({}));
+    }
+    let Some(root) = metadata.as_mut().and_then(Value::as_object_mut) else {
+        return;
+    };
+    let internal = root.entry("_a2a").or_insert_with(|| json!({}));
+    let Some(internal) = internal.as_object_mut() else {
+        return;
+    };
+    let history = internal
+        .entry("history")
+        .or_insert_with(|| Value::Array(Vec::new()));
+    if let Some(history) = history.as_array_mut() {
+        history.push(message);
+    }
+}
+
+fn internal_response_message(row: &TaskRow) -> Option<Value> {
+    row.metadata_json
+        .as_ref()?
+        .get("_a2a")?
+        .get("responseMessage")
+        .cloned()
 }
 
 fn hitl_response_payload(body: &Value) -> Option<&Value> {

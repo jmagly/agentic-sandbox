@@ -1,6 +1,6 @@
 //! Axum server skeleton for the A2A per-instance executor.
 //!
-//! Filled in by W3.3 (#210) — REST/JSON-RPC bindings, middleware stack, and
+//! Filled in by W3.3 (#210) — HTTP+JSON bindings, middleware stack, and
 //! TLS termination. For now this module exposes a placeholder
 //! [`ExecutorServer`] type so the rest of the crate can reference it.
 

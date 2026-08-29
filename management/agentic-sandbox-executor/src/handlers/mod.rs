@@ -69,7 +69,24 @@ pub(crate) fn task_row_to_a2a(row: &TaskRow) -> Value {
         task["contextId"] = Value::String(ctx.clone());
     }
     if let Some(meta) = &row.metadata_json {
-        task["metadata"] = meta.clone();
+        let mut public_metadata = meta.clone();
+        let internal = public_metadata
+            .as_object_mut()
+            .and_then(|object| object.remove("_a2a"));
+        if let Some(internal) = internal {
+            if let Some(history) = internal.get("history") {
+                task["history"] = history.clone();
+            }
+            if let Some(artifacts) = internal.get("artifacts") {
+                task["artifacts"] = artifacts.clone();
+            }
+        }
+        if public_metadata
+            .as_object()
+            .is_some_and(|object| !object.is_empty())
+        {
+            task["metadata"] = public_metadata;
+        }
     }
     task
 }

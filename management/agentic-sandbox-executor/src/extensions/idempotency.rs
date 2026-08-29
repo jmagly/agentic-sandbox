@@ -54,6 +54,17 @@ impl IdempotencyExtension {
     }
 }
 
+/// Bind an idempotency digest to decoded content and negotiated semantics.
+pub(crate) fn versioned_request_body(
+    protocol_version: &str,
+    body: &serde_json::Value,
+) -> serde_json::Value {
+    json!({
+        "protocolVersion": protocol_version,
+        "request": body,
+    })
+}
+
 impl ExtensionHandler for IdempotencyExtension {
     fn uri(&self) -> &'static str {
         URI
@@ -70,7 +81,8 @@ impl ExtensionHandler for IdempotencyExtension {
         let Some(mid) = ctx.message_id else {
             return ExtensionOutcome::Continue;
         };
-        match self.cache.check(mid, ctx.request_body) {
+        let versioned = versioned_request_body(ctx.protocol_version, ctx.request_body);
+        match self.cache.check(mid, &versioned) {
             Ok(IdempotencyOutcome::Replay { status, body }) => {
                 ExtensionOutcome::Replay { status, body }
             }
@@ -138,7 +150,9 @@ mod tests {
         let body = sample_body();
         let mid = "00000000-0000-7000-8000-000000000001";
         let stored = json!({"id": "task-1", "kind": "task"});
-        cache.record(mid, &body, 202, &stored).unwrap();
+        cache
+            .record(mid, &versioned_request_body("0.3", &body), 202, &stored)
+            .unwrap();
 
         let act = activated();
         let ctx = PreRequestCtx {
@@ -146,6 +160,7 @@ mod tests {
             task_id: None,
             message_id: Some(mid),
             request_body: &body,
+            protocol_version: "0.3",
         };
         match ext.pre_request(&ctx) {
             ExtensionOutcome::Replay {
@@ -172,7 +187,12 @@ mod tests {
             "message": {"messageId": mid, "role": "user", "parts": [{"kind": "text", "text": "b"}]}
         });
         cache
-            .record(mid, &body1, 202, &json!({"id": "task-2"}))
+            .record(
+                mid,
+                &versioned_request_body("0.3", &body1),
+                202,
+                &json!({"id": "task-2"}),
+            )
             .unwrap();
 
         let act = activated();
@@ -181,6 +201,7 @@ mod tests {
             task_id: None,
             message_id: Some(mid),
             request_body: &body2,
+            protocol_version: "0.3",
         };
         match ext.pre_request(&ctx) {
             ExtensionOutcome::Reject { status, body } => {
@@ -198,7 +219,14 @@ mod tests {
         let mid = "00000000-0000-7000-8000-000000000003";
         let body = sample_body();
         // Even if cached, no activation means continue.
-        cache.record(mid, &body, 202, &json!({"id": "x"})).unwrap();
+        cache
+            .record(
+                mid,
+                &versioned_request_body("0.3", &body),
+                202,
+                &json!({"id": "x"}),
+            )
+            .unwrap();
 
         let act = ActivatedExtensions::default();
         let ctx = PreRequestCtx {
@@ -206,6 +234,7 @@ mod tests {
             task_id: None,
             message_id: Some(mid),
             request_body: &body,
+            protocol_version: "0.3",
         };
         assert!(matches!(ext.pre_request(&ctx), ExtensionOutcome::Continue));
     }
@@ -219,7 +248,12 @@ mod tests {
         let mid = "00000000-0000-7000-8000-000000000004";
         let body = sample_body_with_mid(mid);
         cache
-            .record(mid, &body, 202, &json!({"id": "task-r"}))
+            .record(
+                mid,
+                &versioned_request_body("0.3", &body),
+                202,
+                &json!({"id": "task-r"}),
+            )
             .unwrap();
 
         let act = activated();
@@ -228,6 +262,7 @@ mod tests {
             task_id: None,
             message_id: Some(mid),
             request_body: &body,
+            protocol_version: "0.3",
         };
         match reg.pre_request(&ctx) {
             ExtensionOutcome::Replay { body: cached, .. } => {

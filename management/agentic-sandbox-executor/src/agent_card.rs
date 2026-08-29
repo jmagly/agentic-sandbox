@@ -255,6 +255,9 @@ const EXT_PTY: &str = "https://agentic-sandbox.aiwg.io/extensions/pty-extensions
 const EXT_ADAPTER_COMMAND: &str = "https://agentic-sandbox.aiwg.io/extensions/adapter-command/v1";
 const EXT_AGENT_OUTPUT: &str = "https://agentic-sandbox.aiwg.io/extensions/agent-output/v1";
 const EXT_FLOW_GRAPH: &str = "https://aiwg.io/extensions/flow-graph/v1";
+const BINDING_PTY_WS: &str = "https://agentic-sandbox.aiwg.io/bindings/pty-ws/v1";
+const BINDING_AGENT_OUTPUT_SSE: &str =
+    "https://agentic-sandbox.aiwg.io/bindings/agent-output-sse/v1";
 const PTY_REPLAY_BUFFER_FRAMES: usize = 1000;
 const PTY_REPLAY_RETENTION_SECONDS: u64 = 86_400;
 const PTY_DEFAULT_COLS: u16 = 120;
@@ -368,25 +371,41 @@ pub fn build_agent_card(inputs: &AgentCardInputs) -> Value {
         }));
     }
 
-    let base_url = format!("https://{}", inputs.host);
+    let host_url = if inputs.host.starts_with("http://") || inputs.host.starts_with("https://") {
+        inputs.host.trim_end_matches('/').to_string()
+    } else {
+        format!("https://{}", inputs.host)
+    };
+    let base_url = format!("{host_url}/agents/{}", inputs.instance_id);
+    let legacy_url = format!("{base_url}/v1");
+    let ws_origin = if let Some(host) = host_url.strip_prefix("https://") {
+        format!("wss://{host}")
+    } else if let Some(host) = host_url.strip_prefix("http://") {
+        format!("ws://{host}")
+    } else {
+        host_url.clone()
+    };
     let pty_url = format!(
-        "wss://{}/agents/{}/sessions/{{session_id}}/attach",
-        inputs.host, inputs.instance_id
+        "{}/agents/{}/sessions/{{session_id}}/attach",
+        ws_origin, inputs.instance_id
     );
 
     json!({
-        "protocolVersion": "0.3.0",
+        // Compatibility fields consumed by 0.3 clients. A2A 1.0 clients use
+        // supportedInterfaces, where the version moved per the 1.0 model.
+        "protocolVersion": "0.3",
         "name": inputs.instance_id,
         "description": format!(
             "agentic-sandbox executor instance {} ({})",
             inputs.instance_id, inputs.runtime_kind.as_str()
         ),
-        "url": base_url,
-        "preferredTransport": "JSONRPC",
+        "url": legacy_url,
+        "preferredTransport": "HTTP+JSON",
         "version": "2.0.0",
         "capabilities": {
             "streaming": true,
             "pushNotifications": true,
+            "extendedAgentCard": true,
             "extensions": extensions,
         },
         "defaultInputModes": ["text/plain", "application/json"],
@@ -396,24 +415,62 @@ pub fn build_agent_card(inputs: &AgentCardInputs) -> Value {
         "supportedInterfaces": [
             {
                 "url": base_url,
-                "transport": "JSONRPC",
+                "protocolBinding": "HTTP+JSON",
+                "protocolVersion": "1.0",
             },
             {
-                "url": format!("{}/v1", base_url),
-                "transport": "HTTP+JSON",
+                "url": legacy_url,
+                "protocolBinding": "HTTP+JSON",
+                "protocolVersion": "0.3",
             },
             {
                 "url": pty_url,
-                "transport": "WebSocket",
-                "extension": EXT_PTY,
+                "protocolBinding": BINDING_PTY_WS,
+                "protocolVersion": "1.0",
             },
             {
-                "url": format!("{}/api/v1/agent-output/chat?command_id={{command_id}}", base_url),
-                "transport": "SSE",
-                "extension": EXT_AGENT_OUTPUT,
+                "url": format!("{host_url}/api/v1/agent-output/chat?command_id={{command_id}}"),
+                "protocolBinding": BINDING_AGENT_OUTPUT_SSE,
+                "protocolVersion": "1.0",
             }
         ],
     })
+}
+
+/// Build the strict stable-protocol projection used by GetExtendedAgentCard.
+///
+/// The public discovery document retains 0.3 compatibility fields so older
+/// clients can bootstrap. A client that explicitly negotiates 1.0 receives a
+/// schema-clean card whose security schemes use the proto oneof representation.
+pub fn build_v1_agent_card(inputs: &AgentCardInputs) -> Value {
+    let mut card = build_agent_card(inputs);
+    let Some(object) = card.as_object_mut() else {
+        return card;
+    };
+    object.remove("protocolVersion");
+    object.remove("url");
+    object.remove("preferredTransport");
+
+    if let Some(schemes) = object
+        .get_mut("securitySchemes")
+        .and_then(Value::as_object_mut)
+    {
+        for scheme in schemes.values_mut() {
+            let Some(legacy) = scheme.as_object() else {
+                continue;
+            };
+            if legacy.get("type").and_then(Value::as_str) == Some("http") {
+                let mut http = serde_json::Map::new();
+                for key in ["scheme", "bearerFormat", "description"] {
+                    if let Some(value) = legacy.get(key) {
+                        http.insert(key.to_string(), value.clone());
+                    }
+                }
+                *scheme = json!({"httpAuthSecurityScheme": http});
+            }
+        }
+    }
+    card
 }
 
 // --- Sign / verify ----------------------------------------------------------
@@ -605,10 +662,10 @@ mod tests {
     #[test]
     fn build_agent_card_shape() {
         let card = build_sample_card();
-        assert_eq!(card["protocolVersion"], "0.3.0");
+        assert_eq!(card["protocolVersion"], "0.3");
         assert_eq!(card["name"], "agent-01");
         assert!(card["description"].as_str().unwrap().contains("agent-01"));
-        assert_eq!(card["preferredTransport"], "JSONRPC");
+        assert_eq!(card["preferredTransport"], "HTTP+JSON");
         assert!(card["url"].as_str().unwrap().starts_with("https://"));
         assert!(card["capabilities"]["streaming"].as_bool().unwrap());
         assert!(card["capabilities"]["pushNotifications"].as_bool().unwrap());
@@ -617,6 +674,58 @@ mod tests {
         assert!(card["supportedInterfaces"].is_array());
         assert!(card["defaultInputModes"].is_array());
         assert!(card["defaultOutputModes"].is_array());
+    }
+
+    #[test]
+    fn agent_card_truthfully_advertises_dual_http_json_versions() {
+        let card = build_sample_card();
+        let interfaces = card["supportedInterfaces"].as_array().unwrap();
+        let http: Vec<_> = interfaces
+            .iter()
+            .filter(|interface| interface["protocolBinding"] == "HTTP+JSON")
+            .collect();
+
+        assert_eq!(http.len(), 2);
+        assert!(http.iter().any(|interface| {
+            interface["protocolVersion"] == "1.0"
+                && interface["url"] == "https://agent-01.example.test/agents/agent-01"
+        }));
+        assert!(http.iter().any(|interface| {
+            interface["protocolVersion"] == "0.3"
+                && interface["url"] == "https://agent-01.example.test/agents/agent-01/v1"
+        }));
+        assert!(interfaces
+            .iter()
+            .all(|interface| interface["protocolBinding"] != "JSONRPC"));
+        assert!(interfaces.iter().all(|interface| {
+            interface["protocolVersion"] == "0.3" || interface["protocolVersion"] == "1.0"
+        }));
+    }
+
+    #[test]
+    fn explicit_dev_origin_is_preserved_without_double_scheme() {
+        let (security, skills) = sample_inputs();
+        let inputs = AgentCardInputs {
+            instance_id: "local",
+            host: "http://127.0.0.1:9999",
+            runtime_kind: RuntimeKind::Host,
+            loadout: "tck",
+            image_ref: None,
+            runtime_provider: None,
+            runtime_capabilities: &[],
+            adapter_command_supported: false,
+            security_schemes: &security,
+            skills: &skills,
+        };
+        let card = build_agent_card(&inputs);
+        assert_eq!(
+            card["supportedInterfaces"][0]["url"],
+            "http://127.0.0.1:9999/agents/local"
+        );
+        assert_eq!(
+            card["supportedInterfaces"][2]["url"],
+            "ws://127.0.0.1:9999/agents/local/sessions/{session_id}/attach"
+        );
     }
 
     #[test]
@@ -655,9 +764,10 @@ mod tests {
         let interfaces = card["supportedInterfaces"].as_array().unwrap();
         let sse = interfaces
             .iter()
-            .find(|iface| iface["extension"] == EXT_AGENT_OUTPUT)
+            .find(|iface| iface["protocolBinding"] == BINDING_AGENT_OUTPUT_SSE)
             .expect("agent-output SSE interface should be advertised");
-        assert_eq!(sse["transport"], "SSE");
+        assert_eq!(sse["protocolBinding"], BINDING_AGENT_OUTPUT_SSE);
+        assert_eq!(sse["protocolVersion"], "1.0");
         assert_eq!(
             sse["url"],
             "https://agent-01.example.test/api/v1/agent-output/chat?command_id={command_id}"
@@ -688,10 +798,11 @@ mod tests {
         let interfaces = card["supportedInterfaces"].as_array().unwrap();
         let pty_interface = interfaces
             .iter()
-            .find(|iface| iface["extension"] == EXT_PTY)
+            .find(|iface| iface["protocolBinding"] == BINDING_PTY_WS)
             .expect("pty interface should be advertised");
 
-        assert_eq!(pty_interface["transport"], "WebSocket");
+        assert_eq!(pty_interface["protocolBinding"], BINDING_PTY_WS);
+        assert_eq!(pty_interface["protocolVersion"], "1.0");
         assert_eq!(
             pty_interface["url"],
             "wss://agent-01.example.test/agents/agent-01/sessions/{session_id}/attach"

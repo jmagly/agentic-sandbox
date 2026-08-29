@@ -48,6 +48,7 @@ use crate::bindings::pty_ws::{ws_handler, PtyAttachAuthorizer, SessionRegistry};
 use crate::extensions::{build_default_registry, require_extensions_middleware, ExtensionRegistry};
 use crate::handlers::push_delivery::{DeliveryEvent, PushDelivery};
 use crate::instance::{InstanceLayer, InstanceRegistry, RuntimeKind};
+use crate::protocol::protocol_middleware;
 use crate::store::idempotency::IdempotencyCache;
 use crate::store::task_store::TaskStore;
 
@@ -297,14 +298,23 @@ pub fn router_with_bridge_dispatch_and_pty_auth(
     // GET routes bypass via separate `Router` composition so callers
     // can fetch tasks / subscribe / extendedAgentCard without
     // negotiating extensions first.
-    // A2A REST binding path convention: action paths are mounted at the
-    // instance root, not under a `/v1/` infix. (Version negotiation is
-    // carried in `Message.protocolVersion`, not in the URL.) We expose
+    // A2A REST binding path convention: 1.0 action paths are mounted at the
+    // instance root, with `A2A-Version` selecting the wire semantics. We expose
     // each action at BOTH the spec-conformant root and a `/v1/...` alias
-    // — the alias preserves backward compatibility with any client built
-    // against the earlier internal binding while the root form is what
-    // the conformance harness and external A2A clients hit.
+    // — the alias is pinned to 0.3 and preserves backward compatibility with
+    // clients built against the earlier internal binding.
     let mutating = Router::new()
+        // Stable A2A 1.0 HTTP+JSON operation names are singular. Keep the
+        // plural forms below as 0.3-era compatibility aliases while version
+        // negotiation determines the wire codec for either root route.
+        .route(
+            "/agents/{instance_id}/message:send",
+            post(handlers::send_message::handler),
+        )
+        .route(
+            "/agents/{instance_id}/message:stream",
+            post(handlers::send_streaming_message::handler),
+        )
         .route(
             "/agents/{instance_id}/messages:send",
             post(handlers::send_message::handler),
@@ -321,13 +331,9 @@ pub fn router_with_bridge_dispatch_and_pty_auth(
             "/agents/{instance_id}/v1/messages:stream",
             post(handlers::send_streaming_message::handler),
         )
-        // NOTE: A2A REST §11 specifies `/tasks/{tid}:cancel` (colon-suffix
-        // action). axum 0.8 panics at registration with "Only one
-        // parameter is allowed per path segment" — the parser treats
-        // `{tid}:cancel` as two parameters even though `:cancel` is
-        // literal. We host the action at `/tasks/{tid}/cancel`. The
-        // conformance harness's `cancel` test is skipped on this path
-        // shape (documented spec deviation).
+        // Keep the slash action as a 0.3 compatibility alias. The 1.0
+        // colon-suffix action is handled by `task_action_handler` below because
+        // axum 0.8 cannot register a `{tid}:cancel` parameter segment directly.
         .route(
             "/agents/{instance_id}/tasks/{tid}/cancel",
             post(handlers::cancel_task::handler),
@@ -335,6 +341,10 @@ pub fn router_with_bridge_dispatch_and_pty_auth(
         .route(
             "/agents/{instance_id}/v1/tasks/{tid}/cancel",
             post(handlers::cancel_task::handler),
+        )
+        .route(
+            "/agents/{instance_id}/tasks/{tid}",
+            post(task_action_handler),
         )
         .route(
             "/agents/{instance_id}/tasks/{tid}/graph-checkpoints",
@@ -410,8 +420,8 @@ pub fn router_with_bridge_dispatch_and_pty_auth(
             "/agents/{instance_id}/v1/tasks/{tid}/artifacts/{artifact_id}",
             get(handlers::artifacts::get),
         )
-        // Same axum 0.8 constraint as cancel — `/tasks/{tid}:subscribe`
-        // cannot be registered; we expose the action at `/tasks/{tid}/subscribe`.
+        // Slash form is the 0.3 compatibility alias; the 1.0 colon form is
+        // dispatched by `task_action_handler`.
         .route(
             "/agents/{instance_id}/tasks/{tid}/subscribe",
             get(handlers::subscribe_to_task::handler),
@@ -419,7 +429,9 @@ pub fn router_with_bridge_dispatch_and_pty_auth(
         .route(
             "/agents/{instance_id}/v1/tasks/{tid}/subscribe",
             get(handlers::subscribe_to_task::handler),
-        )
+        );
+
+    let discovery = Router::new()
         .route(
             "/agents/{instance_id}/extendedAgentCard",
             get(handlers::get_extended_agent_card::handler),
@@ -451,11 +463,50 @@ pub fn router_with_bridge_dispatch_and_pty_auth(
     let server_wide =
         Router::new().route("/.well-known/jwks.json", get(handlers::jwks::all_instances));
 
-    mutating
+    let protocol = mutating
         .merge(readonly)
+        .layer(axum::middleware::from_fn(protocol_middleware));
+    protocol
+        .merge(discovery)
         .layer(InstanceLayer::new(registry))
         .merge(server_wide)
         .with_state(state)
+}
+
+/// Dispatch A2A 1.0 colon-suffix task actions without relying on axum's path
+/// pattern parser, which treats `{tid}:action` as multiple parameters.
+async fn task_action_handler(
+    axum::extract::Path((instance_id, task_action)): axum::extract::Path<(String, String)>,
+    axum::extract::State(state): axum::extract::State<AppState>,
+    crate::instance::InstanceExt(ctx): crate::instance::InstanceExt,
+    axum::extract::Extension(version): axum::extract::Extension<crate::protocol::ProtocolVersion>,
+) -> Response {
+    if let Some(tid) = task_action.strip_suffix(":cancel") {
+        return crate::handlers::cancel_task::handler(
+            axum::extract::Path((instance_id, tid.to_string())),
+            axum::extract::State(state),
+            crate::instance::InstanceExt(ctx),
+        )
+        .await;
+    }
+    if let Some(tid) = task_action.strip_suffix(":subscribe") {
+        return crate::handlers::subscribe_to_task::handler(
+            axum::extract::Path((instance_id, tid.to_string())),
+            axum::extract::State(state),
+            crate::instance::InstanceExt(ctx),
+            axum::extract::Extension(version),
+        )
+        .await;
+    }
+    error_response(
+        StatusCode::NOT_FOUND,
+        "https://agentic-sandbox.aiwg.io/errors/operation-not-found",
+        "Operation not found",
+        "The requested task action is not supported",
+        "operation.not_found",
+        None,
+        Some(&instance_id),
+    )
 }
 
 // --- Tests ------------------------------------------------------------------
@@ -774,6 +825,223 @@ mod tests {
         // `submitted`.
         assert_eq!(v["status"]["state"], "working");
 
+        assert_eq!(store.count_tasks().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn root_interface_negotiates_v1_request_and_response() {
+        let (reg, store, idem) = mk_state();
+        let app = router_with_accept(reg, store.clone(), idem);
+        let request = serde_json::json!({
+            "message": {
+                "messageId": "00000000-0000-7000-8000-000000000901",
+                "role": "ROLE_USER",
+                "parts": [{"text": "ping", "mediaType": "text/plain"}]
+            }
+        });
+
+        let response = test_request_with_runtime_ext()
+            .method("POST")
+            .uri("/agents/inst-1/message:send")
+            .header("A2A-Version", "1.0")
+            .header("content-type", crate::protocol::A2A_MEDIA_TYPE)
+            .body(body_json(request))
+            .unwrap();
+        let response = app.oneshot(response).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        assert_eq!(response.headers()["a2a-version"], "1.0");
+        assert_eq!(
+            response.headers()["content-type"],
+            crate::protocol::A2A_MEDIA_TYPE
+        );
+        assert_eq!(response.headers()["vary"], "A2A-Version, Accept");
+        assert!(!response.headers()["location"]
+            .to_str()
+            .unwrap()
+            .contains("/v1/"));
+        let body = read_body(response).await;
+        assert!(body["task"].get("kind").is_none());
+        assert_eq!(body["task"]["status"]["state"], "TASK_STATE_WORKING");
+        assert_eq!(store.count_tasks().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn v1_rejects_unsupported_request_content_type() {
+        let (reg, store, idem) = mk_state();
+        let app = router_with_accept(reg, store.clone(), idem);
+        let response = test_request_with_runtime_ext()
+            .method("POST")
+            .uri("/agents/inst-1/message:send")
+            .header("A2A-Version", "1.0")
+            .header("content-type", "text/plain")
+            .body(body_json(serde_json::json!({
+                "message": {
+                    "messageId": "00000000-0000-7000-8000-000000000904",
+                    "role": "ROLE_USER",
+                    "parts": [{"text": "wrong content type"}]
+                }
+            })))
+            .unwrap();
+        let response = app.oneshot(response).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(response.headers()["content-type"], "application/json");
+        let body = read_body(response).await;
+        assert_eq!(
+            body["error"]["details"][0]["reason"],
+            "CONTENT_TYPE_NOT_SUPPORTED"
+        );
+        assert_eq!(store.count_tasks().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn missing_version_defaults_root_interface_to_v03() {
+        let (reg, store, idem) = mk_state();
+        let app = router_with_accept(reg, store, idem);
+        let request = test_request_with_runtime_ext()
+            .method("POST")
+            .uri("/agents/inst-1/messages:send")
+            .header("content-type", "application/json")
+            .body(body_json(sample_message()))
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        assert_eq!(response.headers()["a2a-version"], "0.3");
+        let body = read_body(response).await;
+        assert_eq!(body["kind"], "task");
+        assert_eq!(body["status"]["state"], "working");
+    }
+
+    #[tokio::test]
+    async fn unsupported_and_malformed_versions_fail_without_side_effects() {
+        for version in ["2.0", "v1", "0.3.0"] {
+            let (reg, store, idem) = mk_state();
+            let app = router_with_accept(reg, store.clone(), idem);
+            let request = test_request_with_runtime_ext()
+                .method("POST")
+                .uri("/agents/inst-1/messages:send")
+                .header("A2A-Version", version)
+                .header("content-type", crate::protocol::A2A_MEDIA_TYPE)
+                .body(body_json(sample_message()))
+                .unwrap();
+            let response = app.oneshot(request).await.unwrap();
+
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(
+                response.headers()["content-type"],
+                crate::protocol::A2A_MEDIA_TYPE
+            );
+            let body = read_body(response).await;
+            assert_eq!(
+                body["error"]["details"][0]["reason"],
+                "VERSION_NOT_SUPPORTED"
+            );
+            assert_eq!(store.count_tasks().unwrap(), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn v1_uses_colon_cancel_action_and_protojson_task() {
+        let (reg, store, idem) = mk_state();
+        seed_owned_task(&store, "task-v1-cancel", "inst-1");
+        let app = router_with_accept(reg, store, idem);
+        let request = test_request_with_runtime_ext()
+            .method("POST")
+            .uri("/agents/inst-1/tasks/task-v1-cancel:cancel")
+            .header("A2A-Version", "1.0")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["a2a-version"], "1.0");
+        let body = read_body(response).await;
+        assert!(body.get("kind").is_none());
+        assert_eq!(body["status"]["state"], "TASK_STATE_CANCELED");
+    }
+
+    #[tokio::test]
+    async fn v1_stream_events_use_stream_response_protojson() {
+        let (reg, store, idem) = mk_state();
+        let app = router_with_accept(reg, store, idem);
+        let request = test_request_with_runtime_ext()
+            .method("POST")
+            .uri("/agents/inst-1/messages:stream")
+            .header("A2A-Version", "1.0")
+            .header("content-type", crate::protocol::A2A_MEDIA_TYPE)
+            .body(body_json(serde_json::json!({
+                "message": {
+                    "messageId": "00000000-0000-7000-8000-000000000902",
+                    "role": "ROLE_USER",
+                    "parts": [{"text": "stream"}]
+                }
+            })))
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["a2a-version"], "1.0");
+        assert!(response.headers()["content-type"]
+            .to_str()
+            .unwrap()
+            .starts_with("text/event-stream"));
+        let bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let event = String::from_utf8(bytes.to_vec()).unwrap();
+        let data = event
+            .lines()
+            .find_map(|line| line.strip_prefix("data: "))
+            .expect("SSE data line");
+        let body: Value = serde_json::from_str(data).unwrap();
+        assert!(body["task"].get("kind").is_none());
+        assert_eq!(body["task"]["status"]["state"], "TASK_STATE_SUBMITTED");
+    }
+
+    #[tokio::test]
+    async fn idempotency_digest_is_bound_to_negotiated_version() {
+        let (reg, store, idem) = mk_state();
+        let app = router_with_accept(reg, store.clone(), idem);
+        let message_id = "00000000-0000-7000-8000-000000000903";
+        let legacy = test_request_with_runtime_ext()
+            .method("POST")
+            .uri("/agents/inst-1/messages:send")
+            .header("A2A-Extensions", crate::extensions::idempotency::URI)
+            .header("content-type", "application/json")
+            .body(body_json(serde_json::json!({
+                "message": {
+                    "messageId": message_id,
+                    "role": "user",
+                    "parts": [{"kind": "text", "text": "same semantics"}]
+                }
+            })))
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(legacy).await.unwrap().status(),
+            StatusCode::ACCEPTED
+        );
+
+        let v1 = test_request_with_runtime_ext()
+            .method("POST")
+            .uri("/agents/inst-1/messages:send")
+            .header("A2A-Version", "1.0")
+            .header("A2A-Extensions", crate::extensions::idempotency::URI)
+            .header("content-type", crate::protocol::A2A_MEDIA_TYPE)
+            .body(body_json(serde_json::json!({
+                "message": {
+                    "messageId": message_id,
+                    "role": "ROLE_USER",
+                    "parts": [{"text": "same semantics"}]
+                }
+            })))
+            .unwrap();
+        let response = app.oneshot(v1).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = read_body(response).await;
+        assert_eq!(
+            body["error"]["details"][0]["reason"],
+            "IDEMPOTENCY_KEY_REUSED"
+        );
         assert_eq!(store.count_tasks().unwrap(), 1);
     }
 
@@ -1704,7 +1972,7 @@ mod tests {
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let v = read_body(resp).await;
-        assert_eq!(v["protocolVersion"], "0.3.0");
+        assert_eq!(v["protocolVersion"], "0.3");
         let signatures = v["signatures"].as_array().expect("signatures array");
         assert_eq!(signatures.len(), 1);
         assert!(signatures[0]["signature"].is_string());

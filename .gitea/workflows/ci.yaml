@@ -371,16 +371,16 @@ jobs:
       AGENTSHARE_BACKING_FILE: /var/tmp/agentic-ci-agentshare-${{ github.run_id }}-${{ matrix.vm_slot }}/agentshare.xfs
     # Gitea Runner 3 enforces job-level timeout-minutes. Retain the shorter
     # shell timeout around `make test-e2e` so VM cleanup receives SIGTERM and
-    # a bounded grace period before the runner cancels the whole job. The accepted repo-local titan policy from
-    # #363/#367 is serialized E2E, runner preflight evidence, and bounded
-    # release build parallelism rather than host-runner label mutation.
+    # a bounded grace period before the runner cancels the whole job.
     timeout-minutes: 90
-    # Gitea 1.25 + Runner 3 can deadlock matrix children that share a job-level
-    # concurrency group. max-parallel keeps this workflow's backends serial;
-    # each qualified host runner has capacity one, isolating host-local state.
+    # Gitea schedules matrix children independently across the two qualified
+    # capacity-one hosts; max-parallel=1 does not create a cross-runner mutex
+    # (#796). Overlap is intentional and safe: VM/libvirt/docker state is
+    # host-local, while run-scoped agentshare paths are distinct by vm_slot.
+    # Capacity one still prevents two VM lanes from overlapping on one host.
     strategy:
       fail-fast: false
-      max-parallel: 1
+      max-parallel: 2
       matrix:
         include:
           - backend: libvirt
@@ -412,8 +412,8 @@ jobs:
 
       - name: Reclaim completed Docker build cache
         # Docker publishing and VM E2E share storage on either eligible runner.
-        # The integration matrix is capacity-one and depends on the completed
-        # Docker job, so no active build can be using this cache here. Keep
+        # Every integration child depends on the completed Docker job, so no
+        # active build can be using its host-local cache here. Keep
         # /tmp and libvirt writable before provisioning a hardware-backed VM.
         run: |
           set -euo pipefail
