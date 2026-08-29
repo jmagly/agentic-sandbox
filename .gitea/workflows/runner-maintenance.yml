@@ -132,6 +132,9 @@ jobs:
     runs-on: s9-build
     timeout-minutes: 20
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
       - name: Upgrade build01 to the current Gitea Runner
         run: bash deploy/systemd/install-gitea-runner-build01.sh
 
