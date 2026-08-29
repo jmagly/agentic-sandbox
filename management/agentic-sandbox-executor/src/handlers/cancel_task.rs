@@ -30,7 +30,7 @@ pub async fn handler(
     State(state): State<AppState>,
     InstanceExt(_ctx): InstanceExt,
 ) -> Response {
-    let mut row = match state.store.get_task(&tid) {
+    let mut row = match state.store.get_task_for_instance(&instance_id, &tid) {
         Ok(Some(r)) => r,
         Ok(None) => {
             return error_response(

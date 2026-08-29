@@ -266,7 +266,7 @@ pub async fn handler(
             let updated = Utc::now();
             let current = state
                 .store
-                .get_task(&task_id)
+                .get_task_for_instance(&instance_id, &task_id)
                 .ok()
                 .flatten()
                 .unwrap_or_else(|| row_after.clone());
@@ -422,9 +422,9 @@ async fn handle_hitl_response(
         );
     };
 
-    let mut row = match state.store.get_task(task_id) {
-        Ok(Some(row)) if row.instance_id.as_deref() == Some(instance_id) => row,
-        Ok(Some(_)) | Ok(None) => {
+    let mut row = match state.store.get_task_for_instance(instance_id, task_id) {
+        Ok(Some(row)) => row,
+        Ok(None) => {
             return error_response(
                 StatusCode::CONFLICT,
                 "https://agentic-sandbox.aiwg.io/errors/hitl-response",

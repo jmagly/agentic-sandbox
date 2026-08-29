@@ -432,7 +432,7 @@ impl TaskStore {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) \
              ON CONFLICT(task_id) DO UPDATE SET \
              context_id = excluded.context_id, \
-             instance_id = COALESCE(excluded.instance_id, tasks.instance_id), \
+             instance_id = COALESCE(tasks.instance_id, excluded.instance_id), \
              state = excluded.state, \
              fail_kind = excluded.fail_kind, \
              status_json = excluded.status_json, \
@@ -471,6 +471,41 @@ impl TaskStore {
             .optional()
             .context("get_task query")?;
         row.transpose()
+    }
+
+    /// Resolve a task only when it belongs to the requested instance.
+    ///
+    /// Tenant-facing handlers must use this composite lookup so a foreign
+    /// task ID is indistinguishable from an unknown task ID.
+    pub fn get_task_for_instance(
+        &self,
+        instance_id: &str,
+        task_id: &str,
+    ) -> Result<Option<TaskRow>> {
+        let conn = self.lock();
+        let row = conn
+            .query_row(
+                "SELECT task_id, context_id, instance_id, state, fail_kind, status_json, \
+                 metadata_json, created_at, updated_at, terminal_at \
+                 FROM tasks WHERE task_id = ?1 AND instance_id = ?2",
+                params![task_id, instance_id],
+                row_to_task,
+            )
+            .optional()
+            .context("get_task_for_instance query")?;
+        let row = row.transpose()?;
+        if row.is_none() {
+            // Deliberately do not distinguish an unknown task from a task
+            // owned by another instance, even in the log message. Record
+            // only the caller-supplied identifiers; never task contents or
+            // push-notification credentials.
+            tracing::warn!(
+                instance_id,
+                task_id,
+                "instance-scoped task lookup denied or not found"
+            );
+        }
+        Ok(row)
     }
 
     pub fn list_tasks(&self, filter: ListFilter) -> Result<Vec<TaskRow>> {
@@ -1299,6 +1334,69 @@ mod tests {
         let got = s.get_task("t1").unwrap().expect("present");
         assert_eq!(got, row);
         assert_eq!(s.count_tasks().unwrap(), 1);
+    }
+
+    #[test]
+    fn scoped_lookup_hides_foreign_and_unknown_tasks() {
+        let s = TaskStore::open_in_memory().unwrap();
+        let row = task("alice-task", TaskState::Working, ts(2026, 1, 1));
+        s.upsert_task(&row).unwrap();
+
+        assert_eq!(
+            s.get_task_for_instance("inst-alice-task", "alice-task")
+                .unwrap(),
+            Some(row)
+        );
+        assert!(s
+            .get_task_for_instance("inst-bob", "alice-task")
+            .unwrap()
+            .is_none());
+        assert!(s
+            .get_task_for_instance("inst-bob", "does-not-exist")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn upsert_cannot_reassign_existing_task_owner() {
+        let s = TaskStore::open_in_memory().unwrap();
+        let mut row = task("owned", TaskState::Working, ts(2026, 1, 1));
+        row.instance_id = Some("inst-alice".into());
+        s.upsert_task(&row).unwrap();
+
+        row.instance_id = Some("inst-bob".into());
+        row.updated_at = ts(2026, 1, 2);
+        s.upsert_task(&row).unwrap();
+
+        assert!(s
+            .get_task_for_instance("inst-alice", "owned")
+            .unwrap()
+            .is_some());
+        assert!(s
+            .get_task_for_instance("inst-bob", "owned")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn tenant_route_sources_do_not_call_bare_task_lookup() {
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut sources = std::fs::read_dir(manifest.join("src/handlers"))
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("rs"))
+            .collect::<Vec<_>>();
+        sources.push(manifest.join("src/bindings/pty_ws.rs"));
+
+        for path in sources {
+            let source = std::fs::read_to_string(&path).unwrap();
+            assert!(
+                !source.contains(".get_task("),
+                "tenant-facing source {} calls bare get_task; use get_task_for_instance",
+                path.display()
+            );
+        }
     }
 
     #[test]

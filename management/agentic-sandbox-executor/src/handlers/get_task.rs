@@ -20,7 +20,7 @@ pub async fn handler(
     State(state): State<AppState>,
     InstanceExt(_ctx): InstanceExt,
 ) -> Response {
-    match state.store.get_task(&tid) {
+    match state.store.get_task_for_instance(&instance_id, &tid) {
         Ok(Some(row)) => {
             let task_json = task_row_to_a2a(&row);
             Response::builder()

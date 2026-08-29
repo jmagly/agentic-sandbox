@@ -74,9 +74,9 @@ pub async fn get(
 }
 
 fn ensure_task_visible(state: &AppState, instance_id: &str, tid: &str) -> Option<Response> {
-    match state.store.get_task(tid) {
-        Ok(Some(row)) if row.instance_id.as_deref() == Some(instance_id) => None,
-        Ok(Some(_)) | Ok(None) => Some(error_response(
+    match state.store.get_task_for_instance(instance_id, tid) {
+        Ok(Some(_)) => None,
+        Ok(None) => Some(error_response(
             StatusCode::NOT_FOUND,
             "https://agentic-sandbox.aiwg.io/errors/task-not-found",
             "Task not found",

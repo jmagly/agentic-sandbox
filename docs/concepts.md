@@ -61,6 +61,14 @@ Typical paths:
 
 The state is queryable on `GET /agents/{instance_id}/tasks/{task_id}` (Surface 2). Operators see the rolled-up view on Surface 1 (`/api/v2/admin/missions`).
 
+Task IDs are always resolved together with the instance ID from the route or
+PTY-WebSocket session. A task owned by another instance is reported exactly as
+an unknown task (`404`, `task.not_found`) and cannot be read, canceled,
+subscribed to, used for push-notification configuration, or used to retrieve
+artifacts. Tenant-facing executor code must use the composite
+`get_task_for_instance` store lookup; bare task-ID lookup is reserved for
+trusted store-internal and test code.
+
 The legacy v1 task API (gRPC + `/api/v1/tasks/*`) has its own simpler state machine; the v2 migration is documented in [`v2-migration-guide.md`](v2-migration-guide.md).
 
 ---

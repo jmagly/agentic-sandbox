@@ -32,7 +32,7 @@ pub async fn handler(
     InstanceExt(_ctx): InstanceExt,
 ) -> Response {
     // Verify the task exists before opening the stream so we can return 404.
-    let initial = match state.store.get_task(&tid) {
+    let initial = match state.store.get_task_for_instance(&instance_id, &tid) {
         Ok(Some(row)) => row,
         Ok(None) => {
             return error_response(
@@ -59,9 +59,10 @@ pub async fn handler(
     };
 
     let store = state.store.clone();
+    let instance_id_owned = instance_id.clone();
     let tid_owned = tid.clone();
 
-    let stream = sse_stream(store, tid_owned, initial);
+    let stream = sse_stream(store, instance_id_owned, tid_owned, initial);
 
     Sse::new(stream)
         .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
@@ -70,6 +71,7 @@ pub async fn handler(
 
 fn sse_stream(
     store: std::sync::Arc<crate::store::task_store::TaskStore>,
+    instance_id: String,
     tid: String,
     initial: crate::store::task_store::TaskRow,
 ) -> impl Stream<Item = Result<Event, Infallible>> {
@@ -87,7 +89,7 @@ fn sse_stream(
 
         loop {
             tokio::time::sleep(Duration::from_secs(1)).await;
-            match store.get_task(&tid) {
+            match store.get_task_for_instance(&instance_id, &tid) {
                 Ok(Some(row)) => {
                     if row.state != last_state || row.updated_at != last_updated {
                         let task_json = task_row_to_a2a(&row);

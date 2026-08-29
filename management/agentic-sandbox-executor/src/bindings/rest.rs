@@ -496,9 +496,34 @@ mod tests {
             "inst-1.example.test",
         ));
         reg.insert(ctx);
+        reg.insert(Arc::new(InstanceContext::new_ephemeral(
+            "inst-2",
+            RuntimeKind::Vm,
+            "agentic-dev",
+            None,
+            "inst-2.example.test",
+        )));
         let store = Arc::new(TaskStore::open_in_memory().unwrap());
         let idem = Arc::new(IdempotencyCache::new(store.clone()));
         (reg, store, idem)
+    }
+
+    fn seed_owned_task(store: &TaskStore, tid: &str, instance_id: &str) {
+        let now = Utc::now();
+        store
+            .upsert_task(&crate::store::task_store::TaskRow {
+                task_id: tid.into(),
+                context_id: None,
+                instance_id: Some(instance_id.into()),
+                state: crate::store::task_store::TaskState::Working,
+                fail_kind: None,
+                status_json: serde_json::json!({"state": "working"}),
+                metadata_json: None,
+                created_at: now,
+                updated_at: now,
+                terminal_at: None,
+            })
+            .unwrap();
     }
 
     fn body_json(v: Value) -> Body {
@@ -1237,6 +1262,114 @@ mod tests {
         assert_eq!(v["id"].as_str().unwrap(), tid);
         // After dispatch accept the task is `working`, not `submitted`.
         assert_eq!(v["status"]["state"], "working");
+    }
+
+    #[tokio::test]
+    async fn task_id_routes_hide_foreign_tasks_across_root_and_v1_aliases() {
+        let (reg, store, idem) = mk_state();
+        seed_owned_task(&store, "alice-task", "inst-1");
+        store
+            .put_push_config(&crate::store::task_store::PushNotificationConfigRow {
+                config_id: "alice-config".into(),
+                task_id: "alice-task".into(),
+                url: "https://subscriber.example.test/hook".into(),
+                auth_json: None,
+                created_at: Utc::now(),
+            })
+            .unwrap();
+        let app = router(reg, store.clone(), idem);
+
+        for prefix in ["", "/v1"] {
+            for suffix in ["", "/subscribe"] {
+                let foreign = Request::builder()
+                    .method("GET")
+                    .uri(format!("/agents/inst-2{prefix}/tasks/alice-task{suffix}"))
+                    .body(Body::empty())
+                    .unwrap();
+                let missing = Request::builder()
+                    .method("GET")
+                    .uri(format!(
+                        "/agents/inst-2{prefix}/tasks/does-not-exist{suffix}"
+                    ))
+                    .body(Body::empty())
+                    .unwrap();
+                let foreign = app.clone().oneshot(foreign).await.unwrap();
+                let missing = app.clone().oneshot(missing).await.unwrap();
+                assert_eq!(foreign.status(), StatusCode::NOT_FOUND);
+                assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+                let foreign = read_body(foreign).await;
+                let missing = read_body(missing).await;
+                for field in ["status", "code", "title", "type"] {
+                    assert_eq!(foreign[field], missing[field], "mismatch in {field}");
+                }
+            }
+
+            for task_id in ["alice-task", "does-not-exist"] {
+                let req = test_request_with_runtime_ext()
+                    .method("POST")
+                    .uri(format!("/agents/inst-2{prefix}/tasks/{task_id}/cancel"))
+                    .body(Body::empty())
+                    .unwrap();
+                let resp = app.clone().oneshot(req).await.unwrap();
+                assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+                let body = read_body(resp).await;
+                assert_eq!(body["code"], "task.not_found");
+            }
+            assert_eq!(
+                store.get_task("alice-task").unwrap().unwrap().state,
+                crate::store::task_store::TaskState::Working,
+                "foreign cancellation must not mutate the task"
+            );
+
+            for task_id in ["alice-task", "does-not-exist"] {
+                let req = test_request_with_runtime_ext()
+                    .method("POST")
+                    .uri(format!(
+                        "/agents/inst-2{prefix}/tasks/{task_id}/pushNotificationConfigs"
+                    ))
+                    .header("content-type", "application/json")
+                    .body(body_json(serde_json::json!({
+                        "url": "https://subscriber.example.test/bob"
+                    })))
+                    .unwrap();
+                let resp = app.clone().oneshot(req).await.unwrap();
+                assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+                let body = read_body(resp).await;
+                assert_eq!(body["code"], "task.not_found");
+            }
+            assert_eq!(store.list_push_configs("alice-task").unwrap().len(), 1);
+
+            for task_id in ["alice-task", "does-not-exist"] {
+                for method in ["GET", "DELETE"] {
+                    let req = test_request_with_runtime_ext()
+                        .method(method)
+                        .uri(format!(
+                            "/agents/inst-2{prefix}/tasks/{task_id}/pushNotificationConfigs/alice-config"
+                        ))
+                        .body(Body::empty())
+                        .unwrap();
+                    let resp = app.clone().oneshot(req).await.unwrap();
+                    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+                    let body = read_body(resp).await;
+                    assert_eq!(body["code"], "task.not_found");
+                }
+            }
+
+            for task_id in ["alice-task", "does-not-exist"] {
+                let req = test_request_with_runtime_ext()
+                    .method("GET")
+                    .uri(format!(
+                        "/agents/inst-2{prefix}/tasks/{task_id}/pushNotificationConfigs"
+                    ))
+                    .body(Body::empty())
+                    .unwrap();
+                let resp = app.clone().oneshot(req).await.unwrap();
+                assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+                let body = read_body(resp).await;
+                assert_eq!(body["code"], "task.not_found");
+            }
+            assert!(store.get_push_config("alice-config").unwrap().is_some());
+        }
     }
 
     #[tokio::test]

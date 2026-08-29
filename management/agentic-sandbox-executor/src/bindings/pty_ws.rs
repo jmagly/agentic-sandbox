@@ -1759,10 +1759,10 @@ async fn dispatch_op(
             // which we approximate with the existing broadcast channel.
             Some(handle_message_send(payload, state, instance_id).await)
         }
-        "tasks/get" => Some(handle_tasks_get(payload, state).await),
+        "tasks/get" => Some(handle_tasks_get(payload, state, instance_id).await),
         "tasks/list" => Some(handle_tasks_list(payload, state, instance_id).await),
-        "tasks/cancel" => Some(handle_tasks_cancel(payload, state).await),
-        "tasks/subscribe" => Some(handle_tasks_subscribe(payload, state).await),
+        "tasks/cancel" => Some(handle_tasks_cancel(payload, state, instance_id).await),
+        "tasks/subscribe" => Some(handle_tasks_subscribe(payload, state, instance_id).await),
 
         // ----- PTY extension verbs -----
         "pty.join_session" => {
@@ -2135,14 +2135,14 @@ async fn handle_message_send(payload: Value, state: &AppState, instance_id: &str
     })
 }
 
-async fn handle_tasks_get(payload: Value, state: &AppState) -> Value {
+async fn handle_tasks_get(payload: Value, state: &AppState, instance_id: &str) -> Value {
     let tid = match payload.get("task_id").and_then(|v| v.as_str()) {
         Some(s) => s,
         None => {
             return build_error_frame("request.invalid_params", "payload.task_id required", 400);
         }
     };
-    match state.store.get_task(tid) {
+    match state.store.get_task_for_instance(instance_id, tid) {
         Ok(Some(row)) => {
             let task = crate::handlers::task_row_to_a2a(&row);
             json!({
@@ -2201,14 +2201,14 @@ async fn handle_tasks_list(payload: Value, state: &AppState, instance_id: &str) 
     }
 }
 
-async fn handle_tasks_cancel(payload: Value, state: &AppState) -> Value {
+async fn handle_tasks_cancel(payload: Value, state: &AppState, instance_id: &str) -> Value {
     let tid = match payload.get("task_id").and_then(|v| v.as_str()) {
         Some(s) => s.to_string(),
         None => {
             return build_error_frame("request.invalid_params", "payload.task_id required", 400);
         }
     };
-    let mut row = match state.store.get_task(&tid) {
+    let mut row = match state.store.get_task_for_instance(instance_id, &tid) {
         Ok(Some(r)) => r,
         Ok(None) => {
             return build_error_frame("task.not_found", &format!("Task '{}' not found", tid), 404);
@@ -2252,14 +2252,14 @@ async fn handle_tasks_cancel(payload: Value, state: &AppState) -> Value {
     })
 }
 
-async fn handle_tasks_subscribe(payload: Value, state: &AppState) -> Value {
+async fn handle_tasks_subscribe(payload: Value, state: &AppState, instance_id: &str) -> Value {
     let tid = match payload.get("task_id").and_then(|v| v.as_str()) {
         Some(s) => s,
         None => {
             return build_error_frame("request.invalid_params", "payload.task_id required", 400);
         }
     };
-    match state.store.get_task(tid) {
+    match state.store.get_task_for_instance(instance_id, tid) {
         Ok(Some(row)) => {
             // Emit the current snapshot. Live updates ride the session
             // broadcast channel and are forwarded by the connection loop
@@ -2325,7 +2325,7 @@ mod tests {
     use crate::extensions::build_default_registry;
     use crate::instance::{InstanceContext, InstanceLayer, InstanceRegistry, RuntimeKind};
     use crate::store::idempotency::IdempotencyCache;
-    use crate::store::task_store::TaskStore;
+    use crate::store::task_store::{TaskState, TaskStore};
     use axum::routing::get;
     use axum::Router;
     use futures_util::{SinkExt, StreamExt};
@@ -3234,6 +3234,59 @@ mod tests {
         let got = recv_json(&mut ws).await;
         assert_eq!(got["op"], "task");
         assert_eq!(got["payload"]["id"], tid);
+    }
+
+    #[tokio::test]
+    async fn ws_task_authority_hides_foreign_tasks_without_side_effects() {
+        let (base, state) = spawn_host_server_with_instances(
+            &["inst-alice", "inst-bob"],
+            "127.0.0.1",
+            Arc::new(crate::bindings::pty_bridge::NoOpPtyBridge),
+        )
+        .await;
+
+        let mut alice = connect(&base, "inst-alice", "sess-alice").await;
+        let _hello = recv_json(&mut alice).await;
+        send_op(
+            &mut alice,
+            "message/send",
+            json!({
+                "message": {
+                    "messageId": "00000000-0000-7000-8000-000000000099",
+                    "role": "user",
+                    "parts": [{"kind": "text", "text": "alice"}]
+                }
+            }),
+        )
+        .await;
+        let created = recv_json(&mut alice).await;
+        let tid = created["payload"]["id"].as_str().unwrap().to_string();
+
+        let mut bob = connect(&base, "inst-bob", "sess-bob").await;
+        let _hello = recv_json(&mut bob).await;
+        for op in ["tasks/get", "tasks/cancel", "tasks/subscribe"] {
+            let mut signatures = Vec::new();
+            for candidate in [&tid, "does-not-exist"] {
+                send_op(&mut bob, op, json!({"task_id": candidate})).await;
+                let response = recv_json(&mut bob).await;
+                assert_eq!(response["op"], "error");
+                assert_eq!(response["payload"]["code"], "task.not_found");
+                assert_eq!(response["payload"]["status"], 404);
+                signatures.push((
+                    response["payload"]["code"].clone(),
+                    response["payload"]["status"].clone(),
+                ));
+            }
+            assert_eq!(signatures[0], signatures[1]);
+        }
+
+        let row = state
+            .store
+            .get_task_for_instance("inst-alice", &tid)
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.instance_id.as_deref(), Some("inst-alice"));
+        assert_eq!(row.state, TaskState::Submitted);
     }
 
     #[tokio::test]

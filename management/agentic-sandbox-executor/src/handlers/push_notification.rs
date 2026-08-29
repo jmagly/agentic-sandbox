@@ -131,7 +131,7 @@ pub async fn create_config(
     };
 
     // Verify task exists.
-    match state.store.get_task(&tid) {
+    match state.store.get_task_for_instance(&instance_id, &tid) {
         Ok(Some(_)) => {}
         Ok(None) => {
             return error_response(
@@ -192,6 +192,9 @@ pub async fn get_config(
     State(state): State<AppState>,
     InstanceExt(_ctx): InstanceExt,
 ) -> Response {
+    if let Err(response) = require_owned_task(&state, &instance_id, &tid) {
+        return response;
+    }
     match state.store.get_push_config(&cid) {
         Ok(Some(row)) if row.task_id == tid => {
             let wire = config_to_wire(&row);
@@ -231,6 +234,9 @@ pub async fn list_configs(
     State(state): State<AppState>,
     InstanceExt(_ctx): InstanceExt,
 ) -> Response {
+    if let Err(response) = require_owned_task(&state, &instance_id, &tid) {
+        return response;
+    }
     match state.store.list_push_configs(&tid) {
         Ok(rows) => {
             let items: Vec<Value> = rows.iter().map(config_to_wire).collect();
@@ -260,6 +266,9 @@ pub async fn delete_config(
     State(state): State<AppState>,
     InstanceExt(_ctx): InstanceExt,
 ) -> Response {
+    if let Err(response) = require_owned_task(&state, &instance_id, &tid) {
+        return response;
+    }
     // First check the config exists AND belongs to this task. We do a get
     // to enforce cross-task isolation: a DELETE for a cid under a foreign
     // task must 404, not silently delete.
@@ -309,6 +318,30 @@ pub async fn delete_config(
     }
 }
 
+fn require_owned_task(state: &AppState, instance_id: &str, tid: &str) -> Result<(), Response> {
+    match state.store.get_task_for_instance(instance_id, tid) {
+        Ok(Some(_)) => Ok(()),
+        Ok(None) => Err(error_response(
+            StatusCode::NOT_FOUND,
+            "https://agentic-sandbox.aiwg.io/errors/task-not-found",
+            "Task not found",
+            format!("Task '{}' not found", tid),
+            "task.not_found",
+            None,
+            Some(instance_id),
+        )),
+        Err(e) => Err(error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "https://agentic-sandbox.aiwg.io/errors/internal",
+            "Internal server error",
+            format!("Failed to read task: {e}"),
+            "internal.error",
+            None,
+            Some(instance_id),
+        )),
+    }
+}
+
 // ---------- tests ----------
 
 #[cfg(test)]
@@ -355,7 +388,7 @@ mod tests {
             .upsert_task(&TaskRow {
                 task_id: tid.to_string(),
                 context_id: None,
-                instance_id: Some("inst-test".into()),
+                instance_id: Some("inst-1".into()),
                 state: TaskState::Submitted,
                 fail_kind: None,
                 status_json: serde_json::json!({"state": "submitted"}),

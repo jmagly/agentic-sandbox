@@ -64,9 +64,9 @@ pub async fn handler(
             )
         }
     };
-    let mut row = match state.store.get_task(&tid) {
-        Ok(Some(row)) if row.instance_id.as_deref() == Some(&instance_id) => row,
-        Ok(_) => {
+    let mut row = match state.store.get_task_for_instance(&instance_id, &tid) {
+        Ok(Some(row)) => row,
+        Ok(None) => {
             return error_response(
                 StatusCode::NOT_FOUND,
                 "https://agentic-sandbox.aiwg.io/errors/task-not-found",
