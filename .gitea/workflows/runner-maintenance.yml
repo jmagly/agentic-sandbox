@@ -132,6 +132,9 @@ jobs:
     runs-on: s9-build
     timeout-minutes: 20
     steps:
+      - name: Upgrade build01 to the current Gitea Runner
+        run: bash deploy/systemd/install-gitea-runner-build01.sh
+
       - name: Upgrade stable Rust and required tooling
         run: |
           set -euo pipefail
@@ -148,6 +151,16 @@ jobs:
           cargo --version --verbose
           cargo fmt --version
           cargo clippy --version
+
+      - name: Schedule runner restart after job completion
+        run: |
+          set -euo pipefail
+          sudo -n systemctl is-enabled gitea-act-runner-build01.service
+          sudo -n systemd-run \
+            --unit="gitea-act-runner-build01-restart-${GITHUB_RUN_ID}" \
+            --on-active=20s \
+            /bin/systemctl restart gitea-act-runner-build01.service
+          echo "build01 runner restart scheduled in 20 seconds"
 
   configure-titan:
     name: Configure Titan shared host runner contract
