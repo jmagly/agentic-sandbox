@@ -30,10 +30,11 @@ on:
       - develop
 
 # Serialize CI runs per ref so overlapping runs do not stack routine work onto
-# the shared Rust runner pool. `cancel-in-progress: false` queues rather than
-# cancelling, so a release (tag) build is never interrupted mid-flight.
-# Runner-level capacity remains the cross-workflow backstop; this guard bounds
-# the in-repo contribution.
+# the shared Rust runner pool. Gitea 1.27 evaluates this at the run-attempt
+# boundary; `cancel-in-progress: false` queues rather than cancels. The bounded
+# `same-ref-concurrency-qualification.yml` workflow verifies that service
+# capability after upgrades. Runner capacity remains the cross-workflow
+# backstop.
 concurrency:
   group: ci-${{ gitea.ref }}
   cancel-in-progress: false

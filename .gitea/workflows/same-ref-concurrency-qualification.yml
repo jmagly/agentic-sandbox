@@ -1,0 +1,89 @@
+name: Same-ref concurrency qualification
+
+on:
+  workflow_dispatch:
+    inputs:
+      hold_seconds:
+        description: "Bounded hold used to create overlap (30, 45, or 60)"
+        required: true
+        default: "45"
+        type: string
+      outcome:
+        description: "Terminal result after the hold (success or failure)"
+        required: true
+        default: "success"
+        type: string
+      evidence_label:
+        description: "Non-secret label recorded with the run evidence"
+        required: true
+        default: "manual"
+        type: string
+
+# Gitea 1.27 evaluates this at the run-attempt boundary. Two dispatches on the
+# same ref must serialize; the later run must never cancel the active holder.
+concurrency:
+  group: agentic-sandbox-same-ref-${{ gitea.ref }}
+  cancel-in-progress: false
+
+jobs:
+  bounded-holder:
+    name: Bounded same-ref holder
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    env:
+      QUALIFICATION_ROOT: /tmp/agentic-sandbox-concurrency-${{ github.run_id }}
+      EVIDENCE_ROOT: test-results/same-ref-concurrency/${{ github.run_id }}
+    steps:
+      - name: Validate bounded inputs and record start
+        env:
+          HOLD_SECONDS: ${{ inputs.hold_seconds }}
+          OUTCOME: ${{ inputs.outcome }}
+          EVIDENCE_LABEL: ${{ inputs.evidence_label }}
+        run: |
+          set -euo pipefail
+          case "${HOLD_SECONDS}" in 30|45|60) ;; *) exit 2 ;; esac
+          case "${OUTCOME}" in success|failure) ;; *) exit 2 ;; esac
+          case "${EVIDENCE_LABEL}" in
+            *[!A-Za-z0-9._-]*|'') exit 2 ;;
+          esac
+          install -d -m 700 "${QUALIFICATION_ROOT}" "${EVIDENCE_ROOT}"
+          printf 'run_id=%s\nref=%s\nlabel=%s\nstarted_at=%s\n' \
+            "${GITHUB_RUN_ID}" "${GITHUB_REF}" "${EVIDENCE_LABEL}" \
+            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            > "${EVIDENCE_ROOT}/start.txt"
+          printf '%s\n' "${GITHUB_RUN_ID}" > "${QUALIFICATION_ROOT}/owner"
+
+      - name: Hold the concurrency group
+        env:
+          HOLD_SECONDS: ${{ inputs.hold_seconds }}
+          OUTCOME: ${{ inputs.outcome }}
+        run: |
+          set -euo pipefail
+          sleep "${HOLD_SECONDS}"
+          printf 'hold_completed_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            > "${EVIDENCE_ROOT}/hold.txt"
+          if [ "${OUTCOME}" = failure ]; then
+            echo "bounded failure requested"
+            exit 1
+          fi
+
+      - name: Remove exact run residue and retain cleanup evidence
+        if: always()
+        run: |
+          set -euo pipefail
+          test "$(cat "${QUALIFICATION_ROOT}/owner")" = "${GITHUB_RUN_ID}"
+          rm -f "${QUALIFICATION_ROOT}/owner"
+          rmdir "${QUALIFICATION_ROOT}"
+          test ! -e "${QUALIFICATION_ROOT}"
+          printf 'cleanup_completed_at=%s\nresidue_absent=true\n' \
+            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            > "${EVIDENCE_ROOT}/cleanup.txt"
+
+      - name: Upload bounded evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: same-ref-concurrency-${{ github.run_id }}
+          path: test-results/same-ref-concurrency/${{ github.run_id }}/
+          if-no-files-found: error
+          retention-days: 14

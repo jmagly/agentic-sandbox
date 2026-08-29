@@ -55,3 +55,23 @@ successful reset notification as evidence.
 After the reset, rerun the metadata-only inventory helper and verify that every
 repository-scoped runner is expected. Existing registered runners keep their
 own runner authentication and do not need the replacement registration token.
+
+## Same-ref concurrency qualification
+
+Gitea 1.25 could cancel an active same-ref run even when a workflow declared
+`cancel-in-progress: false`. This installation relies on Gitea 1.27's
+run-attempt concurrency implementation. Requalify that behavior after a Gitea
+server migration or Actions scheduler change with the bounded
+`.gitea/workflows/same-ref-concurrency-qualification.yml` harness.
+
+Dispatch two `outcome=success` runs on the same ref within the first run's
+bounded hold. Retain run, job, and task timestamps and verify that the second
+run stays blocked until the first holder and its cleanup step complete. Neither
+run may be cancelled. Then dispatch `outcome=failure` and verify its
+`if: always()` cleanup step and evidence artifact complete before the expected
+job failure.
+
+The harness performs no release, VM, container, or provider mutation. It owns
+only `/tmp/agentic-sandbox-concurrency-<run-id>` and removes that exact path.
+Do not use release, E2E, or live qualification workflows to test scheduler
+concurrency.
