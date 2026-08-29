@@ -8,6 +8,17 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+## [2026.8.7] — 2026-08-29
+
+Follow-up release for Gitea Runner 3 process cleanup discovered by the live
+v2026.8.6 host-runtime lane.
+
+### Fixed
+
+- Reap the heartbeat loop's active `sleep` child before returning from CI
+  steps. This closes inherited stdout/stderr descriptors immediately and avoids
+  Runner 3's `WaitDelay expired before I/O complete` failure.
+
 ## [2026.8.6] — 2026-08-29
 
 Patch release completing the Gitea Runner 3 rollout and hardening the protected
@@ -3275,7 +3286,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.8.6...HEAD
+[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.8.7...HEAD
+[2026.8.7]: https://github.com/jmagly/agentic-sandbox/compare/v2026.8.6...v2026.8.7
 [2026.8.6]: https://github.com/jmagly/agentic-sandbox/compare/v2026.8.5...v2026.8.6
 [2026.8.5]: https://github.com/jmagly/agentic-sandbox/compare/v2026.8.4...v2026.8.5
 [2026.8.4]: https://github.com/jmagly/agentic-sandbox/compare/v2026.8.3...v2026.8.4
