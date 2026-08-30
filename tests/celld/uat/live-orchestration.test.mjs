@@ -351,7 +351,9 @@ test("orchestration driver uses fixture-managed Worker access for live managemen
 });
 
 test("owner recovery replaces and closes exact fixture-managed Worker access", async () => {
-  assert.match(orchestrationSource, /await replaceFleetWorkerAccess\(runtime, fallbackIndex\)/);
+  assert.match(orchestrationSource, /await replaceFleetWorkerAccess\(runtime, survivorIndexes\[0\]\)/);
+  assert.match(orchestrationSource, /openTrackedFleetWorkerAccess\(runtime, survivorIndexes\[1\]\)/);
+  assert.match(orchestrationSource, /workerAccesses: ownerProbeAccesses/);
   assert.doesNotMatch(orchestrationSource, /runtime\.workerEndpoint = workerEndpoint\(/);
   const opened = [];
   const closed = [];
@@ -375,20 +377,27 @@ test("owner recovery replaces and closes exact fixture-managed Worker access", a
   assert.deepEqual([...runtime.workerAccesses], [replacement]);
 });
 
-test("owner recovery probes the selected survivor before requiring an advanced owner epoch", async () => {
+test("owner recovery probes both exact tracked survivors before requiring an advanced owner epoch", async () => {
   const calls = [];
   const previousOwner = { owner_target: "node-1", owner_epoch: 7 };
   const advanced = { owner_target: "node-2", owner_epoch: 8 };
+  const survivor2 = { endpoint: "http://127.0.0.1:28080", node: "node-2", close: async () => {} };
+  const survivor3 = { endpoint: "http://127.0.0.1:38080", node: "node-3", close: async () => {} };
   const runtime = {
-    workerEndpoint: "http://127.0.0.1:28080",
-    fleet: { worker_vars_file_ref: "/run/celld/worker-vars" },
+    workerAccess: survivor2,
+    workerAccesses: new Set([survivor2, survivor3]),
+    workerEndpoint: survivor2.endpoint,
+    fleet: {
+      worker_vars_file_ref: "/run/celld/worker-vars",
+      nodes: [{ name: "node-1" }, { name: "node-2" }, { name: "node-3" }],
+    },
     getWorkerOperation: async (request) => {
       calls.push(["lookup", request]);
       return { status: 404, body: { error: { code: "operation.missing" } } };
     },
     observeCelldOwnership: async (_runtime, request) => {
       calls.push(["observe", request]);
-      return advanced;
+      return calls.filter(([kind]) => kind === "lookup").length === 2 ? advanced : previousOwner;
     },
   };
   const result = await liveOrchestration.probeCelldOwnerTakeover(runtime, {
@@ -396,16 +405,17 @@ test("owner recovery probes the selected survivor before requiring an advanced o
     operationId: "uat004-qemu-1-before_dispatch-0",
     generation: 1,
     previousOwner,
+    workerAccesses: [survivor2, survivor3],
   });
   assert.equal(result, advanced);
-  assert.deepEqual(calls.map(([kind]) => kind), ["lookup", "observe"]);
-  assert.deepEqual(calls[0][1], {
-    endpoint: runtime.workerEndpoint,
+  assert.deepEqual(calls.map(([kind]) => kind), ["lookup", "lookup", "observe"]);
+  assert.deepEqual(calls.slice(0, 2).map(([, request]) => request), [survivor2.endpoint, survivor3.endpoint].map((endpoint) => ({
+    endpoint,
     varsFile: runtime.fleet.worker_vars_file_ref,
     instanceId: "123e4567-e89b-42d3-a456-426614174000",
     operationId: "uat004-qemu-1-before_dispatch-0",
     generation: 1,
-  });
+  })));
 
   runtime.observeCelldOwnership = async () => ({ owner_target: "node-1", owner_epoch: 8 });
   assert.equal(await liveOrchestration.probeCelldOwnerTakeover(runtime, {
@@ -413,7 +423,19 @@ test("owner recovery probes the selected survivor before requiring an advanced o
     operationId: "uat004-qemu-1-before_dispatch-1",
     generation: 1,
     previousOwner,
+    workerAccesses: [survivor2, survivor3],
   }), false);
+
+  await assert.rejects(
+    liveOrchestration.probeCelldOwnerTakeover(runtime, {
+      instanceId: "123e4567-e89b-42d3-a456-426614174000",
+      operationId: "uat004-qemu-1-before_dispatch-2",
+      generation: 1,
+      previousOwner,
+      workerAccesses: [survivor2, survivor2],
+    }),
+    /exact tracked survivors/,
+  );
 });
 
 test("owner recovery rejects non-loopback replacement access and closes it", async () => {
@@ -1759,7 +1781,7 @@ test("provider observations fail closed for foreign, ambiguous, and absent targe
   );
 });
 
-function ownerRuntime({ stopped = [], foreign = [], epochs = [7, 7] } = {}) {
+function ownerRuntime({ stopped = [], foreign = [], invalidAddress = [], epochs = [7, 7] } = {}) {
   const nodes = [1, 2, 3].map((index) => ({
     name: `celld-test-node-${index}`,
     node_id: `test-run-node-${index}`,
@@ -1767,16 +1789,21 @@ function ownerRuntime({ stopped = [], foreign = [], epochs = [7, 7] } = {}) {
   }));
   const scope = celldInstanceCellScope("123e4567-e89b-42d3-a456-426614174000");
   let remoteIndex = 0;
+  const fetchedHosts = [];
   return {
+    fetchedHosts,
     runId: "test-run",
     fleet: { run_id: "test-run", network: { name: "celld-test-private" }, nodes },
     runCommand: (_program, args) => {
       const node = nodes.find((candidate) => candidate.name === args.at(-1));
       const repository = foreign.includes(node.name) ? "someone/else" : "roctinam/agentic-sandbox";
-      return `${stopped.includes(node.name) ? "false" : "true"}|${repository}|celld-qualification|test-run|celld-qualification|172.29.0.${nodes.indexOf(node) + 2}`;
+      const running = !stopped.includes(node.name);
+      const address = running && !invalidAddress.includes(node.name) ? `172.29.0.${nodes.indexOf(node) + 2}` : "";
+      return `${running ? "true" : "false"}|${repository}|celld-qualification|test-run|celld-qualification|${address}`;
     },
     fetchCelldInternal: async (url) => {
       assert.equal(url.pathname, `/cell/${scope}`);
+      fetchedHosts.push(url.hostname);
       if (url.hostname === "172.29.0.3") return { status: 200, body: { route: "local", cell: scope } };
       return {
         status: 307,
@@ -1803,15 +1830,28 @@ test("Celld ownership observation targets the exact local owner and records remo
   assert.equal(observed.route_agreement, true);
   assert.match(observed.cell_scope_sha256, /^[0-9a-f]{64}$/);
 
-  const afterLoss = await observeCelldOwnership(ownerRuntime({ stopped: ["celld-test-node-1"] }), { instanceId });
+  const afterLossRuntime = ownerRuntime({ stopped: ["celld-test-node-1"] });
+  const afterLoss = await observeCelldOwnership(afterLossRuntime, { instanceId });
   assert.equal(afterLoss.owner_target, "celld-test-node-2");
+  assert.equal(afterLoss.owner_node_id, "test-run-node-2");
+  assert.equal(afterLoss.owner_epoch, 7);
   assert.equal(afterLoss.live_nodes, 2);
+  assert.equal(afterLoss.route_agreement, true);
+  assert.deepEqual(afterLossRuntime.fetchedHosts, ["172.29.0.3", "172.29.0.4"]);
 });
 
 test("Celld ownership observation rejects foreign nodes and disagreeing epochs", async () => {
   const instanceId = "123e4567-e89b-42d3-a456-426614174000";
   await assert.rejects(
     observeCelldOwnership(ownerRuntime({ foreign: ["celld-test-node-1"] }), { instanceId }),
+    /unowned fleet node/,
+  );
+  await assert.rejects(
+    observeCelldOwnership(ownerRuntime({ stopped: ["celld-test-node-1"], foreign: ["celld-test-node-1"] }), { instanceId }),
+    /unowned fleet node/,
+  );
+  await assert.rejects(
+    observeCelldOwnership(ownerRuntime({ invalidAddress: ["celld-test-node-1"] }), { instanceId }),
     /unowned fleet node/,
   );
   await assert.rejects(

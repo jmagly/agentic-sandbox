@@ -129,7 +129,24 @@ is_orphaned_celld_qualification_vm() {
 
     is_celld_qualification_vm "$vm" || return 1
     [[ ! -e "$VM_ROOT/$vm" ]] || return 1
-    ! virsh_cmd dominfo "$vm" &>/dev/null
+    [[ "${SKIP_LIBVIRT:-0}" != "1" ]] || return 1
+    command -v virsh >/dev/null 2>&1 || return 1
+    if [[ "${LIBVIRT_DOMAIN_INVENTORY_LOADED:-0}" != "1" ]]; then
+        LIBVIRT_DOMAIN_INVENTORY="$(virsh_cmd list --all --name)" || return 1
+        LIBVIRT_DOMAIN_INVENTORY_LOADED=1
+    fi
+    ! grep -Fqx -- "$vm" <<< "$LIBVIRT_DOMAIN_INVENTORY"
+}
+
+is_registry_ipv4() {
+    local address="$1" octet
+    local -a octets
+    [[ "$address" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || return 1
+    IFS='.' read -r -a octets <<< "$address"
+    [[ "${#octets[@]}" == "4" ]] || return 1
+    for octet in "${octets[@]}"; do
+        ((10#$octet <= 255)) || return 1
+    done
 }
 
 keep_current() {
@@ -368,15 +385,30 @@ reap_ip_registry() {
         return 0
     }
 
-    local tmp
+    local tmp line vm address changed=0
     tmp="$(mktemp)"
-    awk -F= -v current="$CURRENT_VM" '
-        $1 ~ /^agentic-e2e-[0-9]+$/ && $1 != current { next }
-        { print }
-    ' "$IP_REGISTRY" > "$tmp"
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        if [[ ! "$line" =~ ^([^=]+)=([^=]+)$ ]]; then
+            printf '%s\n' "$line" >> "$tmp"
+            continue
+        fi
+        vm="${BASH_REMATCH[1]}"
+        address="${BASH_REMATCH[2]}"
+        if is_e2e_vm "$vm" && ! keep_current "$vm"; then
+            changed=1
+            continue
+        fi
+        if is_registry_ipv4 "$address" \
+            && is_celld_qualification_vm "$vm" \
+            && is_orphaned_celld_qualification_vm "$vm"; then
+            changed=1
+            continue
+        fi
+        printf '%s\n' "$line" >> "$tmp"
+    done < "$IP_REGISTRY"
 
-    if cmp -s "$IP_REGISTRY" "$tmp"; then
-        echo "[reaper] no stale E2E IP registry rows found"
+    if [[ "$changed" == "0" ]] || cmp -s "$IP_REGISTRY" "$tmp"; then
+        echo "[reaper] no stale E2E or Celld qualification IP registry rows found"
         rm -f "$tmp"
         return 0
     fi
@@ -387,7 +419,7 @@ reap_ip_registry() {
     else
         cat "$tmp" > "$IP_REGISTRY"
         rm -f "$tmp"
-        echo "[reaper] removed stale E2E IP registry rows from $IP_REGISTRY"
+        echo "[reaper] removed stale E2E or Celld qualification IP registry rows from $IP_REGISTRY"
     fi
 }
 
@@ -491,6 +523,8 @@ main() {
     VIRSH_TIMEOUT="${VIRSH_TIMEOUT:-15}"
     DRY_RUN=0
     SKIP_LIBVIRT=0
+    LIBVIRT_DOMAIN_INVENTORY=""
+    LIBVIRT_DOMAIN_INVENTORY_LOADED=0
     HELP_REQUESTED=0
 
     parse_args "$@"

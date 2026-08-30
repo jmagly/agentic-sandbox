@@ -1092,6 +1092,118 @@ test("normal cleanup durably closes an absent interrupted provision before clean
   }
 });
 
+test("removed QEMU tombstones reconcile only an exact never-bound absent provision", async (t) => {
+  function setup(prefix) {
+    const fixture = exactRunFixture(prefix);
+    const storageRoot = join(fixture.root, "vm-storage");
+    fixture.config.vm_storage_dir = storageRoot;
+    mkdirSync(storageRoot, { recursive: true, mode: 0o700 });
+    const subject = providerSubject({
+      name: "celld-absent-qemu",
+      substrate: "qemu",
+      operationId: "interrupted-absent-qemu-provision",
+    });
+    planOrchestrationMutation(fixture.inventory, {
+      mutation: "provider_action",
+      scenarioId: "UAT-CELLD-006",
+      subjectType: "provider_resource",
+      subject,
+    }, new Date("2026-08-23T00:00:03.000Z"));
+    const resource = fixture.inventory.resources[0];
+    const runtime = runtimeFor(fixture, resource);
+    runtime.persistInventory = (_path, inventory) => {
+      assert.deepEqual(validateOrchestrationInventoryDocument(inventory, fixture.config), []);
+    };
+    return { fixture, runtime, resource, subject, storageRoot };
+  }
+
+  await t.test("a second cleanup pass accepts the exact absent tombstone without destructive work", async () => {
+    const { fixture, runtime, resource, subject } = setup("red-absent-qemu-tombstone");
+    try {
+      let observationCalls = 0;
+      let removeCalls = 0;
+      let helperCalls = 0;
+      const dependencies = {
+        observeProviderResource: async () => {
+          observationCalls += 1;
+          return {
+            owned: true,
+            present: false,
+            state: "absent",
+            provider_storage_present: false,
+            provider_identity_sha256: null,
+            configuration_sha256: null,
+          };
+        },
+        removeProviderResource: async () => { removeCalls += 1; },
+        invokeQemuCleanupHelper: () => { helperCalls += 1; },
+      };
+      await liveOrchestration.cleanupOwnedProviderResources(runtime, dependencies);
+      await liveOrchestration.cleanupOwnedProviderResources(runtime, dependencies);
+      assert.equal(observationCalls, 1);
+      assert.equal(removeCalls, 0);
+      assert.equal(helperCalls, 0);
+      assert.equal(resource.status, "removed");
+      assert.equal(runtime.providerResources.has(subject.instance_id), false);
+      assert.deepEqual(fixture.inventory.incomplete_mutation_ids, []);
+      assert.equal(fixture.inventory.journal.some((entry) => entry.mutation === "provider_cleanup"), false);
+      const terminals = fixture.inventory.journal.filter((entry) => entry.mutation === "provider_action" && entry.event === "recovered");
+      assert.equal(terminals.length, 1);
+      assert.equal(terminals[0].outcome, "absent");
+      assert.deepEqual(validateOrchestrationInventoryDocument(fixture.inventory, fixture.config), []);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  await t.test("a deterministic storage pathname appearing after tombstoning remains cleanup residue", async () => {
+    const { fixture, runtime, resource, storageRoot } = setup("red-absent-qemu-storage-residue");
+    try {
+      const absent = async () => ({
+        owned: true,
+        present: false,
+        state: "absent",
+        provider_storage_present: false,
+        provider_identity_sha256: null,
+        configuration_sha256: null,
+      });
+      await liveOrchestration.cleanupOwnedProviderResources(runtime, { observeProviderResource: absent });
+      mkdirSync(join(storageRoot, resource.name), { mode: 0o700 });
+      await assert.rejects(
+        liveOrchestration.cleanupOwnedProviderResources(runtime, {
+          observeProviderResource: async () => { throw new Error("removed tombstone must not be re-observed"); },
+          removeProviderResource: async () => { throw new Error("removed tombstone must not be removed again"); },
+        }),
+        (error) => error.exitCode === 4 && /storage|boundary|residue/.test(error.message),
+      );
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  await t.test("a partial retired storage binding is never accepted as an unbound tombstone", async () => {
+    const { fixture, runtime, resource, storageRoot } = setup("red-partial-qemu-tombstone");
+    try {
+      const absent = async () => ({
+        owned: true,
+        present: false,
+        state: "absent",
+        provider_storage_present: false,
+        provider_identity_sha256: null,
+        configuration_sha256: null,
+      });
+      await liveOrchestration.cleanupOwnedProviderResources(runtime, { observeProviderResource: absent });
+      resource.storage_path = join(storageRoot, resource.name);
+      await assert.rejects(
+        liveOrchestration.cleanupOwnedProviderResources(runtime),
+        (error) => error.exitCode === 4 && /binding|storage|boundary/.test(error.message),
+      );
+    } finally {
+      fixture.cleanup();
+    }
+  });
+});
+
 test("normal cleanup durably binds an observed interrupted provision before removing it", async () => {
   const fixture = exactRunFixture("red-observed-interrupted-provision");
   try {

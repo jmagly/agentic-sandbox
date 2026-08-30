@@ -428,14 +428,13 @@ export function workerEndpoint(config, nodeIndex = 0) {
   return `http://127.0.0.1:${match[1]}`;
 }
 
-export async function replaceFleetWorkerAccess(runtime, nodeIndex) {
+export async function openTrackedFleetWorkerAccess(runtime, nodeIndex) {
   if (!runtime?.fleetPath || !runtime?.fleet?.nodes?.[nodeIndex]) {
-    throw new Error("Celld Worker access replacement requires an exact fleet node");
+    throw new Error("Celld Worker access requires an exact fleet node");
   }
   const accessFactory = runtime.openFleetWorkerAccess ?? openFleetWorkerAccess;
   const next = await accessFactory(runtime.fleetPath, { nodeIndex });
-  const previous = runtime.workerAccess;
-  runtime.workerAccesses ??= new Set(previous ? [previous] : []);
+  runtime.workerAccesses ??= new Set(runtime.workerAccess ? [runtime.workerAccess] : []);
   if (typeof next?.close === "function") runtime.workerAccesses.add(next);
   let endpoint;
   try {
@@ -456,8 +455,14 @@ export async function replaceFleetWorkerAccess(runtime, nodeIndex) {
         throw new OrchestrationCleanupResidueError("invalid Celld Worker access cleanup failed", { cause: error });
       }
     }
-    throw new Error("Celld Worker access replacement is not exact host-loopback access");
+    throw new Error("Celld Worker access is not exact host-loopback access");
   }
+  return next;
+}
+
+export async function replaceFleetWorkerAccess(runtime, nodeIndex) {
+  const previous = runtime?.workerAccess;
+  const next = await openTrackedFleetWorkerAccess(runtime, nodeIndex);
   runtime.workerAccess = next;
   runtime.workerEndpoint = next.endpoint;
   if (previous && previous !== next) {
@@ -514,15 +519,16 @@ export async function observeCelldOwnership(runtime, { instanceId }, now = new D
         || fields[1] !== "roctinam/agentic-sandbox"
         || fields[2] !== "celld-qualification"
         || fields[3] !== runtime.runId
-        || fields[4] !== "celld-qualification"
-        || !privateIpv4(fields[5])) {
+        || fields[4] !== "celld-qualification") {
       throw new Error(`refusing Celld owner observation through unowned fleet node ${node.name}`);
     }
     if (fields[0] === "false") {
       routes.push({ node, running: false, route: "stopped" });
       continue;
     }
-    if (fields[0] !== "true") throw new Error("Celld fleet node has an invalid running state");
+    if (fields[0] !== "true" || !privateIpv4(fields[5])) {
+      throw new Error(`refusing Celld owner observation through unowned fleet node ${node.name}`);
+    }
     const response = await fetchInternal(new URL(`http://${fields[5]}:8081/cell/${scope}`));
     if (!response?.body || typeof response.body !== "object" || Array.isArray(response.body)) throw new Error("Celld owner route response is invalid");
     if (response.status === 200
@@ -572,15 +578,39 @@ export async function probeCelldOwnerTakeover(runtime, {
   operationId: operationIdValue,
   generation,
   previousOwner,
+  workerAccesses,
 }) {
+  const expectedSurvivors = runtime.fleet.nodes
+    .filter((node) => node.name !== previousOwner.owner_target)
+    .map((node) => node.name)
+    .sort();
+  const accesses = workerAccesses ?? [];
+  const accessNodes = accesses.map((access) => access?.node).sort();
+  const exactAccesses = accesses.length === 2
+    && new Set(accesses).size === 2
+    && JSON.stringify(accessNodes) === JSON.stringify(expectedSurvivors)
+    && accesses.includes(runtime.workerAccess)
+    && accesses.every((access) => runtime.workerAccesses?.has(access)
+      && typeof access.close === "function"
+      && (() => {
+        try {
+          const endpoint = new URL(access.endpoint);
+          return endpoint.protocol === "http:" && endpoint.hostname === "127.0.0.1"
+            && endpoint.origin === access.endpoint && endpoint.pathname === "/"
+            && !endpoint.username && !endpoint.password && !endpoint.search && !endpoint.hash;
+        } catch { return false; }
+      })());
+  if (!exactAccesses) throw new Error("Celld owner takeover probe requires both exact tracked survivors");
   const lookup = runtime.getWorkerOperation ?? getWorkerOperation;
-  await lookup({
-    endpoint: runtime.workerEndpoint,
-    varsFile: runtime.fleet.worker_vars_file_ref,
-    instanceId,
-    operationId: operationIdValue,
-    generation,
-  });
+  for (const access of accesses) {
+    await lookup({
+      endpoint: access.endpoint,
+      varsFile: runtime.fleet.worker_vars_file_ref,
+      instanceId,
+      operationId: operationIdValue,
+      generation,
+    });
+  }
   const observe = runtime.observeCelldOwnership ?? observeCelldOwnership;
   const observation = await observe(runtime, { instanceId });
   return observation.owner_target !== previousOwner.owner_target
@@ -2115,6 +2145,7 @@ async function runUat004(runtime, timeline) {
         let ownershipAfterLoss = null;
         let recoveryMs = null;
         let campaignError = null;
+        let ownerProbeAccesses = [];
         try {
           recoveryPhase = `${substrate}-${crashPoint}-management-fault`;
           if (crashPoint === "before_dispatch") {
@@ -2160,9 +2191,14 @@ async function runUat004(runtime, timeline) {
           const faultStarted = Date.parse(managementFault.applied_at);
           recoveryPhase = `${substrate}-${crashPoint}-owner-fault`;
           nodeFault = await applyPlannedOrchestrationFault(runtime, { kind: "fleet_node_stop", target: ownershipBefore.owner_target }, (target) => run("docker", ["stop", "--time", "5", target.provider_id], { timeout: 30_000 }));
-          const fallbackIndex = runtime.fleet.nodes.findIndex((node) => node.name !== ownershipBefore.owner_target);
-          if (fallbackIndex < 0) throw new Error("owner-loss campaign has no surviving Worker endpoint");
-          await replaceFleetWorkerAccess(runtime, fallbackIndex);
+          const survivorIndexes = runtime.fleet.nodes
+            .map((node, nodeIndex) => ({ node, nodeIndex }))
+            .filter(({ node }) => node.name !== ownershipBefore.owner_target)
+            .map(({ nodeIndex }) => nodeIndex);
+          if (survivorIndexes.length !== 2) throw new Error("owner-loss campaign has no exact pair of surviving Worker endpoints");
+          await replaceFleetWorkerAccess(runtime, survivorIndexes[0]);
+          ownerProbeAccesses = [runtime.workerAccess];
+          ownerProbeAccesses.push(await openTrackedFleetWorkerAccess(runtime, survivorIndexes[1]));
           recoveryPhase = `${substrate}-${crashPoint}-owner-takeover`;
           ownershipAfterLoss = await waitFor(
             () => probeCelldOwnerTakeover(runtime, {
@@ -2170,6 +2206,7 @@ async function runUat004(runtime, timeline) {
               operationId: id,
               generation: 1,
               previousOwner: ownershipBefore,
+              workerAccesses: ownerProbeAccesses,
             }),
             { timeoutMs: 30_000, intervalMs: 250, description: "Celld owner takeover and epoch advance" },
           );
@@ -2220,6 +2257,12 @@ async function runUat004(runtime, timeline) {
                 }
                 recoveryPhase = `${substrate}-${crashPoint}-finally-owner-heal-terminal-observation`;
               });
+            }
+            recoveryPhase = `${substrate}-${crashPoint}-finally-owner-probe-access-close`;
+            for (const access of ownerProbeAccesses) {
+              if (access === runtime.workerAccess || !runtime.workerAccesses.has(access)) continue;
+              await access.close();
+              runtime.workerAccesses.delete(access);
             }
           } catch (error) {
             throw annotateDriverError(error, {
@@ -3120,19 +3163,54 @@ function latestProviderCleanupPlan(inventory, instanceId) {
 }
 
 function assertNoUnplannedQemuCleanupResidue(runtime, resource, record) {
-  if (!isAbsolute(record.storage_path ?? "")
-      || resolve(dirname(record.storage_path)) !== resolve(runtime.config.vm_storage_dir ?? "")
-      || basename(record.storage_path) !== resource.name) {
+  const bindingFields = [
+    "provider_id", "provider_identity_sha256", "configuration_sha256", "ownership_binding_sha256",
+    "provider_storage_identity_sha256", "storage_path", "storage_device", "storage_inode", "storage_uid", "storage_gid",
+  ];
+  const presentBindingFields = bindingFields.filter((field) => Object.hasOwn(record, field));
+  let storagePath = record.storage_path;
+  if (storagePath === undefined) {
+    if (presentBindingFields.length !== 0) {
+      throw new OrchestrationCleanupResidueError("removed QEMU resource retains a partial persisted provider binding");
+    }
+    const latestTerminal = [...runtime.orchestrationInventory.journal].reverse().find((entry) => entry.event !== "planned"
+      && entry.subject_type === "provider_resource"
+      && entry.subject.instance_id === record.instance_id);
+    if (!latestTerminal
+        || latestTerminal.event !== "recovered"
+        || latestTerminal.mutation !== "provider_action"
+        || latestTerminal.subject.action !== "provision"
+        || latestTerminal.outcome !== "absent") {
+      throw new OrchestrationCleanupResidueError("removed QEMU resource lacks an exact never-bound absent-provision terminal");
+    }
+    storagePath = join(resolve(runtime.config.vm_storage_dir ?? ""), resource.name);
+  } else {
+    const completeBinding = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(record.provider_id ?? "")
+      && SHA256.test(record.provider_identity_sha256 ?? "")
+      && SHA256.test(record.configuration_sha256 ?? "")
+      && SHA256.test(record.ownership_binding_sha256 ?? "")
+      && SHA256.test(record.provider_storage_identity_sha256 ?? "")
+      && /^(?:0|[1-9][0-9]*)$/.test(record.storage_device ?? "")
+      && /^[1-9][0-9]*$/.test(record.storage_inode ?? "")
+      && /^(?:0|[1-9][0-9]*)$/.test(record.storage_uid ?? "")
+      && /^(?:0|[1-9][0-9]*)$/.test(record.storage_gid ?? "");
+    if (!completeBinding) {
+      throw new OrchestrationCleanupResidueError("removed QEMU resource retains a partial persisted provider binding");
+    }
+  }
+  if (!isAbsolute(storagePath)
+      || resolve(dirname(storagePath)) !== resolve(runtime.config.vm_storage_dir ?? "")
+      || basename(storagePath) !== resource.name) {
     throw new OrchestrationCleanupResidueError("removed QEMU resource has an invalid persisted storage boundary");
   }
-  if (lstatIfPresent(record.storage_path) !== null) {
+  if (lstatIfPresent(storagePath) !== null) {
     throw new OrchestrationCleanupResidueError("removed QEMU resource retains its original storage pathname without cleanup authority");
   }
   const escapedName = resource.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const candidatePattern = new RegExp(`^\\.${escapedName}\\.cleanup-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`);
   let candidates;
   try {
-    candidates = readdirSync(dirname(record.storage_path)).filter((name) => candidatePattern.test(name));
+    candidates = readdirSync(dirname(storagePath)).filter((name) => candidatePattern.test(name));
   } catch (error) {
     throw new OrchestrationCleanupResidueError(`removed QEMU resource cleanup cannot enumerate its exact storage boundary: ${error.message}`, { cause: error });
   }
