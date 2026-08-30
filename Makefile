@@ -93,6 +93,7 @@ test-scripts: ## Run lightweight script regression tests
 	@./tests/container/test-macos-release-ceremony-contract.sh
 	@./tests/container/test-debian-apt-https.sh
 	@./tests/container/test-agent-entrypoint-secure-transport.sh
+	@./tests/container/test-security-probe-network-contract.sh
 	@./tests/container/test-agentshare-run-retention.sh
 	@./tests/container/test-e2e-agentshare-forwarding.sh
 	@./scripts/verify-container-security.sh

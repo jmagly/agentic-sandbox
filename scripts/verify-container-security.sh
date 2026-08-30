@@ -6,7 +6,6 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 runtime="$repo_root/management/src/docker_runtime.rs"
-agent="$repo_root/agent-rs/src/main.rs"
 workload_identity="$repo_root/agent-rs/src/workload_identity.rs"
 entrypoint="$repo_root/images/container/agent-entrypoint.sh"
 base="$repo_root/images/container/Dockerfile.base"
@@ -79,15 +78,52 @@ if [[ -n "${AGENTIC_SECURITY_IMAGE:-}" ]]; then
         docker network rm "$source_network" >/dev/null 2>&1 || true
     }
     trap cleanup_network_probe EXIT INT TERM
-    docker network create --internal --label agentic-security-verification=true "$target_network" >/dev/null
-    docker network create --internal --label agentic-security-verification=true "$source_network" >/dev/null
-    network_internal="$(
-        docker network inspect --format '{{.Internal}}' "$source_network"
-    )"
-    [[ "$network_internal" == "true" ]] || {
-        echo "FAIL: managed-network probe is not internal" >&2
+
+    # Automatic bridge allocation depends on daemon-global default-address-pool
+    # capacity. A busy shared builder can exhaust that pool even though the
+    # isolation control under test is healthy. Allocate two bounded, explicit
+    # /29s from RFC 2544's benchmark-only 198.18.0.0/15 range instead. Try a
+    # small PID-seeded window so retained foreign networks cannot make the
+    # security result flaky; exact probe networks remain trap-owned.
+    probe_subnet_for_slot() {
+        local slot="$1" offset second third fourth
+        offset=$((slot * 8))
+        second=$((18 + offset / 65536))
+        third=$(((offset / 256) % 256))
+        fourth=$((offset % 256))
+        printf '198.%d.%d.%d/29\n' "$second" "$third" "$fourth"
+    }
+    probe_networks_created=0
+    for attempt in $(seq 0 15); do
+        pair_slot=$((((probe_id + attempt) % 8192) * 2))
+        target_subnet="$(probe_subnet_for_slot "$pair_slot")"
+        source_subnet="$(probe_subnet_for_slot "$((pair_slot + 1))")"
+        if ! docker network create --internal --subnet "$target_subnet" \
+            --label agentic-security-verification=true "$target_network" \
+            >/dev/null 2>&1; then
+            continue
+        fi
+        if docker network create --internal --subnet "$source_subnet" \
+            --label agentic-security-verification=true "$source_network" \
+            >/dev/null 2>&1; then
+            probe_networks_created=1
+            break
+        fi
+        docker network rm "$target_network" >/dev/null 2>&1 || true
+    done
+    [[ "$probe_networks_created" == 1 ]] || {
+        echo "FAIL: could not allocate bounded explicit managed-network probes" >&2
         exit 1
     }
+    for probe_network in "$target_network" "$source_network"; do
+        network_internal="$(
+            docker network inspect --format '{{.Internal}}' "$probe_network"
+        )"
+        [[ "$network_internal" == "true" ]] || {
+            echo "FAIL: managed-network probe is not internal" >&2
+            exit 1
+        }
+    done
     docker run -d \
         --name "$target_container" \
         --network "$target_network" \
