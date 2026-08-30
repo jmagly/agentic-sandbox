@@ -8,6 +8,64 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+## [2026.8.9] — 2026-08-30
+
+Release adding concurrent A2A 0.3 and 1.0 HTTP+JSON support, closing
+cross-instance task authority and push-callback SSRF gaps, and hardening the
+Gitea Runner 3 concurrency and VM cleanup paths.
+
+### Added
+
+- Added explicit per-request A2A 0.3/1.0 negotiation, truthful Agent Card
+  interfaces, 1.0 routes and ProtoJSON wire conversion, version-aware
+  idempotency, and retained upstream TCK/Inspector evidence. Existing 0.3
+  clients remain supported on the compatibility interface.
+- Added a bounded same-ref concurrency qualification workflow that proves a
+  second run waits for the first run and its cleanup, including the expected
+  failure path and retained evidence (#791).
+
+### Changed
+
+- Activated the supported Gitea Runner 3 generation on build01 and made runner
+  maintenance check out the exact installer source before service changes.
+- Isolated the upstream A2A TCK runtime from the executor's build environment
+  and pinned its dependency/source contract in CI.
+
+### Security
+
+- Scoped task, artifact, graph, subscription, cancellation, message, and push
+  callback operations to the owning executor instance, preventing
+  cross-instance access through caller-supplied task identifiers.
+- Restricted push callbacks to canonical public HTTPS port 443 destinations,
+  rejecting credentials, fragments, redirects, private and special-use IPv4
+  and IPv6 ranges, mixed DNS answers, and DNS-rebinding attempts. Delivery now
+  re-resolves and pins each attempt and enforces bounded callback counts,
+  concurrency, retries, and timeouts (#799).
+
+### Fixed
+
+- Bounded CI security-probe networks to dedicated documentation subnets so
+  container isolation tests cannot overlap host or runner infrastructure
+  (#791).
+- Reconciled stale Celld qualification DHCP reservations and taught the
+  all-outcome VM reaper to remove an exact orphan only when neither its domain
+  nor storage path exists. Active or retained targets and unrelated
+  reservations remain untouched (#791).
+
+### Documentation
+
+- Added A2A protocol compatibility and push-callback deployment guidance,
+  metadata-only Gitea runner diagnostics, updated API/migration material, and
+  release/E2E concurrency operating notes.
+
+### Operator notes
+
+- Gitea concurrency evidence for this release was retained from Gitea 1.27.2
+  with supported Runner 3.3.1 executors.
+- Celld remains experimental, disabled by default, and production `NO-GO`.
+  The authorized live campaign still has QEMU-path failures tracked in #764;
+  this release does not claim exact-head Celld qualification or promotion.
+
 ## [2026.8.8] — 2026-08-29
 
 Follow-up release for Gitea 1.25 matrix scheduling discovered by the live
@@ -3299,7 +3357,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.8.8...HEAD
+[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.8.9...HEAD
+[2026.8.9]: https://github.com/jmagly/agentic-sandbox/compare/v2026.8.8...v2026.8.9
 [2026.8.8]: https://github.com/jmagly/agentic-sandbox/compare/v2026.8.7...v2026.8.8
 [2026.8.7]: https://github.com/jmagly/agentic-sandbox/compare/v2026.8.6...v2026.8.7
 [2026.8.6]: https://github.com/jmagly/agentic-sandbox/compare/v2026.8.5...v2026.8.6
