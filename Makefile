@@ -82,6 +82,7 @@ test-scripts: ## Run lightweight script regression tests
 	@./images/qemu/tests/test-libvirt-checkpoint.sh
 	@python3 ./images/qemu/tests/test-ch-fork-memory-probe.py
 	@./scripts/test-reap-e2e-vms-cloud-hypervisor.sh
+	@./scripts/test-reap-e2e-vms-celld-dhcp.sh
 	@./scripts/test-vfio-gpu-runner-guard.sh
 	@./images/qemu/tests/test-agent-client-path-parity.sh
 	@./images/qemu/tests/test-build-base-image-automation.sh

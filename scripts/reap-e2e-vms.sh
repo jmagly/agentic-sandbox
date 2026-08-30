@@ -115,6 +115,23 @@ is_e2e_vm() {
     [[ "$1" =~ ^agentic-e2e-[0-9]+$ ]]
 }
 
+# Celld's destructive qualification uses a small, closed set of QEMU names.
+# A failed run can lose its orchestration inventory after libvirt has accepted
+# the DHCP reservation.  Those reservations share the static allocation range
+# with VM E2E and must be reclaimed only after both the domain and its exact
+# storage directory are absent.
+is_celld_qualification_vm() {
+    [[ "$1" =~ ^celld-(qemu|recovery-qemu|loss-qemu|fence-qemu)-[0-9a-f]{8,16}$ ]]
+}
+
+is_orphaned_celld_qualification_vm() {
+    local vm="$1"
+
+    is_celld_qualification_vm "$vm" || return 1
+    [[ ! -e "$VM_ROOT/$vm" ]] || return 1
+    ! virsh_cmd dominfo "$vm" &>/dev/null
+}
+
 keep_current() {
     [[ -n "$CURRENT_VM" && "$1" == "$CURRENT_VM" ]]
 }
@@ -322,8 +339,13 @@ reap_dhcp_reservations() {
     while IFS= read -r host_line; do
         name="$(grep -oP "name='\K[^']+" <<<"$host_line" || true)"
         [[ -n "$name" ]] || continue
-        is_e2e_vm "$name" || continue
-        keep_current "$name" && continue
+        if is_e2e_vm "$name"; then
+            keep_current "$name" && continue
+        elif is_celld_qualification_vm "$name"; then
+            is_orphaned_celld_qualification_vm "$name" || continue
+        else
+            continue
+        fi
 
         mac="$(grep -oP "mac='\K[^']+" <<<"$host_line" || true)"
         ip="$(grep -oP "ip='\K[^']+" <<<"$host_line" || true)"
@@ -336,7 +358,7 @@ reap_dhcp_reservations() {
     done < <(grep "<host " <<<"$xml" || true)
 
     if [[ "$removed" == "0" ]]; then
-        echo "[reaper] no stale E2E DHCP reservations found"
+        echo "[reaper] no stale E2E or Celld qualification DHCP reservations found"
     fi
 }
 
