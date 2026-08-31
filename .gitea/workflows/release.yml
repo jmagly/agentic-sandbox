@@ -104,11 +104,10 @@ jobs:
     name: Celld Deterministic Qualification Support
     runs-on: titan
     timeout-minutes: 30
-    concurrency:
-      # Do not overlap ordinary deterministic support with any manual Celld
-      # qualification campaign on the shared Titan host.
-      group: agentic-sandbox-celld-qualification-titan
-      cancel-in-progress: false
+    # Titan's capacity-one runner already prevents overlap with manual Celld
+    # campaigns on that host. Do not add a cross-workflow job-level
+    # concurrency group: Gitea Runner 3 can cancel the queued job instead of
+    # serializing it, which falsely fails this required gate before execution.
     env:
       CARGO_BUILD_JOBS: "8"
       CARGO_INCREMENTAL: "0"

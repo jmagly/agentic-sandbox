@@ -1118,7 +1118,10 @@ test("provider effect convergence retries valid transient states but rejects uno
   const states = ["running", "in shutdown", "shut off"];
   let calls = 0;
   const observation = await liveOrchestration.waitForObservedProviderEffect({}, { resource, action: "stop" }, {
-    timeoutMs: 100,
+    // This assertion validates the observed state sequence, not timer
+    // precision. Leave enough wall-clock budget for the full Node suite's
+    // concurrent tests to contend for the event loop on loaded CI hosts.
+    timeoutMs: 5_000,
     intervalMs: 0,
     observeProvider: async () => ({
       owned: true,
@@ -1132,7 +1135,7 @@ test("provider effect convergence retries valid transient states but rejects uno
 
   await assert.rejects(
     liveOrchestration.waitForObservedProviderEffect({}, { resource, action: "stop" }, {
-      timeoutMs: 100,
+      timeoutMs: 5_000,
       intervalMs: 0,
       observeProvider: async () => ({ owned: false, present: true, state: "shut off", provider_storage_present: true }),
     }),

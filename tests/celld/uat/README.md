@@ -242,7 +242,10 @@ Ordinary push and pull-request CI also has a bounded `celld-deterministic` job
 on Titan. It runs the catalog/runner contracts plus `make test-celld` with at
 most eight Cargo workers, gates build and image publication, and removes its
 job-scoped compiler target afterward. It does not create a fleet or claim live
-qualification.
+qualification. Titan runner capacity is one, so these jobs cannot overlap a
+manual campaign on that host. They intentionally do not use a cross-workflow
+job-level concurrency group because Gitea Runner 3 may cancel a queued job
+instead of serializing it.
 
 The Titan workflow runs only scenarios 001-015. It executes the complete
 disabled-path regression, static contract gate, and the shared deterministic

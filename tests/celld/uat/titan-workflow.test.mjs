@@ -5,6 +5,7 @@ import test from "node:test";
 const workflow = readFileSync(new URL("../../../.gitea/workflows/celld-qualification.yml", import.meta.url), "utf8");
 const fleetWorkflow = readFileSync(new URL("../../../.gitea/workflows/celld-fleet-fixture.yml", import.meta.url), "utf8");
 const mainCi = readFileSync(new URL("../../../.gitea/workflows/ci.yaml", import.meta.url), "utf8");
+const releaseWorkflow = readFileSync(new URL("../../../.gitea/workflows/release.yml", import.meta.url), "utf8");
 const gitignore = readFileSync(new URL("../../../.gitignore", import.meta.url), "utf8");
 
 function exactWorkflowStep(document, name) {
@@ -22,12 +23,21 @@ function exactWorkflowStep(document, name) {
 
 test("ordinary CI runs credential-free Celld support on Titan", () => {
   assert.match(mainCi, /celld-deterministic:\n[\s\S]*?runs-on: titan/);
-  assert.match(mainCi, /celld-deterministic:\n[\s\S]*?group: agentic-sandbox-celld-qualification-titan/);
-  assert.match(mainCi, /CARGO_BUILD_JOBS: "8"/);
-  assert.match(mainCi, /make test-celld-uat-structure/);
-  assert.match(mainCi, /make test-celld/);
-  assert.match(mainCi, /needs: \[lint, test, celld-deterministic\]/);
-  assert.match(mainCi, /cargo clean --manifest-path management\/Cargo\.toml --target-dir "\$\{target\}"/);
+  for (const [name, document] of [["CI", mainCi], ["release", releaseWorkflow]]) {
+    const job = document.match(/  celld-deterministic:\n([\s\S]*?)(?=\n  [a-z][a-z0-9-]*:\n|$)/)?.[0];
+    assert.ok(job, `${name} must define the deterministic Celld gate`);
+    assert.match(job, /runs-on: titan/);
+    assert.doesNotMatch(
+      job,
+      /concurrency:|group: agentic-sandbox-celld-qualification-titan/,
+      `${name} must rely on Titan runner capacity instead of unsafe job-level concurrency`,
+    );
+    assert.match(job, /CARGO_BUILD_JOBS: "8"/);
+    assert.match(job, /make test-celld-uat-structure/);
+    assert.match(job, /make test-celld/);
+    assert.match(job, /cargo clean --manifest-path management\/Cargo\.toml --target-dir "\$\{target\}"/);
+    assert.match(document, /needs: \[lint, test, celld-deterministic\]/);
+  }
 });
 
 test("Celld qualification is manual, Titan-only, and capacity-one", () => {
