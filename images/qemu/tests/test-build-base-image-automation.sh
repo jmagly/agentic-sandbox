@@ -34,6 +34,17 @@ assert_failure() {
 tmpdir="$(mktemp -d)"
 trap 'chmod -R u+w "$tmpdir" 2>/dev/null || true; rm -rf "$tmpdir"' EXIT
 
+ISO_DIR="$tmpdir/isos"
+mkdir -p "$ISO_DIR"
+touch "$ISO_DIR/ubuntu-26.04-live-server-amd64.iso"
+touch "$ISO_DIR/ubuntu-26.04.1-live-server-amd64.iso"
+assert_success \
+    "Ubuntu 26 selects the pinned point-release ISO" \
+    test "$(resolve_iso_path 26.04)" = "$ISO_DIR/ubuntu-26.04.1-live-server-amd64.iso"
+assert_success \
+    "Ubuntu 26 uses the supported libosinfo fallback" \
+    test "$(resolve_os_variant 26.04)" = "ubuntu24.04"
+
 image="$tmpdir/existing.qcow2"
 touch "$image"
 

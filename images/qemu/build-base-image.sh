@@ -172,7 +172,25 @@ check_dependencies() {
 
 resolve_iso_path() {
     local version="$1"
-    local iso_path
+    local iso_path point_release
+
+    # Prefer the exact point release whose signed digest is pinned. Otherwise
+    # an older major-version filename (for example 26.04.0) can be selected and
+    # then correctly rejected against the 26.04.1 digest, obscuring the real
+    # missing-artifact problem.
+    point_release=$(python3 - "$SCRIPT_DIR/iso-pins.json" "$version" <<'PY' 2>/dev/null || true
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    print(json.load(handle).get("releases", {}).get(sys.argv[2], {}).get("point_release", ""))
+PY
+)
+    if [[ -n "$point_release" ]]; then
+        iso_path="$ISO_DIR/ubuntu-${point_release}-live-server-amd64.iso"
+        [[ -f "$iso_path" ]] && echo "$iso_path" && return
+        return 1
+    fi
 
     # Try exact version match first
     iso_path="$ISO_DIR/ubuntu-${version}-live-server-amd64.iso"
@@ -184,6 +202,16 @@ resolve_iso_path() {
     done
 
     return 1
+}
+
+resolve_os_variant() {
+    local version="$1"
+    local config="$SCRIPT_DIR/configs/ubuntu-${version}.yaml"
+    local configured=""
+    if [[ -f "$config" ]]; then
+        configured=$(awk -F: '/^[[:space:]]*os_variant:/ {gsub(/[[:space:]"'\'']/, "", $2); print $2; exit}' "$config")
+    fi
+    printf '%s\n' "${configured:-ubuntu${version}}"
 }
 
 generate_autoinstall_iso() {
@@ -270,13 +298,14 @@ build_image() {
 
     ensure_output_directory_writable "$image_path" "$dry_run" || return 1
 
-    local iso_path
+    local iso_path os_variant
     if ! iso_path=$(resolve_iso_path "$version"); then
         log_error "ISO not found for Ubuntu $version"
         echo "Available ISOs in $ISO_DIR:"
         ls -la "$ISO_DIR"/*.iso 2>/dev/null || echo "  (none)"
         exit 1
     fi
+    os_variant=$(resolve_os_variant "$version")
 
     # #258: verify ISO sha256 against pinned value in iso-pins.json before
     # virt-install. Override with AIWG_SKIP_BASE_VERIFY=1 only when pinning a
@@ -294,6 +323,7 @@ build_image() {
     echo "  Disk:       $disk_size"
     echo "  RAM:        ${ram}MB"
     echo "  CPUs:       $cpus"
+    echo "  OS variant: $os_variant"
     echo ""
 
     if [[ "$dry_run" == "true" ]]; then
@@ -338,7 +368,7 @@ build_image() {
         --disk "path=$image_path,format=qcow2" \
         --location "$iso_path,kernel=casper/vmlinuz,initrd=casper/initrd" \
         --disk "path=$autoinstall_iso,device=cdrom" \
-        --os-variant "ubuntu${version}" \
+        --os-variant "$os_variant" \
         --network network=default \
         --graphics none \
         --console pty,target_type=serial \
