@@ -46,9 +46,10 @@ jobs:
             echo "Using verified cached installer: $iso"
             exit 0
           fi
-          partial="${iso}.partial-${GITHUB_RUN_ID}"
-          trap 'rm -f "$partial"' EXIT
-          curl --fail --location --retry 4 --output "$partial" \
+          partial="${iso}.partial"
+          curl --fail --location --retry 4 --retry-all-errors --retry-delay 5 \
+            --continue-at - --speed-limit 1024 --speed-time 180 \
+            --output "$partial" \
             "https://releases.ubuntu.com/26.04/ubuntu-${point_release}-live-server-amd64.iso"
           printf '%s  %s\n' "$expected_sha" "$partial" | sha256sum --check
           mv "$partial" "$iso"
