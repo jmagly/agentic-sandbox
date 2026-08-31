@@ -25,7 +25,7 @@ jobs:
           test -z "${DISPLAY:-}"
           test -z "${WAYLAND_DISPLAY:-}"
           test ! -e /tmp/.X11-unix/X99
-          for command in curl python3 sha256sum qemu-img virt-install genisoimage virt-customize; do
+          for command in curl python3 sha256sum qemu-img virt-install genisoimage virt-customize setfacl; do
             command -v "$command"
           done
 
@@ -62,7 +62,11 @@ jobs:
         run: |
           set -euo pipefail
           staging_dir="${STAGING_ROOT}/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          sudo install -d -m 0750 -o "$(id -u)" -g "$(id -g)" "$staging_dir"
+          qemu_user=libvirt-qemu
+          qemu_group=$(id -gn "$qemu_user")
+          sudo install -d -m 0755 "$STAGING_ROOT"
+          sudo install -d -m 0770 -o "$(id -u)" -g "$qemu_group" "$staging_dir"
+          sudo setfacl -m "u:${qemu_user}:rwx,d:u:${qemu_user}:rwx" "$staging_dir"
           CI=true timeout --signal=TERM --kill-after=2m 75m \
             env BASE_DIR="$staging_dir" bash images/qemu/build-base-image.sh 26.04
 
