@@ -476,7 +476,7 @@ build_image() {
     fi
 
     virsh undefine "$vm_name" --nvram 2>/dev/null || true
-    rm -f "$autoinstall_iso"
+    rm -f "$autoinstall_iso" 2>/dev/null || sudo rm -f "$autoinstall_iso"
 
     log_info "Optimizing image size..."
     virt-sparsify --in-place "$image_path" 2>/dev/null || true
