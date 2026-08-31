@@ -8,6 +8,46 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+## [2026.8.10] — 2026-08-31
+
+Patch release aligning the management dashboard with current mutation and
+WebSocket contracts, hardening Celld qualification recovery, and publishing
+the August project report.
+
+### Changed
+
+- The management dashboard now treats WebSocket startup as an explicit
+  capability negotiation. It waits for a valid server hello, records the
+  advertised operation inventory, requests only scoped agent inventory, and
+  exposes connecting, negotiating, ready, and reconnecting states (#803).
+- The management WebSocket server now advertises the complete implemented
+  client-message inventory. PTY clients require the negotiated `pty-ws.v1`
+  subprotocol instead of continuing with an ambiguous transport (#803).
+
+### Fixed
+
+- Prevented management mutations from being replayed through the v1 fallback
+  path after an ambiguous v2 response. Mutations carry stable intent keys and
+  reconcile authoritative instance state before operators can retry; only an
+  explicit collection-read allowlist may fall back across API versions (#802).
+- Hardened Celld qualification recovery by requiring both surviving Workers
+  to observe owner takeover, safely reconciling never-bound QEMU tombstones,
+  and reclaiming only exact orphaned Celld address allocations (#764).
+
+### Documentation
+
+- Published the August 2026 project report covering durable fleet state,
+  activity evidence, safer managed Docker control, VM package corrections,
+  and the first-class Celld integration path.
+
+### Operator notes
+
+- Celld remains experimental, disabled by default, and production `NO-GO`;
+  this release hardens qualification recovery but does not promote Celld.
+- The WebSocket capability-alignment issue remains open for its broader
+  unsupported-version, backpressure, visibility, replay, and origin test
+  matrix (#803).
+
 ## [2026.8.9] — 2026-08-30
 
 Release adding concurrent A2A 0.3 and 1.0 HTTP+JSON support, closing
@@ -3357,7 +3397,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.8.9...HEAD
+[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.8.10...HEAD
+[2026.8.10]: https://github.com/jmagly/agentic-sandbox/compare/v2026.8.9...v2026.8.10
 [2026.8.9]: https://github.com/jmagly/agentic-sandbox/compare/v2026.8.8...v2026.8.9
 [2026.8.8]: https://github.com/jmagly/agentic-sandbox/compare/v2026.8.7...v2026.8.8
 [2026.8.7]: https://github.com/jmagly/agentic-sandbox/compare/v2026.8.6...v2026.8.7
