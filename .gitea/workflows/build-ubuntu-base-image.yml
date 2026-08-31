@@ -3,10 +3,6 @@ name: Build Ubuntu Base Image
 on:
   workflow_dispatch:
 
-concurrency:
-  group: agentic-sandbox-celld-qualification-titan
-  cancel-in-progress: false
-
 jobs:
   ubuntu-26:
     name: Build signed Ubuntu 26.04 baseline on Titan
