@@ -407,6 +407,60 @@ impl TaskStore {
         self.conn.lock().expect("TaskStore mutex poisoned")
     }
 
+    /// Fail closed any graph-node dispatch that was still non-terminal when
+    /// the management process restarted. A restart severs the in-memory
+    /// output observer, so preserving `submitted`/`working` would falsely
+    /// imply that Sandbox still owns a live execution. Durable identity and
+    /// prior evidence remain intact while the graph event records an explicit
+    /// unknown outcome for operator-visible reconciliation.
+    pub fn recover_graph_tasks_after_restart(&self, observed_at: DateTime<Utc>) -> Result<usize> {
+        let rows = self.list_tasks(ListFilter {
+            include_terminal: false,
+            ..ListFilter::default()
+        })?;
+        let mut recovered = 0;
+
+        for mut row in rows {
+            let is_graph_task = row
+                .metadata_json
+                .as_ref()
+                .and_then(|metadata| metadata.get(crate::extensions::flow_graph::URI))
+                .is_some();
+            if !is_graph_task {
+                continue;
+            }
+
+            row.state = TaskState::Failed;
+            row.fail_kind = Some(FailKind::Infrastructure);
+            row.status_json = serde_json::json!({
+                "state": TaskState::Failed.as_str(),
+                "timestamp": observed_at.to_rfc3339(),
+                "summary": "management restarted before durable terminal observation",
+                "terminal_reason": "management_restart_unknown",
+            });
+            crate::extensions::flow_graph::latest_event(
+                &mut row.metadata_json,
+                crate::extensions::flow_graph::terminal(
+                    "unknown",
+                    row.created_at,
+                    observed_at,
+                    serde_json::json!({
+                        "status": "unknown",
+                        "reason": "no durable process result survived management restart"
+                    }),
+                    serde_json::json!([]),
+                    Some("management restarted before durable terminal observation"),
+                ),
+            );
+            row.updated_at = observed_at;
+            row.terminal_at = Some(observed_at);
+            self.upsert_task(&row)?;
+            recovered += 1;
+        }
+
+        Ok(recovered)
+    }
+
     // ---------- tasks ----------
 
     /// Insert or replace a task.
@@ -1685,6 +1739,66 @@ mod tests {
         let s2 = TaskStore::open(&path).unwrap();
         let got = s2.get_task("persist").unwrap().unwrap();
         assert_eq!(got, row);
+    }
+
+    #[test]
+    fn restart_recovery_marks_only_non_terminal_graph_tasks_unknown() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("graph-restart.db");
+        let started = ts(2026, 8, 21);
+        let observed = ts(2026, 8, 22);
+        let graph = json!({
+            "graph_id": "graph-1", "graph_version": "1", "run_id": "run-1",
+            "node_id": "node-1", "node_run_id": "node-run-1"
+        });
+        let mut graph_row = task("graph-running", TaskState::Working, started);
+        graph_row.metadata_json = Some(crate::extensions::flow_graph::task_metadata(
+            graph,
+            "graph-running",
+            Some("session-1"),
+            "message-1",
+            crate::extensions::flow_graph::lifecycle("running", started),
+        ));
+        let ordinary_row = task("ordinary-running", TaskState::Working, started);
+
+        {
+            let store = TaskStore::open(&path).unwrap();
+            store.upsert_task(&graph_row).unwrap();
+            store.upsert_task(&ordinary_row).unwrap();
+        }
+
+        let reopened = TaskStore::open(&path).unwrap();
+        assert_eq!(
+            reopened
+                .recover_graph_tasks_after_restart(observed)
+                .unwrap(),
+            1
+        );
+
+        let recovered = reopened.get_task("graph-running").unwrap().unwrap();
+        assert_eq!(recovered.state, TaskState::Failed);
+        assert_eq!(recovered.terminal_at, Some(observed));
+        assert_eq!(
+            recovered.status_json["terminal_reason"],
+            "management_restart_unknown"
+        );
+        let event = &recovered.metadata_json.unwrap()[crate::extensions::flow_graph::EVENT_KEY];
+        assert_eq!(event["metadata"]["run_id"], "run-1");
+        assert_eq!(event["task"]["idempotency_key"], "message-1");
+        assert_eq!(event["event"]["state"], "unknown");
+        assert_eq!(event["event"]["exit"]["status"], "unknown");
+
+        assert_eq!(
+            reopened.get_task("ordinary-running").unwrap().unwrap(),
+            ordinary_row,
+            "ordinary A2A tasks retain their existing restart behavior"
+        );
+        assert_eq!(
+            reopened
+                .recover_graph_tasks_after_restart(observed)
+                .unwrap(),
+            0
+        );
     }
 
     #[test]

@@ -575,6 +575,14 @@ async fn main() -> Result<()> {
     let mut idempotency_cache: Option<Arc<aiwg_serve::idempotency::IdempotencyCache>> = None;
     match aiwg_serve::task_store::TaskStore::open(&task_store_path) {
         Ok(store) => {
+            let recovered_graph_tasks =
+                store.recover_graph_tasks_after_restart(chrono::Utc::now())?;
+            if recovered_graph_tasks > 0 {
+                tracing::warn!(
+                    recovered_graph_tasks,
+                    "reconciled interrupted Flow graph tasks to explicit unknown outcomes"
+                );
+            }
             tracing::info!(
                 "v2 TaskStore opened at {}; v1 MissionStore remains active for compat",
                 task_store_path.display()
