@@ -69,6 +69,7 @@ use crate::bindings::pty_bridge::{
     PtyBridgeEvent, PtySessionRole, PtyStartCommand, SessionBackend, SessionClass,
 };
 use crate::bindings::rest::AppState;
+use crate::extensions::flow_graph;
 use crate::instance::InstanceExt;
 use crate::store::task_store::{ListFilter, TaskRow, TaskState};
 
@@ -2235,7 +2236,19 @@ async fn handle_tasks_cancel(payload: Value, state: &AppState, instance_id: &str
     row.status_json = json!({
         "state": TaskState::Canceled.as_str(),
         "timestamp": now.to_rfc3339(),
+        "terminal_reason": "caller_cancellation",
     });
+    flow_graph::latest_event(
+        &mut row.metadata_json,
+        flow_graph::terminal(
+            "canceled",
+            row.created_at,
+            now,
+            json!({"status": "not_applicable", "reason": "caller canceled task"}),
+            json!([]),
+            Some("caller_cancellation"),
+        ),
+    );
     if let Err(e) = state.store.upsert_task(&row) {
         return build_error_frame(
             "internal.error",
@@ -3320,7 +3333,7 @@ mod tests {
 
     #[tokio::test]
     async fn ws_a2a_cancel_task() {
-        let (base, _state) = spawn_server("inst-1").await;
+        let (base, state) = spawn_server("inst-1").await;
         let mut ws = connect(&base, "inst-1", "sess-1").await;
         let _hello = recv_json(&mut ws).await;
 
@@ -3338,11 +3351,38 @@ mod tests {
         .await;
         let task = recv_json(&mut ws).await;
         let tid = task["payload"]["id"].as_str().unwrap().to_string();
+        let mut row = state
+            .store
+            .get_task_for_instance("inst-1", &tid)
+            .unwrap()
+            .unwrap();
+        row.metadata_json = Some(flow_graph::task_metadata(
+            json!({
+                "graph_id": "graph-1",
+                "graph_version": "1",
+                "run_id": "run-1",
+                "node_id": "node-1",
+                "node_run_id": "node-run-1"
+            }),
+            &tid,
+            Some("sess-1"),
+            "00000000-0000-7000-8000-000000000010",
+            flow_graph::lifecycle("running", row.created_at),
+        ));
+        state.store.upsert_task(&row).unwrap();
 
-        send_op(&mut ws, "tasks/cancel", json!({ "task_id": tid })).await;
+        send_op(&mut ws, "tasks/cancel", json!({ "task_id": tid.clone() })).await;
         let resp = recv_json(&mut ws).await;
         assert_eq!(resp["op"], "task");
         assert_eq!(resp["payload"]["status"]["state"], "canceled");
+        assert_eq!(
+            resp["payload"]["metadata"][flow_graph::EVENT_KEY]["event"]["state"],
+            "canceled"
+        );
+        assert_eq!(
+            resp["payload"]["metadata"][flow_graph::EVENT_KEY]["event"]["exit"]["status"],
+            "not_applicable"
+        );
 
         // Re-cancel: terminal state → error frame.
         send_op(&mut ws, "tasks/cancel", json!({ "task_id": tid })).await;
