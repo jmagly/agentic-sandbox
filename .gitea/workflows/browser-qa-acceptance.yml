@@ -77,7 +77,8 @@ jobs:
           set -euo pipefail
           vm="carbonyl-qa-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           mkdir -p reports
-          bash agentic-sandbox/scripts/run-browser-qa-acceptance.sh \
+          timeout --signal=TERM --kill-after=3m 65m \
+            bash agentic-sandbox/scripts/run-browser-qa-acceptance.sh \
             "$vm" \
             "$PWD/carbonyl-runtime.tgz" \
             "$RUNTIME_SHA256" \
@@ -85,6 +86,16 @@ jobs:
             "$PWD/carbonyl-agent" \
             "$PWD/carbonyl-agent-qa" \
             "$PWD/reports"
+
+      - name: Enforce exact VM teardown
+        if: always()
+        run: |
+          set -euo pipefail
+          vm="carbonyl-qa-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          if virsh -c qemu:///system dominfo "$vm" >/dev/null 2>&1; then
+            test -x agentic-sandbox/scripts/destroy-vm.sh
+            agentic-sandbox/scripts/destroy-vm.sh "$vm" --force
+          fi
 
       - name: Upload acceptance evidence
         if: always()
