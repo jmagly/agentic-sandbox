@@ -1,0 +1,95 @@
+name: Browser QA Acceptance
+
+on:
+  workflow_dispatch:
+    inputs:
+      runtime_url:
+        description: Checksummed Carbonyl X11 feature runtime URL
+        required: true
+      runtime_sha256:
+        description: Expected SHA-256 for the runtime archive
+        required: true
+      carbonyl_ref:
+        description: Carbonyl source ref matching the runtime
+        required: true
+        default: feat/292-storage-flush
+      agent_ref:
+        description: carbonyl-agent source ref
+        required: true
+        default: feat/136-profile-lease-transitions
+      qa_ref:
+        description: carbonyl-agent-qa source ref
+        required: true
+        default: feat/1-phase1-deterministic
+
+jobs:
+  isolated-ubuntu-26:
+    name: Full UI and persistence in disposable Ubuntu 26 VM
+    runs-on: titan
+    timeout-minutes: 75
+    steps:
+      - name: Verify host-side isolation contract
+        run: |
+          set -euo pipefail
+          test "$(hostname -s)" = titan
+          test -z "${DISPLAY:-}"
+          test -z "${WAYLAND_DISPLAY:-}"
+          test -z "${WAYLAND_SOCKET:-}"
+          test -r /dev/kvm && test -w /dev/kvm
+          virsh -c qemu:///system uri
+
+      - name: Check out exact acceptance sources
+        env:
+          TOKEN: ${{ github.token }}
+          CARBONYL_REF: ${{ inputs.carbonyl_ref }}
+          AGENT_REF: ${{ inputs.agent_ref }}
+          QA_REF: ${{ inputs.qa_ref }}
+        run: |
+          set -euo pipefail
+          rm -rf agentic-sandbox carbonyl carbonyl-agent carbonyl-agent-qa
+          git clone --depth 1 --branch "${GITHUB_REF_NAME}" \
+            "https://token:${TOKEN}@git.integrolabs.net/roctinam/agentic-sandbox.git" agentic-sandbox
+          git clone --depth 1 --branch "${CARBONYL_REF}" \
+            "https://token:${TOKEN}@git.integrolabs.net/roctinam/carbonyl.git" carbonyl
+          git clone --depth 1 --branch "${AGENT_REF}" \
+            "https://token:${TOKEN}@git.integrolabs.net/roctinam/carbonyl-agent.git" carbonyl-agent
+          git clone --depth 1 --branch "${QA_REF}" \
+            "https://token:${TOKEN}@git.integrolabs.net/roctinam/carbonyl-agent-qa.git" carbonyl-agent-qa
+
+      - name: Download and authenticate feature runtime
+        env:
+          TOKEN: ${{ github.token }}
+          RUNTIME_URL: ${{ inputs.runtime_url }}
+          RUNTIME_SHA256: ${{ inputs.runtime_sha256 }}
+        run: |
+          set -euo pipefail
+          test "${#RUNTIME_SHA256}" -eq 64
+          curl --fail --location --retry 4 \
+            --header "Authorization: token ${TOKEN}" \
+            --output carbonyl-runtime.tgz "${RUNTIME_URL}"
+          printf '%s  %s\n' "${RUNTIME_SHA256}" carbonyl-runtime.tgz \
+            | sha256sum --check
+
+      - name: Run isolated full-UI and profile acceptance
+        env:
+          RUNTIME_SHA256: ${{ inputs.runtime_sha256 }}
+        run: |
+          set -euo pipefail
+          vm="carbonyl-qa-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir -p reports
+          bash agentic-sandbox/scripts/run-browser-qa-acceptance.sh \
+            "$vm" \
+            "$PWD/carbonyl-runtime.tgz" \
+            "$RUNTIME_SHA256" \
+            "$PWD/carbonyl" \
+            "$PWD/carbonyl-agent" \
+            "$PWD/carbonyl-agent-qa" \
+            "$PWD/reports"
+
+      - name: Upload acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ubuntu-26-browser-qa-${{ github.run_id }}
+          path: reports/
+          if-no-files-found: warn
