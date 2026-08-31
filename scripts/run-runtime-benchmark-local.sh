@@ -7,7 +7,7 @@ OUTPUT=""
 SAMPLES=3
 WARMUPS=1
 DOCKER_IMAGE="ghcr.io/jmagly/agentic-sandbox-agent:v2026.7.20"
-BASE_IMAGE="ubuntu-24.04"
+BASE_IMAGE="ubuntu-26.04"
 
 usage() {
   cat <<'EOF'
@@ -17,7 +17,7 @@ Options:
   --samples N          comparable samples per runtime (minimum 3; default 3)
   --warmups N          unretained warmup samples (default 1)
   --docker-image REF   pinned image containing Python 3
-  --base-image NAME    provision-vm base image name (default ubuntu-24.04)
+  --base-image NAME    provision-vm base image name (default ubuntu-26.04)
 
 The run creates one disposable Docker container and two disposable 2-vCPU/2-GiB
 VMs. Exact-name cleanup runs on success, failure, and interruption.

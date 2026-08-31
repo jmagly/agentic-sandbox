@@ -10483,7 +10483,7 @@ exit 2
       <source file='/var/lib/agentic-sandbox/vms/cockpit-vm/cloud-init.iso'/>
     </disk>
     <disk type='file' device='disk'>
-      <source file='/mnt/ops/base-images/ubuntu-server-24.04-agent.qcow2'/>
+      <source file='/mnt/ops/base-images/ubuntu-server-26.04-agent.qcow2'/>
     </disk>
   </devices>
 </domain>

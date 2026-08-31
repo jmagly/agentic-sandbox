@@ -7,7 +7,7 @@
 #   1. Xorg :99 is running
 #   2. /dev/uinput exists and is writable by the `input` group
 #   3. /opt/carbonyl/carbonyl returns its pinned runtime version
-#   4. python3-uinput is importable
+#   4. Python uinput/Pillow and xdotool are available
 #   5. The `agent` user is in the `input` group
 #   6. xserver-xorg-input-evdev is installed
 #   7. xorg99.service is active
@@ -124,7 +124,7 @@ CARBONYL_VERSION=$(run_remote '/opt/carbonyl/carbonyl --version 2>&1 | head -1')
 if [[ -n "$CARBONYL_VERSION" ]] && ! echo "$CARBONYL_VERSION" | grep -qiE "no such file|not found|error"; then
     pass "carbonyl runtime returns version: $CARBONYL_VERSION"
 else
-    fail "carbonyl runtime did not return a version (got: $CARBONYL_VERSION). Check /opt/carbonyl/carbonyl exists + is executable, and runtime-x11-8f070d2720157bd0 tarball extracted cleanly."
+    fail "carbonyl runtime did not return a version (got: $CARBONYL_VERSION). Install a verified X11 artifact with scripts/install-browser-qa-runtime.sh."
 fi
 
 # 4. python3-uinput importable (required for UinputEmitter)
@@ -132,6 +132,18 @@ if run_remote 'python3 -c "import uinput"' >/dev/null; then
     pass "python3-uinput is importable"
 else
     fail "python3-uinput is NOT importable (check: apt list --installed | grep python3-uinput)"
+fi
+
+if run_remote 'python3 -c "from PIL import Image"' >/dev/null; then
+    pass "python3-pil is importable"
+else
+    fail "python3-pil is NOT importable"
+fi
+
+if run_remote 'command -v xdotool >/dev/null'; then
+    pass "xdotool is installed"
+else
+    fail "xdotool is NOT installed"
 fi
 
 # 5. agent user is in input group (required to open /dev/uinput without sudo)

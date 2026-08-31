@@ -62,7 +62,7 @@ IP_END=254
 DEFAULT_CPUS="4"
 DEFAULT_MEMORY="8G"
 DEFAULT_DISK="40G"
-DEFAULT_BASE="ubuntu-24.04"
+DEFAULT_BASE="ubuntu-26.04"
 DEFAULT_PROFILE=""  # Empty = basic provisioning
 
 # Service account
@@ -199,7 +199,7 @@ Arguments:
 
 Options:
   -b, --base IMAGE      Base image (default: $DEFAULT_BASE)
-                        Supports: ubuntu-22.04, ubuntu-24.04, ubuntu-25.10
+                        Supports: ubuntu-22.04, ubuntu-24.04, ubuntu-25.10, ubuntu-26.04
   -p, --profile NAME    Provisioning profile (default: basic)
                         Profiles: basic, agentic-dev
   -l, --loadout FILE    Loadout manifest YAML (alternative to --profile)

@@ -1,0 +1,36 @@
+# Ubuntu 26.04 LTS (Resolute Raccoon) - Agent Base Image Configuration
+#
+# Long Term Support until April 2031
+# Primary Titan and browser-QA baseline
+
+version: "26.04"
+codename: "resolute"
+variant: "server"
+arch: "amd64"
+
+# ISO configuration
+iso:
+  filename: "ubuntu-26.04.1-live-server-amd64.iso"
+  path: "/mnt/ops/isos/linux/ubuntu-26.04.1-live-server-amd64.iso"
+  sha256: "cc8a95cde20f6ced61a322420de00f10cc3c90ced545daa46cb9c1a117f1d927"
+  size_gb: 3.2
+
+# Build defaults
+build:
+  disk_size: "40G"
+  memory_mb: 4096
+  cpus: 2
+  output_name: "ubuntu-server-26.04-agent.qcow2"
+
+# Use the newest broadly available libosinfo Ubuntu profile as a compatibility
+# fallback. The guest itself and the verified installer remain Ubuntu 26.04.
+os_variant: "ubuntu24.04"
+
+notes:
+  - "LTS release with 5 years of standard support"
+  - "Python 3.14 default"
+  - "Primary Titan and browser-QA target"
+  - "Ubuntu 24.04 remains a compatibility target"
+
+extra_packages: []
+extra_late_commands: []

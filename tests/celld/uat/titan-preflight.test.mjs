@@ -65,7 +65,7 @@ function passingSnapshot() {
       optional_tools: { fio: true, k6: true, "stress-ng": true },
     },
     base_image: {
-      path: "/build/agentic-sandbox/base-images/ubuntu-server-24.04-agent.qcow2",
+      path: "/build/agentic-sandbox/base-images/ubuntu-server-26.04-agent.qcow2",
       manifest_path: "/build/agentic-sandbox/base-images/manifest.json",
       actual_size_bytes: 10,
       expected_size_bytes: 10,

@@ -100,7 +100,7 @@ if ! grep -Fq 'BASE_IMAGES_DIR="${BASE_IMAGES_DIR:-${AIWG_BASE_IMAGE_DIR:-/mnt/o
     exit 1
 fi
 
-if ! grep -Fq 'local BASE="${AIWG_BASE_IMAGE:-${BASE_IMAGES_DIR}/ubuntu-server-24.04-agent.qcow2}"' "$checkpoint"; then
+if ! grep -Fq 'local BASE="${AIWG_BASE_IMAGE:-${BASE_IMAGES_DIR}/ubuntu-server-26.04-agent.qcow2}"' "$checkpoint"; then
     echo "ERROR: checkpoint-vm.sh selftest still bypasses the runner base-image contract" >&2
     exit 1
 fi

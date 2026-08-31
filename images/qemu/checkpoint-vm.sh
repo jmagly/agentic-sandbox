@@ -965,7 +965,7 @@ cmd_selftest() {
         rm -rf -- /var/tmp/chkpt-selftest
     }
     trap _selftest_cleanup EXIT
-    local BASE="${AIWG_BASE_IMAGE:-${BASE_IMAGES_DIR}/ubuntu-server-24.04-agent.qcow2}"
+    local BASE="${AIWG_BASE_IMAGE:-${BASE_IMAGES_DIR}/ubuntu-server-26.04-agent.qcow2}"
     local CODE=/usr/share/OVMF/OVMF_CODE_4M.fd VARS=/usr/share/OVMF/OVMF_VARS_4M.fd
     command -v virsh >/dev/null || die "virsh not found"
     [ -r "$BASE" ] || die "base image not found: $BASE"

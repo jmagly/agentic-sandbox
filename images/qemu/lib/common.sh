@@ -59,7 +59,7 @@ resolve_base_image() {
             local version="${base#alpine-}"
             image_path="$BASE_IMAGES_DIR/alpine-${version}-agent.qcow2"
             ;;
-        ubuntu-22.04|ubuntu-24.04|ubuntu-25.10)
+        ubuntu-22.04|ubuntu-24.04|ubuntu-25.10|ubuntu-26.04)
             local version="${base#ubuntu-}"
             image_path="$BASE_IMAGES_DIR/ubuntu-server-${version}-agent.qcow2"
             ;;
@@ -81,7 +81,7 @@ resolve_base_image() {
         echo "Available base images:"
         ls -la "$BASE_IMAGES_DIR"/*.qcow2 2>/dev/null || echo "  (none found)"
         echo ""
-        echo "Build one with: ./build-base-image.sh 24.04"
+        echo "Build one with: ./build-base-image.sh 26.04"
         return 1
     fi
 

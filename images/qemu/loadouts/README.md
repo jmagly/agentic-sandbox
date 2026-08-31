@@ -42,6 +42,20 @@ cat "$TMPDIR/user-data"
 
 Cookie/session material should be mode `0600`. The sandbox only provides the mount; it does not import cookies.
 
+The loadout intentionally does not download Carbonyl during cloud-init. After
+provisioning, inject the exact feature-build artifact and its expected SHA-256,
+then run acceptance checks:
+
+```bash
+./scripts/install-browser-qa-runtime.sh agent-browser /path/to/x86_64-unknown-linux-gnu.tgz <sha256>
+./scripts/validate-browser-qa.sh agent-browser
+```
+
+The installer validates archive paths and verifies the digest both before and
+after transfer. Display and input tests must run only against the VM's private
+Xorg `:99`; do not expose host display sockets, `/dev/input`, `/dev/uinput`, or
+`/dev/dri` to the guest.
+
 ## Runtime Options
 
 Loadouts may declare `runtime_options` to describe portable launch intent for

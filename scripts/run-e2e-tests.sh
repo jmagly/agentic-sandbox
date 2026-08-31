@@ -36,7 +36,7 @@ virsh_cmd() {
 
 collect_runner_preflight() {
     local base_dir="$BASE_IMAGES_DIR"
-    local base_img="${AIWG_BASE_IMAGE:-${base_dir}/ubuntu-server-24.04-agent.qcow2}"
+    local base_img="${AIWG_BASE_IMAGE:-${base_dir}/ubuntu-server-26.04-agent.qcow2}"
     local manifest="${base_dir}/manifest.json"
     local base_name
     base_name="$(basename "$base_img")"

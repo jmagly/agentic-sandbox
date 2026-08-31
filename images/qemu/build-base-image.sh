@@ -40,7 +40,7 @@ Usage: $0 [OPTIONS] VERSION
 Build an agent-ready Ubuntu base image for agentic-sandbox QEMU adapter.
 
 Arguments:
-  VERSION    Ubuntu version: 22.04, 24.04, or 25.10
+  VERSION    Ubuntu version: 22.04, 24.04, 25.10, or 26.04
 
 Options:
   -d, --disk-size SIZE    Disk size (default: 40G)
@@ -56,9 +56,9 @@ Environment:
   BASE_DIR    Directory for output images (default: /mnt/ops/base-images)
 
 Examples:
-  $0 24.04                     # Build Ubuntu 24.04 agent image
-  $0 --disk-size 60G 24.04     # With 60GB disk
-  $0 --dry-run 25.10           # Preview commands for 25.10
+  $0 26.04                     # Build the Ubuntu 26.04 baseline image
+  $0 --disk-size 60G 26.04     # With 60GB disk
+  $0 --dry-run 24.04           # Preview the Ubuntu 24.04 compatibility image
 
 Output:
   Creates \${BASE_DIR}/ubuntu-server-\${VERSION}-agent.qcow2
@@ -483,7 +483,7 @@ main() {
             -y|--yes|--force) force="true"; shift ;;
             -n|--dry-run) dry_run="true"; shift ;;
             -h|--help) usage; exit 0 ;;
-            22.04|24.04|25.10) version="$1"; shift ;;
+            22.04|24.04|25.10|26.04) version="$1"; shift ;;
             *) log_error "Unknown option: $1"; usage; exit 1 ;;
         esac
     done

@@ -1,7 +1,7 @@
 # Ubuntu 24.04 LTS (Noble Numbat) - Agent Base Image Configuration
 #
 # Long Term Support until April 2029
-# Primary recommended version for agentic-sandbox
+# Compatibility target; Ubuntu 26.04 is the primary baseline
 
 version: "24.04"
 codename: "noble"
@@ -30,7 +30,7 @@ notes:
   - "LTS release with 5 years of support"
   - "Python 3.12 default"
   - "Kernel 6.8"
-  - "Primary target for agentic-sandbox"
+  - "Compatibility target for agentic-sandbox"
   - "ISO available on system"
 
 # Additional packages specific to this version (if any)
