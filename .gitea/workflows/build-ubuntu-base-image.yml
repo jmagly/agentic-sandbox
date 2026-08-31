@@ -11,6 +11,7 @@ jobs:
     env:
       ISO_DIR: /mnt/ops/isos/linux
       BASE_DIR: /mnt/ops/base-images
+      STAGING_ROOT: /mnt/ops/base-image-staging
     steps:
       - name: Checkout code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -60,18 +61,47 @@ jobs:
       - name: Build and manifest baseline
         run: |
           set -euo pipefail
+          staging_dir="${STAGING_ROOT}/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          sudo install -d -m 0750 -o "$(id -u)" -g "$(id -g)" "$staging_dir"
           CI=true timeout --signal=TERM --kill-after=2m 75m \
-            bash images/qemu/build-base-image.sh 26.04
+            env BASE_DIR="$staging_dir" bash images/qemu/build-base-image.sh 26.04
 
-      - name: Verify staged image and manifest
+      - name: Verify and promote staged image and manifest
         run: |
           set -euo pipefail
-          image="${BASE_DIR}/ubuntu-server-26.04-agent.qcow2"
+          staging_dir="${STAGING_ROOT}/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          image_name="ubuntu-server-26.04-agent.qcow2"
+          image="${staging_dir}/${image_name}"
           test -r "$image"
           qemu-img check "$image"
           qemu-img info "$image"
-          expected=$(jq -r --arg name "$(basename "$image")" '.images[$name].sha256 // empty' "${BASE_DIR}/manifest.json")
+          expected=$(jq -r --arg name "$image_name" '.[$name].sha256 // empty' "${staging_dir}/manifest.json")
           test -n "$expected"
           actual=$(sha256sum "$image" | awk '{print $1}')
           test "$actual" = "$expected"
+
+          existing='{}'
+          if sudo test -r "${BASE_DIR}/manifest.json"; then
+            existing=$(sudo cat "${BASE_DIR}/manifest.json")
+          fi
+          entry=$(jq -c --arg name "$image_name" '.[$name]' "${staging_dir}/manifest.json")
+          printf '%s\n' "$existing" | jq --arg name "$image_name" --argjson entry "$entry" \
+            '. + {($name): $entry}' > "${staging_dir}/promoted-manifest.json"
+
+          sudo chattr -i "${BASE_DIR}/${image_name}" 2>/dev/null || true
+          sudo chattr -i "$image" 2>/dev/null || true
+          sudo mv "$image" "${BASE_DIR}/${image_name}"
+          sudo chmod 0444 "${BASE_DIR}/${image_name}"
+          sudo chattr +i "${BASE_DIR}/${image_name}" 2>/dev/null || true
+          sudo install -m 0644 "${staging_dir}/promoted-manifest.json" \
+            "${BASE_DIR}/manifest.json.new-${GITHUB_RUN_ID}"
+          sudo mv "${BASE_DIR}/manifest.json.new-${GITHUB_RUN_ID}" \
+            "${BASE_DIR}/manifest.json"
           echo "Verified Ubuntu 26.04 baseline: $actual"
+
+      - name: Remove job staging directory
+        if: always()
+        run: |
+          staging_dir="${STAGING_ROOT}/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          sudo chattr -i "${staging_dir}/ubuntu-server-26.04-agent.qcow2" 2>/dev/null || true
+          sudo rm -rf -- "$staging_dir"
