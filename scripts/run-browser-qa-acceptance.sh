@@ -40,6 +40,7 @@ VM_CREATED=0
 
 cleanup() {
     status=$?
+    trap - EXIT INT TERM
     if (( VM_CREATED )); then
         "$PROJECT_ROOT/scripts/destroy-vm.sh" "$VM_NAME" --force || true
     fi
