@@ -286,4 +286,35 @@ mod tests {
         );
         assert_eq!(event["duration_ms"], 0);
     }
+
+    #[test]
+    fn terminal_preserves_explicit_missing_and_redacted_evidence() {
+        let now = Utc::now();
+        let event = terminal(
+            "succeeded",
+            now,
+            now,
+            json!({"status": "code", "code": 0}),
+            json!([
+                {
+                    "kind": "stdout",
+                    "availability": "available",
+                    "uri": "sandbox://tasks/task-1/artifacts/stdout-1",
+                    "digest": format!("sha256:{}", "a".repeat(64)),
+                    "redaction_status": "redacted"
+                },
+                {
+                    "kind": "stderr",
+                    "availability": "missing",
+                    "redaction_status": "unknown"
+                }
+            ]),
+            None,
+        );
+
+        assert_eq!(event["evidence"][0]["redaction_status"], "redacted");
+        assert_eq!(event["evidence"][1]["availability"], "missing");
+        assert!(event["evidence"][1].get("uri").is_none());
+        assert!(event["evidence"][1].get("digest").is_none());
+    }
 }

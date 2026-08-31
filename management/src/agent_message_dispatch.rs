@@ -83,6 +83,37 @@ pub struct AgentMessageDispatch {
 }
 
 impl AgentMessageDispatch {
+    fn output_evidence_ref(
+        stream: &str,
+        artifact_id: &str,
+        task_id: &str,
+        digest: &str,
+        persisted: bool,
+    ) -> Value {
+        // The Flow graph schema has no generic `unknown` evidence kind.
+        // Preserve an unclassified process stream as a log while the backing
+        // artifact retains its exact transport-level stream classification.
+        let kind = match stream {
+            "stdout" | "stderr" => stream,
+            _ => "log",
+        };
+        if persisted {
+            json!({
+                "kind": kind,
+                "availability": "available",
+                "uri": format!("sandbox://tasks/{task_id}/artifacts/{artifact_id}"),
+                "digest": digest,
+                "redaction_status": "unknown",
+            })
+        } else {
+            json!({
+                "kind": kind,
+                "availability": "missing",
+                "redaction_status": "unknown",
+            })
+        }
+    }
+
     pub fn new(
         registry: Arc<AgentRegistry>,
         dispatcher: Arc<CommandDispatcher>,
@@ -432,14 +463,21 @@ impl AgentMessageDispatch {
                         artifact_id = %artifact_id,
                         "observer: failed to append output artifact"
                     );
+                    evidence.push(Self::output_evidence_ref(
+                        stream,
+                        &artifact_id,
+                        &task_id,
+                        &digest,
+                        false,
+                    ));
                 } else {
-                    evidence.push(json!({
-                        "kind": stream,
-                        "availability": "available",
-                        "uri": format!("sandbox://tasks/{}/artifacts/{}", task_id, artifact_id),
-                        "digest": digest,
-                        "redaction_status": "unknown",
-                    }));
+                    evidence.push(Self::output_evidence_ref(
+                        stream,
+                        &artifact_id,
+                        &task_id,
+                        &digest,
+                        true,
+                    ));
                 }
             }
 
@@ -971,5 +1009,37 @@ mod tests {
             [agentic_sandbox_executor::extensions::flow_graph::EVENT_KEY];
         assert_eq!(event["event"]["state"], "unknown");
         assert_eq!(event["event"]["exit"]["status"], "unknown");
+    }
+
+    #[test]
+    fn output_evidence_is_schema_shaped_for_available_missing_and_unknown_streams() {
+        let digest = format!("sha256:{}", "a".repeat(64));
+        let available = AgentMessageDispatch::output_evidence_ref(
+            "stdout",
+            "artifact-1",
+            "task-1",
+            &digest,
+            true,
+        );
+        assert_eq!(available["kind"], "stdout");
+        assert_eq!(available["availability"], "available");
+        assert_eq!(available["digest"], digest);
+        assert_eq!(
+            available["uri"],
+            "sandbox://tasks/task-1/artifacts/artifact-1"
+        );
+
+        let missing = AgentMessageDispatch::output_evidence_ref(
+            "unknown",
+            "artifact-2",
+            "task-1",
+            &digest,
+            false,
+        );
+        assert_eq!(missing["kind"], "log");
+        assert_eq!(missing["availability"], "missing");
+        assert_eq!(missing["redaction_status"], "unknown");
+        assert!(missing.get("uri").is_none());
+        assert!(missing.get("digest").is_none());
     }
 }

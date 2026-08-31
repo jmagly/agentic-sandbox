@@ -1753,18 +1753,51 @@ mod tests {
         });
         let mut graph_row = task("graph-running", TaskState::Working, started);
         graph_row.metadata_json = Some(crate::extensions::flow_graph::task_metadata(
-            graph,
+            graph.clone(),
             "graph-running",
             Some("session-1"),
             "message-1",
             crate::extensions::flow_graph::lifecycle("running", started),
+        ));
+        let mut queued_graph_row = task("graph-queued", TaskState::Submitted, started);
+        queued_graph_row.metadata_json = Some(crate::extensions::flow_graph::task_metadata(
+            graph.clone(),
+            "graph-queued",
+            Some("session-1"),
+            "message-2",
+            crate::extensions::flow_graph::lifecycle("queued", started),
+        ));
+        let mut terminal_graph_row = task("graph-completed", TaskState::Completed, started);
+        terminal_graph_row.terminal_at = Some(started);
+        terminal_graph_row.metadata_json = Some(crate::extensions::flow_graph::task_metadata(
+            graph,
+            "graph-completed",
+            Some("session-1"),
+            "message-3",
+            crate::extensions::flow_graph::terminal(
+                "succeeded",
+                started,
+                started,
+                json!({"status": "code", "code": 0}),
+                json!([]),
+                None,
+            ),
         ));
         let ordinary_row = task("ordinary-running", TaskState::Working, started);
 
         {
             let store = TaskStore::open(&path).unwrap();
             store.upsert_task(&graph_row).unwrap();
+            store.upsert_task(&queued_graph_row).unwrap();
+            store.upsert_task(&terminal_graph_row).unwrap();
             store.upsert_task(&ordinary_row).unwrap();
+            store
+                .append_artifact(
+                    "graph-running",
+                    "stdout-1",
+                    &json!({"kind": "stdout", "content": "partial output"}),
+                )
+                .unwrap();
         }
 
         let reopened = TaskStore::open(&path).unwrap();
@@ -1772,7 +1805,7 @@ mod tests {
             reopened
                 .recover_graph_tasks_after_restart(observed)
                 .unwrap(),
-            1
+            2
         );
 
         let recovered = reopened.get_task("graph-running").unwrap().unwrap();
@@ -1787,6 +1820,24 @@ mod tests {
         assert_eq!(event["task"]["idempotency_key"], "message-1");
         assert_eq!(event["event"]["state"], "unknown");
         assert_eq!(event["event"]["exit"]["status"], "unknown");
+        assert_eq!(
+            reopened
+                .get_task("graph-queued")
+                .unwrap()
+                .unwrap()
+                .metadata_json
+                .unwrap()[crate::extensions::flow_graph::EVENT_KEY]["event"]["state"],
+            "unknown"
+        );
+        assert_eq!(
+            reopened.get_task("graph-completed").unwrap().unwrap(),
+            terminal_graph_row,
+            "terminal graph tasks must not be rewritten during recovery"
+        );
+        let artifacts = reopened.list_artifacts("graph-running").unwrap();
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0].artifact_id, "stdout-1");
+        assert_eq!(artifacts[0].artifact_json["content"], "partial output");
 
         assert_eq!(
             reopened.get_task("ordinary-running").unwrap().unwrap(),
