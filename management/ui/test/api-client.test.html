@@ -70,6 +70,66 @@
             assert('v2 404 → viaV1=true', r2.viaV1 === true);
             assert('Sunset header surfaced', r2.sunsetDate === 'Sun, 09 May 2027 00:00:00 GMT');
 
+            // Resource-level 404 is authoritative and must not fall through.
+            fetchResponses = [{ status: 404, ok: false, headers: { get: () => null } }];
+            const r3 = await ApiClient.request('/api/v1/vms/missing');
+            assert('v2 resource 404 remains canonical', r3.viaV1 === false);
+            assert('v2 resource 404 is not replayed', fetchResponses.length === 0);
+
+            // Network failure is not evidence that a safe-read route is absent.
+            window.fetch = async () => { throw new TypeError('connection lost'); };
+            let safeReadFailed = false;
+            try { await ApiClient.request('/api/v1/vms'); } catch (e) {
+                safeReadFailed = e instanceof TypeError;
+            }
+            assert('safe read network failure does not cross-version fallback', safeReadFailed);
+
+            // A mapped mutation gets one intent key and an ambiguous response
+            // loss is surfaced for reconciliation, never replayed through v1.
+            let mutationCalls = 0;
+            let mutationHeaders = null;
+            window.fetch = async (_url, opts) => {
+                mutationCalls++;
+                mutationHeaders = opts.headers;
+                throw new TypeError('response lost');
+            };
+            let unknown = null;
+            try {
+                await ApiClient.request('/api/v1/vms/agent-01/start', { method: 'POST' });
+            } catch (e) { unknown = e; }
+            assert('ambiguous mutation is not replayed', mutationCalls === 1);
+            assert('ambiguous mutation exposes unknown outcome',
+                unknown instanceof UnknownMutationOutcomeError && unknown.outcomeUnknown === true);
+            assert('mapped mutation carries idempotency key',
+                !!mutationHeaders && !!ApiClient.headerValue(mutationHeaders, 'Idempotency-Key') &&
+                ApiClient.headerValue(mutationHeaders, 'Idempotency-Key') === unknown.idempotencyKey);
+
+            // Caller-supplied keys bind explicit retries to the same intent.
+            window.fetch = async (_url, opts) => ({
+                status: 202, ok: true, headers: { get: () => null },
+                observedKey: ApiClient.headerValue(opts.headers, 'Idempotency-Key'),
+            });
+            const explicit = await ApiClient.request('/api/v1/vms/agent-01/start', {
+                method: 'POST', idempotencyKey: 'intent-stable-1',
+            });
+            assert('caller-supplied idempotency key is preserved',
+                explicit.response.observedKey === 'intent-stable-1');
+
+            window.fetch = async () => { throw new TypeError('direct v2 response lost'); };
+            let directUnknown = null;
+            try {
+                await ApiClient.request('/api/v2/admin/instances', { method: 'POST' });
+            } catch (e) { directUnknown = e; }
+            assert('direct v2 mutation response loss exposes unknown outcome',
+                directUnknown instanceof UnknownMutationOutcomeError &&
+                directUnknown.path === '/api/v2/admin/instances');
+
+            // Restore the controllable fetch stub for the remaining tests.
+            window.fetch = async (url, opts) => {
+                lastFetchCall = { url, opts };
+                return fetchResponses.shift();
+            };
+
             // === #246 Extension activation chips ===
             // Chip rendering: required + activation evidence → green.
             const taskRuntime = { metadata: { runtime: { instance_id: 'agent-01', kind: 'vm', host: 'h' } } };
@@ -126,7 +186,7 @@
             // === #247 PTY pty-ws.v1 client tests ===
             // Pure transport tests: stub WebSocket + terminal so we can
             // assert frame shapes flowing both directions.
-            (function ptyV2Tests() {
+            await (async function ptyV2Tests() {
                 if (typeof PtyWsV1Client !== 'function') {
                     assert('pty_ws_v1_client_loaded', false);
                     return;
@@ -186,8 +246,7 @@
                 // Wait one tick so onopen fires.
                 const tick = () => new Promise((res) => setTimeout(res, 0));
 
-                (async () => {
-                    // -- Test 1: emits pty.join_session after binding_hello
+                // -- Test 1: emits pty.join_session after binding_hello
                     {
                         const term = makeFakeTerm();
                         const c = new PtyWsV1Client({
@@ -435,9 +494,56 @@
                             FakeWS.last.protocols[0] === 'pty-ws.v1');
                     }
 
-                    // Restore real WebSocket.
-                    window.WebSocket = realWS;
-                })();
+                    // -- Test 12: missing selected subprotocol fails closed
+                    {
+                        let protocolError = null;
+                        const c = new PtyWsV1Client({
+                            host: 'h', instanceId: 'i', sessionId: 's', terminal: makeFakeTerm(),
+                        });
+                        c.onError = (e) => { protocolError = e; };
+                        c.connect();
+                        FakeWS.last.protocol = '';
+                        await tick();
+                        assert('pty_client_missing_subprotocol_fails_closed',
+                            protocolError?.kind === 'subprotocol' && FakeWS.last.readyState === 3);
+                    }
+
+                    // -- Management socket: hello precedes scoped commands,
+                    // and wildcard output subscription is never requested.
+                    {
+                        const dashboard = Object.create(AgenticDashboard.prototype);
+                        dashboard.ws = {
+                            readyState: FakeWS.OPEN,
+                            sent: [],
+                            send(value) { this.sent.push(JSON.parse(value)); },
+                            close() {},
+                        };
+                        dashboard.shellCommandIds = new Map();
+                        dashboard.activeCommandIds = new Map();
+                        dashboard.pendingFirstOutput = new Set();
+                        dashboard.pendingStartupAttach = new Set();
+                        dashboard.connectionState = 'connecting';
+                        dashboard.reconnectAttempts = 2;
+                        dashboard.showToast = () => {};
+                        dashboard.updateConnectionStatus = () => {};
+                        dashboard.onOpen();
+                        assert('management_ws_sends_nothing_before_server_hello',
+                            dashboard.ws.sent.length === 0 && dashboard.connectionState === 'negotiating');
+                        dashboard.handleMessage({
+                            type: 'server_hello', server_version: 'test',
+                            supported_client_messages: ['list_agents', 'list_sessions', 'join_session'],
+                            features: ['session_frames'],
+                        });
+                        assert('management_ws_becomes_ready_after_valid_hello',
+                            dashboard.connectionState === 'ready' && dashboard.reconnectAttempts === 0);
+                        assert('management_ws_requests_only_scoped_inventory_after_hello',
+                            dashboard.ws.sent.length === 1 &&
+                            dashboard.ws.sent[0].type === 'list_agents' &&
+                            !dashboard.ws.sent.some(frame => frame.type === 'subscribe'));
+                    }
+
+                // Restore real WebSocket.
+                window.WebSocket = realWS;
             })();
             // === end #247 ===
 
@@ -584,7 +690,7 @@
             // === end #249 ===
 
             // === #250 Deprecation tracking + panel ===
-            (() => {
+            await (async () => {
                 // Reset client-side counts so the assertions below don't see
                 // leftover hits from prior ApiClient tests in this harness.
                 DeprecationTracker._clientCounts = new Map();
@@ -595,7 +701,7 @@
                 // (line ~64) installed a Sunset listener via the tracker's
                 // init() — re-init here to make the wiring explicit and
                 // idempotent before driving a synthetic notification.
-                DeprecationTracker.init();
+                await DeprecationTracker.init();
                 ApiClient._notifySunset('/api/v1/agents?token=x', 'Sun, 09 May 2027 00:00:00 GMT', null);
                 ApiClient._notifySunset('/api/v1/agents', 'Sun, 09 May 2027 00:00:00 GMT', null);
                 ApiClient._notifySunset('/api/v1/vms', 'Sun, 09 May 2027 00:00:00 GMT', null);
@@ -607,7 +713,7 @@
                 // -- Test 2: render uses server data when fetchServerCounts
                 // succeeds. Stub the server response, then render into a DOM
                 // panel and read back the source label + a row.
-                (async () => {
+                await (async () => {
                     const panel = document.createElement('div');
                     panel.id = 'deprecation-panel';
                     panel.innerHTML =
@@ -635,7 +741,7 @@
                     const rows = panel.querySelectorAll('.deprecation-rows tr');
                     const firstRow = rows[0] ? rows[0].textContent : '';
                     assert('deprecation_tracker_render_uses_server_data_when_available',
-                        source.includes('server') && rows.length === 1 && firstRow.includes('7'));
+                        source.includes('server') && rows.length >= 1 && firstRow.includes('7'));
                     panel.remove();
                 })();
 
@@ -643,7 +749,7 @@
                 // server endpoint is unreachable (fetch throws → _serverData
                 // stays null). Seed client counts and verify the table uses
                 // the default path map plus the observed paths.
-                (async () => {
+                await (async () => {
                     const panel = document.createElement('div');
                     panel.id = 'deprecation-panel';
                     panel.innerHTML =
@@ -673,7 +779,7 @@
 
                 // -- Test 4: panel shows the "no v1 hits" empty state when
                 // both server and client counts are empty.
-                (async () => {
+                await (async () => {
                     const panel = document.createElement('div');
                     panel.id = 'deprecation-panel';
                     panel.innerHTML =

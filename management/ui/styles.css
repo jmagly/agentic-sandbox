@@ -102,6 +102,15 @@ header h1 {
     background: var(--success);
 }
 
+.status-connecting {
+    color: var(--warning, #ffaa00);
+}
+
+.status-connecting .status-dot {
+    background: var(--warning, #ffaa00);
+    box-shadow: 0 0 8px color-mix(in srgb, var(--warning, #ffaa00) 65%, transparent);
+}
+
 .status-disconnected {
     background: rgba(255, 68, 68, 0.1);
     color: var(--error);

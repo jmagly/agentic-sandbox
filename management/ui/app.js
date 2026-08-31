@@ -29,6 +29,56 @@ const ApiClient = {
         //   /api/v1/hitl/{id} (A2A input-required), /api/v1/ws/* (SSE shift).
     ],
 
+    // A 404 is only an unambiguous "v2 route unavailable" signal for these
+    // collection reads. A resource/detail 404 means the canonical v2 route
+    // exists but the resource does not, so falling through to v1 would hide
+    // the real outcome. Network failures are never a route-availability
+    // signal (#802).
+    V1_FALLBACK_READS: new Set([
+        '/api/v1/agents',
+        '/api/v1/vms',
+        '/api/v1/container-images',
+    ]),
+
+    isSafeMethod(method) {
+        return ['GET', 'HEAD', 'OPTIONS'].includes(String(method || 'GET').toUpperCase());
+    },
+
+    pathWithoutQuery(path) {
+        const qIdx = String(path).indexOf('?');
+        return qIdx === -1 ? String(path) : String(path).slice(0, qIdx);
+    },
+
+    newIntentId() {
+        if (globalThis.crypto && typeof globalThis.crypto.randomUUID === 'function') {
+            return globalThis.crypto.randomUUID();
+        }
+        return `ui-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+    },
+
+    withMutationIntent(opts = {}) {
+        const request = { ...opts };
+        const headers = opts.headers instanceof Headers
+            ? new Headers(opts.headers)
+            : { ...(opts.headers || {}) };
+        const method = String(request.method || 'GET').toUpperCase();
+        if (!ApiClient.isSafeMethod(method) && !ApiClient.headerValue(headers, 'Idempotency-Key')) {
+            const value = request.idempotencyKey || ApiClient.newIntentId();
+            if (headers instanceof Headers) headers.set('Idempotency-Key', value);
+            else headers['Idempotency-Key'] = value;
+        }
+        delete request.idempotencyKey;
+        request.headers = headers;
+        return request;
+    },
+
+    headerValue(headers, name) {
+        if (!headers) return null;
+        if (headers instanceof Headers) return headers.get(name);
+        const match = Object.keys(headers).find(key => key.toLowerCase() === name.toLowerCase());
+        return match ? headers[match] : null;
+    },
+
     /**
      * Translate a v1 path to its v2 admin equivalent. Returns null if no
      * mapping exists (caller should go straight to v1).
@@ -70,9 +120,9 @@ const ApiClient = {
     },
 
     /**
-     * Make a request. Tries v2 path first when a mapping exists; on 404 or
-     * network failure, falls back to v1. Surfaces Sunset/Link headers when
-     * v1 was used.
+     * Make a request. Mapped mutations have one canonical v2 destination and
+     * never cross-version replay. Compatibility fallback is limited to known
+     * collection reads whose v2 endpoint positively returns 404.
      *
      * Returns { response, viaV1: bool, sunsetDate: string | null }.
      *
@@ -81,19 +131,48 @@ const ApiClient = {
      */
     async request(path, opts = {}) {
         const v2Path = ApiClient.toV2(path);
+        const request = ApiClient.withMutationIntent(opts);
+        const method = String(request.method || 'GET').toUpperCase();
         if (v2Path) {
             try {
-                const r = await fetch(v2Path, opts);
-                if (r.status !== 404) {
+                const r = await fetch(v2Path, request);
+                const mayFallback = ApiClient.isSafeMethod(method)
+                    && r.status === 404
+                    && ApiClient.V1_FALLBACK_READS.has(ApiClient.pathWithoutQuery(path));
+                if (!mayFallback) {
                     return { response: r, viaV1: false, sunsetDate: null };
                 }
-                // v2 mapped but not mounted yet (or path-level miss) — fall through.
+                // Exact collection 404 is the sole positive compatibility
+                // signal. Preserve Sunset telemetry on the v1 response.
             } catch (e) {
-                // Network error on v2 — try v1 as fallback.
-                console.warn('v2 request failed; falling back to v1', { v2Path, error: e.message });
+                if (!ApiClient.isSafeMethod(method)) {
+                    const idempotencyKey = ApiClient.headerValue(request.headers, 'Idempotency-Key');
+                    throw new UnknownMutationOutcomeError({
+                        method,
+                        path: v2Path,
+                        idempotencyKey,
+                        cause: e,
+                    });
+                }
+                throw e;
             }
         }
-        const r = await fetch(path, opts);
+        let r;
+        try {
+            r = await fetch(path, request);
+        } catch (e) {
+            const isCanonicalV2Mutation = !ApiClient.isSafeMethod(method)
+                && String(path).startsWith('/api/v2/');
+            if (isCanonicalV2Mutation) {
+                throw new UnknownMutationOutcomeError({
+                    method,
+                    path,
+                    idempotencyKey: ApiClient.headerValue(request.headers, 'Idempotency-Key'),
+                    cause: e,
+                });
+            }
+            throw e;
+        }
         const sunset = r.headers ? r.headers.get('Sunset') : null;
         const link = r.headers ? r.headers.get('Link') : null;
         if (sunset) {
@@ -133,8 +212,24 @@ const ApiClient = {
     },
 };
 
+class UnknownMutationOutcomeError extends Error {
+    constructor({ method, path, idempotencyKey, cause }) {
+        super(`Outcome unknown for ${method} ${path}; reconcile authoritative state before retrying.`);
+        this.name = 'UnknownMutationOutcomeError';
+        this.code = 'mutation_outcome_unknown';
+        this.method = method;
+        this.path = path;
+        this.idempotencyKey = idempotencyKey || null;
+        this.cause = cause;
+        this.outcomeUnknown = true;
+    }
+}
+
 // Expose for console diagnostics + unit-test page.
-if (typeof window !== 'undefined') window.ApiClient = ApiClient;
+if (typeof window !== 'undefined') {
+    window.ApiClient = ApiClient;
+    window.UnknownMutationOutcomeError = UnknownMutationOutcomeError;
+}
 
 // === #245 AgentCard panel ===
 // A2A Identity inspector: fetches a signed AgentCard per instance and
@@ -614,8 +709,13 @@ class AgenticDashboard {
         this.sessionIdToAgentId = new Map();   // session_id -> agentId (for session_frame routing)
         this.lastSeqPerSession = new Map();     // session_id -> last received seq (for incremental replay)
         this.reconnectAttempts = 0;
-        this.maxReconnectAttempts = 10;
         this.reconnectDelay = 1000;
+        this.maxReconnectDelay = 30000;
+        this.reconnectTimer = null;
+        this.helloTimer = null;
+        this.intentionalWsClose = false;
+        this.connectionState = 'disconnected';
+        this.serverCapabilities = null;
         this.currentOAuthPrompt = null;
 
         // Log sidebar state
@@ -692,10 +792,35 @@ class AgenticDashboard {
     // WebSocket
     // =========================================================================
 
+    managementWsUrl() {
+        const configured = (typeof window !== 'undefined' && window.AGENTIC_MANAGEMENT_WS_URL)
+            || document.querySelector('meta[name="agentic-management-ws-url"]')?.content;
+        if (configured) return configured;
+
+        const url = new URL('/', window.location.href);
+        url.protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        // The local development listeners retain the documented 8122/8121
+        // split. Standard TLS/proxy ports stay same-origin and need no brittle
+        // arithmetic.
+        if (url.port === '8122') url.port = '8121';
+        return url.toString();
+    }
+
+    setConnectionState(state) {
+        this.connectionState = state;
+        this.updateConnectionStatus(state);
+    }
+
     connect() {
-        const wsPort = parseInt(window.location.port || '8122') - 1;
-        const wsUrl = `ws://${window.location.hostname}:${wsPort}`;
+        if (this.reconnectTimer) {
+            clearTimeout(this.reconnectTimer);
+            this.reconnectTimer = null;
+        }
+        const wsUrl = this.managementWsUrl();
         console.log(`Connecting to WebSocket at ${wsUrl}`);
+        this.intentionalWsClose = false;
+        this.serverCapabilities = null;
+        this.setConnectionState('connecting');
 
         try {
             this.ws = new WebSocket(wsUrl);
@@ -710,17 +835,20 @@ class AgenticDashboard {
     }
 
     onOpen() {
-        console.log('WebSocket connected');
-        this.reconnectAttempts = 0;
-        this.updateConnectionStatus(true);
+        console.log('WebSocket transport open; awaiting server_hello');
+        this.setConnectionState('negotiating');
         // Clear stale PTY state — server's in-memory command registry resets on restart.
         // Existing panes will rediscover sessions via list_sessions when the agent list arrives.
         this.shellCommandIds.clear();
         this.activeCommandIds.clear();
         this.pendingFirstOutput.clear();
         this.pendingStartupAttach.clear();
-        this.send({ type: 'subscribe', agent_id: '*' });
-        this.send({ type: 'list_agents' });
+        clearTimeout(this.helloTimer);
+        this.helloTimer = setTimeout(() => {
+            if (this.connectionState !== 'negotiating') return;
+            this.showToast('Management connection did not negotiate capabilities.', 'error');
+            try { this.ws?.close(4002, 'server_hello timeout'); } catch (_) {}
+        }, 5000);
     }
 
     onMessage(event) {
@@ -734,25 +862,42 @@ class AgenticDashboard {
 
     onClose(event) {
         console.log('WebSocket closed:', event.code);
-        this.updateConnectionStatus(false);
-        this.scheduleReconnect();
+        clearTimeout(this.helloTimer);
+        this.helloTimer = null;
+        this.serverCapabilities = null;
+        this.setConnectionState(this.intentionalWsClose ? 'disconnected' : 'reconnecting');
+        if (!this.intentionalWsClose) this.scheduleReconnect();
     }
 
     scheduleReconnect() {
-        if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-            this.showToast('Connection lost. Refresh the page.', 'error');
-            return;
-        }
-        const delay = this.reconnectDelay * Math.pow(2, this.reconnectAttempts);
+        if (this.reconnectTimer || this.intentionalWsClose) return;
+        const base = Math.min(
+            this.maxReconnectDelay,
+            this.reconnectDelay * Math.pow(2, this.reconnectAttempts)
+        );
+        const delay = Math.round(base * (0.75 + Math.random() * 0.5));
         this.reconnectAttempts++;
         console.log(`Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts})`);
-        setTimeout(() => this.connect(), delay);
+        this.reconnectTimer = setTimeout(() => {
+            this.reconnectTimer = null;
+            if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+                this.scheduleReconnect();
+                return;
+            }
+            this.connect();
+        }, delay);
     }
 
     send(msg) {
-        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-            this.ws.send(JSON.stringify(msg));
+        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return false;
+        if (this.connectionState !== 'ready') return false;
+        const supported = this.serverCapabilities?.supportedClientMessages;
+        if (supported && !supported.has(msg.type)) {
+            this.showToast(`Server does not advertise WebSocket operation: ${msg.type}`, 'error');
+            return false;
         }
+        this.ws.send(JSON.stringify(msg));
+        return true;
     }
 
     // =========================================================================
@@ -761,6 +906,9 @@ class AgenticDashboard {
 
     handleMessage(msg) {
         switch (msg.type) {
+            case 'server_hello':
+                this.handleServerHello(msg);
+                break;
             case 'output':
                 this.handleOutput(msg);
                 break;
@@ -838,6 +986,37 @@ class AgenticDashboard {
             default:
                 console.log('Unknown message:', msg.type, msg);
         }
+    }
+
+    handleServerHello(msg) {
+        if (this.connectionState !== 'negotiating') {
+            this.showToast('Unexpected management capability frame; reconnecting.', 'error');
+            try { this.ws?.close(4002, 'unexpected server_hello'); } catch (_) {}
+            return;
+        }
+        const messages = Array.isArray(msg.supported_client_messages)
+            ? msg.supported_client_messages.filter(value => typeof value === 'string')
+            : null;
+        const features = Array.isArray(msg.features)
+            ? msg.features.filter(value => typeof value === 'string')
+            : null;
+        if (!messages || !features || !messages.includes('list_agents')) {
+            this.showToast('Management server capability advertisement is incompatible.', 'error');
+            try { this.ws?.close(4002, 'incompatible server_hello'); } catch (_) {}
+            return;
+        }
+        clearTimeout(this.helloTimer);
+        this.helloTimer = null;
+        this.serverCapabilities = {
+            serverVersion: msg.server_version || null,
+            supportedClientMessages: new Set(messages),
+            features: new Set(features),
+        };
+        this.reconnectAttempts = 0;
+        this.setConnectionState('ready');
+        // Inventory is scoped and contains no terminal bytes. Session output
+        // attaches separately through join_session / pty-ws.v1.
+        this.send({ type: 'list_agents' });
     }
 
     handleOutput(msg) {
@@ -1542,7 +1721,9 @@ class AgenticDashboard {
             }
         } catch (e) {
             console.error('Start VM error:', e);
-            this.showToast(`Failed to start ${name}: ${e.message}`, 'error');
+            if (!(await this.reconcileUnknownInstanceMutation(name, e))) {
+                this.showToast(`Failed to start ${name}: ${e.message}`, 'error');
+            }
         } finally {
             this.setVmButtonsDisabled(name, false);
         }
@@ -1563,7 +1744,9 @@ class AgenticDashboard {
             }
         } catch (e) {
             console.error('Stop VM error:', e);
-            this.showToast(`Failed to stop ${name}: ${e.message}`, 'error');
+            if (!(await this.reconcileUnknownInstanceMutation(name, e))) {
+                this.showToast(`Failed to stop ${name}: ${e.message}`, 'error');
+            }
         } finally {
             this.setVmButtonsDisabled(name, false);
         }
@@ -1584,7 +1767,9 @@ class AgenticDashboard {
             }
         } catch (e) {
             console.error('Force off VM error:', e);
-            this.showToast(`Failed to force off ${name}: ${e.message}`, 'error');
+            if (!(await this.reconcileUnknownInstanceMutation(name, e))) {
+                this.showToast(`Failed to force off ${name}: ${e.message}`, 'error');
+            }
         } finally {
             this.setVmButtonsDisabled(name, false);
         }
@@ -1623,7 +1808,9 @@ class AgenticDashboard {
             }
         } catch (e) {
             console.error('Restart VM error:', e);
-            this.showToast(`Failed to restart ${name}: ${e.message}`, 'error');
+            if (!(await this.reconcileUnknownInstanceMutation(name, e))) {
+                this.showToast(`Failed to restart ${name}: ${e.message}`, 'error');
+            }
         } finally {
             this.setVmButtonsDisabled(name, false);
         }
@@ -1643,6 +1830,29 @@ class AgenticDashboard {
             const buttons = vmEntry.querySelectorAll('.vm-ctrl-btn');
             buttons.forEach(btn => btn.disabled = disabled);
         }
+    }
+
+    async reconcileUnknownInstanceMutation(name, error) {
+        if (!error?.outcomeUnknown) return false;
+        const intent = error.idempotencyKey ? ` Intent: ${error.idempotencyKey}.` : '';
+        this.showToast(
+            `Outcome unknown for ${name}; reconciling authoritative instance state before retry.${intent}`,
+            'warning'
+        );
+        try {
+            await this.fetchVms();
+            this.showToast(
+                `Reconciled ${name}. Review its current state before issuing another action.`,
+                'info'
+            );
+        } catch (reconcileError) {
+            console.error('Instance reconciliation failed:', reconcileError);
+            this.showToast(
+                `Outcome remains unknown for ${name}. Do not retry until the instance or operation can be refreshed.`,
+                'error'
+            );
+        }
+        return true;
     }
 
     async deleteVm(name, opts = {}) {
@@ -1665,7 +1875,9 @@ class AgenticDashboard {
             }
         } catch (e) {
             console.error('Delete VM error:', e);
-            this.showToast(`Failed to delete ${name}: ${e.message}`, 'error');
+            if (!(await this.reconcileUnknownInstanceMutation(name, e))) {
+                this.showToast(`Failed to delete ${name}: ${e.message}`, 'error');
+            }
         } finally {
             this.setVmButtonsDisabled(name, false);
         }
@@ -1692,7 +1904,9 @@ class AgenticDashboard {
             }
         } catch (e) {
             console.error('Deploy agent error:', e);
-            this.showToast(`Failed to deploy agent: ${e.message}`, 'error');
+            if (!(await this.reconcileUnknownInstanceMutation(name, e))) {
+                this.showToast(`Failed to deploy agent: ${e.message}`, 'error');
+            }
         } finally {
             this.setVmButtonsDisabled(name, false);
         }
@@ -2215,7 +2429,9 @@ class AgenticDashboard {
             }
         } catch (error) {
             console.error('Create host instance error:', error);
-            this.showToast(`Failed to create ${name}: ${error.message}`, 'error');
+            if (!(await this.reconcileUnknownInstanceMutation(name, error))) {
+                this.showToast(`Failed to create ${name}: ${error.message}`, 'error');
+            }
         }
     }
 
@@ -2377,7 +2593,9 @@ class AgenticDashboard {
             }
         } catch (e) {
             console.error('Create VM error:', e);
-            this.showToast(`Failed to create ${name}: ${e.message}`, 'error');
+            if (!(await this.reconcileUnknownInstanceMutation(name, e))) {
+                this.showToast(`Failed to create ${name}: ${e.message}`, 'error');
+            }
         }
     }
 
@@ -3052,12 +3270,19 @@ class AgenticDashboard {
     // UI helpers
     // =========================================================================
 
-    updateConnectionStatus(connected) {
+    updateConnectionStatus(state) {
         const el = document.getElementById('connection-status');
         const text = el.querySelector('.status-text');
-        if (connected) {
+        const normalized = state === true ? 'ready' : (state === false ? 'disconnected' : state);
+        if (normalized === 'ready') {
             el.className = 'status-connected';
             text.textContent = 'Connected';
+        } else if (normalized === 'connecting' || normalized === 'negotiating') {
+            el.className = 'status-connecting';
+            text.textContent = normalized === 'negotiating' ? 'Negotiating' : 'Connecting';
+        } else if (normalized === 'reconnecting') {
+            el.className = 'status-connecting';
+            text.textContent = 'Reconnecting';
         } else {
             el.className = 'status-disconnected';
             text.textContent = 'Disconnected';
@@ -4806,8 +5031,9 @@ const DeprecationTracker = {
         }
         // Poll the server snapshot every 30s so the banner total stays
         // consistent with other clients hitting the same management process.
-        this.fetchServerCounts();
+        const initialFetch = this.fetchServerCounts();
         this._refreshTimer = setInterval(() => this.fetchServerCounts(), 30000);
+        return initialFetch;
     },
 
     _stripQuery(p) {
@@ -5340,7 +5566,7 @@ const PushNotifications = {
                 if (!confirm(`Delete subscriber ${btn.dataset.id}?`)) return;
                 const ok = await this.delete(instanceId, taskId, btn.dataset.id);
                 if (ok) {
-                    this.render(instanceId, taskId, container);
+                    await this.render(instanceId, taskId, container);
                 } else {
                     alert('Delete failed; check server logs.');
                 }
@@ -5447,6 +5673,7 @@ class PtyWsV1Client {
         this.activatedExtensions = [];
         this.bindingHelloReceived = false;
         this.userInitiatedClose = false;
+        this.serverCloseDelivered = false;
 
         // Callbacks (assigned by caller).
         this.onBindingHello = () => {};
@@ -5486,6 +5713,15 @@ class PtyWsV1Client {
         }
         this.ws.binaryType = 'arraybuffer';
         this.ws.onopen = () => {
+            if (this.ws.protocol !== 'pty-ws.v1') {
+                this.onError({
+                    kind: 'subprotocol',
+                    expected: 'pty-ws.v1',
+                    actual: this.ws.protocol || null,
+                });
+                try { this.ws.close(1002, 'pty-ws.v1 subprotocol required'); } catch (_) {}
+                return;
+            }
             // Don't send pty.join_session until we've seen binding_hello;
             // the spec allows it but the executor's session registry may
             // race — being polite gives the server time to flush hello
@@ -5494,6 +5730,7 @@ class PtyWsV1Client {
         };
         this.ws.onmessage = (e) => this._handleRawFrame(e.data);
         this.ws.onclose = (e) => {
+            if (this.serverCloseDelivered) return;
             const reason = e.reason || (this.userInitiatedClose ? 'leave' : 'transport');
             this.onClosed({ code: e.code, reason, userInitiated: this.userInitiatedClose });
         };
@@ -5532,11 +5769,17 @@ class PtyWsV1Client {
         }
         switch (frame.op) {
             case 'binding_hello':
+                if (!this.ws || this.ws.protocol !== 'pty-ws.v1') {
+                    this.onError({
+                        kind: 'subprotocol',
+                        expected: 'pty-ws.v1',
+                        actual: this.ws?.protocol || null,
+                    });
+                    try { this.ws?.close(1002, 'pty-ws.v1 subprotocol required'); } catch (_) {}
+                    return;
+                }
                 this.bindingHelloReceived = true;
                 this.activatedExtensions = (frame.payload && frame.payload.activated_extensions) || [];
-                if (this.ws && this.ws.protocol && this.ws.protocol !== 'pty-ws.v1') {
-                    console.warn('[pty-ws] server did not echo subprotocol pty-ws.v1; got:', this.ws.protocol);
-                }
                 this.onBindingHello(frame.payload || {});
                 // Now safe to join.
                 this._sendVerb('pty.join_session', this._buildJoinPayload());
@@ -5591,6 +5834,7 @@ class PtyWsV1Client {
             case 'closed': {
                 const reason = (frame.payload && frame.payload.reason) || 'session_ended';
                 this.userInitiatedClose = false;
+                this.serverCloseDelivered = true;
                 this.onClosed({ reason, code: null, userInitiated: false, fromServer: true });
                 try { if (this.ws) this.ws.close(); } catch (_) {}
                 break;

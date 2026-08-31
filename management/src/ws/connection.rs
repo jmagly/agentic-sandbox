@@ -141,15 +141,21 @@ fn default_rows() -> u32 {
 pub const SUPPORTED_CLIENT_MESSAGES: &[&str] = &[
     "subscribe",
     "unsubscribe",
+    "ping",
     "start_shell",
+    "send_command",
     "send_input",
     "pty_resize",
+    "list_agents",
     "list_sessions",
     "kill_session",
     "attach_session",
+    "detach_session",
+    "create_session",
     "join_session",
     "leave_session",
     "session_input",
+    "session_resize",
 ];
 
 pub const SUPPORTED_FEATURES: &[&str] = &[
@@ -1323,6 +1329,7 @@ fn output_to_server_message(msg: &OutputMessage) -> ServerMessage {
 mod tests {
     use super::{
         is_legacy_wildcard_subscription, legacy_agent_output_subscribe_allowed, option_enabled,
+        SUPPORTED_CLIENT_MESSAGES,
     };
     use std::sync::{LazyLock, Mutex};
 
@@ -1372,5 +1379,22 @@ mod tests {
         assert!(!legacy_agent_output_subscribe_allowed("agent-01"));
         assert!(legacy_agent_output_subscribe_allowed("*"));
         std::env::remove_var("AGENTIC_WS_ALLOW_WILDCARD_SUBSCRIBE");
+    }
+
+    #[test]
+    fn server_hello_advertises_inventory_and_formal_session_operations() {
+        for operation in [
+            "list_agents",
+            "list_sessions",
+            "join_session",
+            "leave_session",
+            "session_input",
+            "session_resize",
+        ] {
+            assert!(
+                SUPPORTED_CLIENT_MESSAGES.contains(&operation),
+                "server_hello omitted supported operation {operation}"
+            );
+        }
     }
 }
