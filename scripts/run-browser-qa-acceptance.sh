@@ -38,6 +38,13 @@ REPORT_DIR="$(cd "$REPORT_DIR" && pwd)"
 SCRATCH_DIR="$(mktemp -d "${TMPDIR:-/tmp}/carbonyl-qa-acceptance.XXXXXX")"
 VM_CREATED=0
 
+# New VMs require a transport-authenticated agent path. Browser QA does not
+# consume the management channel, but provisioning still fails closed unless
+# cloud-init receives secure transport material. Use the same host-local vsock
+# endpoint as the Agentic Sandbox VM benchmark; no host network listener or
+# legacy bearer secret is introduced.
+export AGENTIC_GRPC_VSOCK_PORT="${AGENTIC_GRPC_VSOCK_PORT:-8120}"
+
 cleanup() {
     status=$?
     trap - EXIT INT TERM
