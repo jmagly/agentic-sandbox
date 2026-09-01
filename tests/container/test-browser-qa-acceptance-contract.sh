@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2016  # Contract literals intentionally contain '$'.
 
 set -euo pipefail
 
@@ -22,5 +23,12 @@ grep -Fq '"$PROJECT_ROOT/images/qemu/provision-vm.sh"' "$runner"
 grep -Fq 'AGENT_CLIENT_SOURCE_BIN:-$repo_root/agent-rs/target/release/agent-client' \
     "$provisioner"
 grep -Fq 'AGENT_CLIENT_SOURCE_BIN="$agent_binary"' "$provisioner"
+
+# A failed guest gate must retain bounded diagnostic logs/screenshots for the
+# host report copy while the outer cleanup still destroys the disposable VM.
+grep -Fq 'collect_failure_artifacts()' "$runner"
+grep -Fq 'KEEP_WORK_DIR=1 env -u DISPLAY' "$runner"
+grep -Fq 'remote_status=0' "$runner"
+grep -Fq '(( remote_status == 0 )) || exit "$remote_status"' "$runner"
 
 echo "PASS: browser QA workflow builds and forwards its exact agent client"

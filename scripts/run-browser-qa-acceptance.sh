@@ -124,7 +124,9 @@ SSH_OPTS=(
     "$SCRATCH_DIR/qa-src.tgz" \
     "agent@${VM_IP}:/tmp/"
 
-"${SSH_PREFIX[@]}" ssh "${SSH_OPTS[@]}" "agent@${VM_IP}" bash -s <<'REMOTE'
+remote_status=0
+"${SSH_PREFIX[@]}" ssh "${SSH_OPTS[@]}" "agent@${VM_IP}" bash -s <<'REMOTE' \
+    || remote_status=$?
 set -euo pipefail
 
 test "$(. /etc/os-release; printf '%s' "$VERSION_ID")" = "26.04"
@@ -140,6 +142,23 @@ acceptance_root=/tmp/carbonyl-qa-acceptance
 reports=/tmp/carbonyl-qa-reports
 rm -rf -- "$acceptance_root" "$reports"
 mkdir -p "$acceptance_root/carbonyl" "$acceptance_root/agent" "$acceptance_root/qa" "$reports"
+
+collect_failure_artifacts() {
+    status=$?
+    if (( status != 0 )); then
+        for work_dir in /tmp/carbonyl-operator-test.* /tmp/carbonyl-storage-flush.*; do
+            [[ -d "$work_dir" ]] || continue
+            for artifact in "$work_dir"/*.log "$work_dir"/*.png; do
+                [[ -f "$artifact" ]] || continue
+                cp "$artifact" \
+                    "$reports/$(basename "$work_dir")-$(basename "$artifact")"
+            done
+        done
+    fi
+    return "$status"
+}
+trap collect_failure_artifacts EXIT
+
 tar -xzf /tmp/carbonyl-src.tgz -C "$acceptance_root/carbonyl"
 tar -xzf /tmp/agent-src.tgz -C "$acceptance_root/agent"
 tar -xzf /tmp/qa-src.tgz -C "$acceptance_root/qa"
@@ -163,7 +182,7 @@ operator_dir=$(find /tmp -maxdepth 1 -type d -name 'carbonyl-operator-test.*' \
 [[ -n "$operator_dir" ]]
 cp "$operator_dir"/*.png "$reports/"
 
-env -u DISPLAY -u CARBONYL_QA_PRIVATE_X11 \
+KEEP_WORK_DIR=1 env -u DISPLAY -u CARBONYL_QA_PRIVATE_X11 \
     bash "$acceptance_root/carbonyl/scripts/test-storage-flush.sh" \
     | tee "$reports/storage-flush.log"
 
@@ -193,6 +212,8 @@ REMOTE
 
 "${SSH_PREFIX[@]}" scp "${SSH_OPTS[@]}" -r \
     "agent@${VM_IP}:/tmp/carbonyl-qa-reports/." "$REPORT_DIR/"
+
+(( remote_status == 0 )) || exit "$remote_status"
 
 echo "PASS: Ubuntu 26.04 disposable-VM browser acceptance completed"
 echo "Evidence: $REPORT_DIR"
