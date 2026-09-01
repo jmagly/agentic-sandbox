@@ -13,6 +13,8 @@ grep -Fq -- '--manifest-path agentic-sandbox/agent-rs/Cargo.toml' "$workflow"
 grep -Fq -- '--bin agent-client' "$workflow"
 grep -Fq 'AGENT_CLIENT_SOURCE_BIN=%s' "$workflow"
 grep -Fq '>> "$GITHUB_ENV"' "$workflow"
+grep -Fq 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02' \
+    "$workflow"
 
 # The exact binary built by the workflow must remain the source installed into
 # the guest; falling back to a host-global artifact would break ref fidelity.
