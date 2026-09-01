@@ -78,11 +78,21 @@ VM_CREATED=1
     "$VM_NAME" "$RUNTIME_ARTIFACT" "$RUNTIME_SHA256"
 "$PROJECT_ROOT/scripts/validate-browser-qa.sh" "$VM_NAME"
 
-VM_IP=$(virsh -c qemu:///system domifaddr "$VM_NAME" 2>/dev/null \
-    | awk '/ipv4/ {print $4}' | cut -d/ -f1 | head -1)
+VM_INFO="/var/lib/agentic-sandbox/vms/${VM_NAME}/vm-info.json"
+VM_IP=$(python3 - "$VM_INFO" <<'PY' 2>/dev/null || true
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    print(json.load(handle).get("ip", ""))
+PY
+)
+if [[ -z "$VM_IP" ]]; then
+    VM_IP=$(virsh -c qemu:///system domifaddr "$VM_NAME" 2>/dev/null \
+        | awk '/ipv4/ {print $4}' | cut -d/ -f1 | head -1)
+fi
 [[ -n "$VM_IP" ]] || { echo "error: could not resolve VM IP" >&2; exit 2; }
 
-VM_INFO="/var/lib/agentic-sandbox/vms/${VM_NAME}/vm-info.json"
 SSH_KEY_PATH=$(python3 - "$VM_INFO" <<'PY'
 import json
 import sys

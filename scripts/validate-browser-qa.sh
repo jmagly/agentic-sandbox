@@ -38,16 +38,37 @@ pass() { echo -e "  ${GREEN}✓${NC} $1"; ((PASS++)); }
 fail() { echo -e "  ${RED}✗${NC} $1"; ((FAIL++)); }
 info() { echo -e "  ${BLUE}→${NC} $1"; }
 
-# Resolve VM IP via libvirt
+# Prefer provisioning metadata because libvirt's guest-agent address report can
+# lag behind an otherwise SSH-ready VM. Fall back to the allocation registry,
+# then libvirt for older VMs.
 get_vm_ip() {
     local name="$1"
-    virsh -c qemu:///system domifaddr "$name" 2>/dev/null \
-        | awk '/ipv4/ {print $4}' | cut -d/ -f1 | head -1
+    local vm_info="/var/lib/agentic-sandbox/vms/${name}/vm-info.json"
+    local ip=""
+    if [[ -f "$vm_info" ]]; then
+        ip=$(python3 - "$vm_info" <<'PY' 2>/dev/null || true
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    print(json.load(handle).get("ip", ""))
+PY
+)
+    fi
+    if [[ -z "$ip" && -r /var/lib/agentic-sandbox/vms/.ip-registry ]]; then
+        ip=$(awk -F= -v name="$name" '$1 == name { print $2; exit }' \
+            /var/lib/agentic-sandbox/vms/.ip-registry)
+    fi
+    if [[ -z "$ip" ]]; then
+        ip=$(virsh -c qemu:///system domifaddr "$name" 2>/dev/null \
+            | awk '/ipv4/ {print $4}' | cut -d/ -f1 | head -1)
+    fi
+    printf '%s\n' "$ip"
 }
 
 VM_IP=$(get_vm_ip "$VM_NAME")
 if [[ -z "$VM_IP" ]]; then
-    echo -e "${RED}error:${NC} could not resolve IP for VM '$VM_NAME' via virsh"
+    echo -e "${RED}error:${NC} could not resolve IP for VM '$VM_NAME'"
     exit 2
 fi
 
