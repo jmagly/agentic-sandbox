@@ -148,10 +148,12 @@ collect_failure_artifacts() {
     if (( status != 0 )); then
         for work_dir in /tmp/carbonyl-operator-test.* \
             /tmp/carbonyl-controls-test.* \
+            /tmp/carbonyl-extension-runtime.* \
             /tmp/carbonyl-extension-actions.* \
             /tmp/carbonyl-storage-flush.*; do
             [[ -d "$work_dir" ]] || continue
-            for artifact in "$work_dir"/*.log "$work_dir"/*.png; do
+            for artifact in "$work_dir"/*.log "$work_dir"/*.out \
+                "$work_dir"/*.png; do
                 [[ -f "$artifact" ]] || continue
                 cp "$artifact" \
                     "$reports/$(basename "$work_dir")-$(basename "$artifact")"
@@ -177,7 +179,7 @@ export CARBONYL_QA_DISPOSABLE_WORKER=1
 export CARBONYL_QA_PRIVATE_X11=1
 export DISPLAY=:99
 
-CARBONYL_DISPOSABLE_BROWSER_QA=1 \
+KEEP_WORK_DIR=1 CARBONYL_DISPOSABLE_BROWSER_QA=1 \
     env -u WAYLAND_DISPLAY -u WAYLAND_SOCKET \
     bash "$acceptance_root/carbonyl/scripts/test-extension-runtime-integration.sh" \
     | tee "$reports/extension-runtime.log"
