@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-version=3.3.1
-expected_sha256=71031feb288e53c4c86c06eeb75df9cc94b7ceb1b927b45644d4f9d230c80734
+version=3.3.2
+expected_sha256=38b73d0d82172830c4f14f10d0300ab744914552f4dab1a972d177921faf0983
 download_url="https://dl.gitea.com/gitea-runner/${version}/gitea-runner-${version}-linux-amd64"
 staging_file=$(mktemp)
 trap 'rm -f "$staging_file"' EXIT
