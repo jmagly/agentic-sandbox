@@ -38,6 +38,12 @@ REPORT_DIR="$(cd "$REPORT_DIR" && pwd)"
 SCRATCH_DIR="$(mktemp -d "${TMPDIR:-/tmp}/carbonyl-qa-acceptance.XXXXXX")"
 VM_CREATED=0
 
+# Keep the disposable VM's SSH, health, and transport material scoped to this
+# acceptance run. Shared host secret stores may be root-only, while the
+# provision/deploy helpers intentionally run as the invoking operator.
+export SECRETS_DIR="$SCRATCH_DIR/secrets"
+install -d -m 0700 "$SECRETS_DIR"
+
 # New VMs require a transport-authenticated agent path. Browser QA does not
 # consume the management channel, but provisioning still fails closed unless
 # cloud-init receives secure transport material. Use the same host-local vsock
