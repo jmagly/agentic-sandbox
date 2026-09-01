@@ -180,7 +180,7 @@ export function evaluateTitanPreflight(snapshot) {
 export async function collectTitanSnapshot(environment = process.env) {
   const buildRoot = resolve(environment.CELLD_QUALIFICATION_BUILD_ROOT || "/build");
   const vmRoot = resolve(environment.VM_STORAGE_DIR || "/build/agentic-sandbox/vms");
-  const baseImage = resolve(environment.BASE_IMAGES_DIR || "/build/agentic-sandbox/base-images", "ubuntu-server-24.04-agent.qcow2");
+  const baseImage = resolve(environment.BASE_IMAGES_DIR || "/build/agentic-sandbox/base-images", "ubuntu-server-26.04-agent.qcow2");
   const manifestPath = resolve(dirname(baseImage), "manifest.json");
   const expectedHost = environment.CELLD_QUALIFICATION_EXPECTED_HOST || "titan";
   const actualHostname = hostname();

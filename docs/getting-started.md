@@ -175,14 +175,14 @@ sandboxctl session attach <session-id> --write   # Ctrl-A d to detach
 
 If you want hardware-level isolation (each agent gets its own kernel), use the VM runtime.
 
-**Additional prerequisite**: an Ubuntu 24.04 base image. Build it once:
+**Additional prerequisite**: an Ubuntu 26.04 base image. Build it once:
 
 ```bash
 cd images/qemu
-./build-base-image.sh 24.04          # ~5–15 min, depending on network speed
+./build-base-image.sh 26.04          # ~5–15 min, depending on network speed
 ```
 
-This downloads the Ubuntu cloud image, verifies its checksum, and stages it for fast cloning.
+This consumes the pinned Ubuntu server ISO, verifies its signed checksum, and stages an agent-ready image for fast cloning. Ubuntu 24.04 remains available as a compatibility target with `./build-base-image.sh 24.04`.
 
 Then from the dashboard:
 

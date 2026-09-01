@@ -84,7 +84,7 @@
   "init_scripts": [
     {
       "name": "ubuntu",
-      "label": "Ubuntu 24.04 LTS (full dev)",
+      "label": "Ubuntu 26.04 LTS (full dev)",
       "description": "Full development environment — languages, Docker, databases, network tools",
       "default": true,
       "layers": [
@@ -95,7 +95,7 @@
     },
     {
       "name": "ubuntu-minimal",
-      "label": "Ubuntu 24.04 LTS (minimal)",
+      "label": "Ubuntu 26.04 LTS (minimal)",
       "description": "Minimal Ubuntu with SSH and basic utilities only",
       "layers": [
         "layers/base-minimal.yaml"

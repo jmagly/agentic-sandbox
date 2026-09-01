@@ -1111,8 +1111,10 @@ GATEWAY_SSH_WRITE_FILES_BLOCK_PLACEHOLDER
 
       install_llvm() {
         log "Installing LLVM/Clang..."
+        . /etc/os-release
+        LLVM_CODENAME="${VERSION_CODENAME:?Ubuntu VERSION_CODENAME is required}"
         wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc
-        echo "deb http://apt.llvm.org/noble/ llvm-toolchain-noble main" | sudo tee /etc/apt/sources.list.d/llvm.list
+        echo "deb http://apt.llvm.org/${LLVM_CODENAME}/ llvm-toolchain-${LLVM_CODENAME} main" | sudo tee /etc/apt/sources.list.d/llvm.list
         sudo apt-get update
         sudo apt-get install -y clang lldb lld
         log "LLVM installed"

@@ -193,7 +193,7 @@ jobs:
         run: |
           set -euo pipefail
           test -d /mnt/ops/base-images
-          test -r /mnt/ops/base-images/ubuntu-server-24.04-agent.qcow2
+          test -r /mnt/ops/base-images/ubuntu-server-26.04-agent.qcow2
           sudo -n install -d -m 0775 /build/agentic-sandbox
           if test -e /build/agentic-sandbox/base-images \
             && ! test /build/agentic-sandbox/base-images -ef /mnt/ops/base-images; then
@@ -211,7 +211,7 @@ jobs:
               fi
             done
           fi
-          test -r /build/agentic-sandbox/base-images/ubuntu-server-24.04-agent.qcow2
+          test -r /build/agentic-sandbox/base-images/ubuntu-server-26.04-agent.qcow2
           test -w /build/agentic-sandbox/vms
           stat -c '%n type=%F mode=%a owner=%U group=%G' \
             /build/agentic-sandbox/base-images \
@@ -291,7 +291,7 @@ jobs:
           cargo --version --verbose
 
           test -d /mnt/ops/base-images
-          test -r /mnt/ops/base-images/ubuntu-server-24.04-agent.qcow2
+          test -r /mnt/ops/base-images/ubuntu-server-26.04-agent.qcow2
           sudo -n install -d -m 0775 /build/agentic-sandbox
           if test -e /build/agentic-sandbox/base-images \
             && ! test /build/agentic-sandbox/base-images -ef /mnt/ops/base-images; then
@@ -309,7 +309,7 @@ jobs:
               fi
             done
           fi
-          test -r /build/agentic-sandbox/base-images/ubuntu-server-24.04-agent.qcow2
+          test -r /build/agentic-sandbox/base-images/ubuntu-server-26.04-agent.qcow2
           test -w /build/agentic-sandbox/vms
 
           config=/srv/gitea-runner-host/config.yaml

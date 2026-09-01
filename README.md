@@ -81,7 +81,7 @@ Agentic Sandbox is the runtime substrate for the [AIWG SDLC suite](https://aiwg.
 
 > **Full walkthrough** — including prerequisite verification, build-time expectations, and troubleshooting — is in [docs/getting-started.md](docs/getting-started.md). The summary below assumes the prerequisites are already installed.
 >
-> **Prerequisites**: Linux host. For the **container path** (fastest): Rust 1.75+, `protoc`, Docker. For the **VM path** (full isolation): all of the above **plus** KVM (`egrep -c '(vmx|svm)' /proc/cpuinfo` > 0), libvirt + QEMU (`apt install qemu-kvm libvirt-daemon-system`), and an Ubuntu 24.04 base image (`cd images/qemu && ./build-base-image.sh 24.04`).
+> **Prerequisites**: Linux host. For the **container path** (fastest): Rust 1.75+, `protoc`, Docker. For the **VM path** (full isolation): all of the above **plus** KVM (`egrep -c '(vmx|svm)' /proc/cpuinfo` > 0), libvirt + QEMU (`apt install qemu-kvm libvirt-daemon-system`), and an Ubuntu 26.04 base image (`cd images/qemu && ./build-base-image.sh 26.04`). Ubuntu 24.04 remains a supported compatibility image.
 
 The recommended path launches the **full system** — management server + dashboard. From the dashboard you can create VM or container instances, attach terminal panes, and watch live events without ever touching a shell. Power-user shortcuts for skipping the dashboard are below.
 

@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# shellcheck disable=SC2016  # Contract literals intentionally contain '$'.
+
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+workflow="$repo_root/.gitea/workflows/browser-qa-acceptance.yml"
+runner="$repo_root/scripts/run-browser-qa-acceptance.sh"
+provisioner="$repo_root/images/qemu/provision-vm.sh"
+
+grep -Fq 'CARGO_BUILD_JOBS: "4"' "$workflow"
+grep -Fq 'CARGO_TARGET_DIR: ${{ github.workspace }}/agent-client-target' "$workflow"
+grep -Fq -- '--manifest-path agentic-sandbox/agent-rs/Cargo.toml' "$workflow"
+grep -Fq -- '--bin agent-client' "$workflow"
+grep -Fq 'AGENT_CLIENT_SOURCE_BIN=%s' "$workflow"
+grep -Fq '>> "$GITHUB_ENV"' "$workflow"
+grep -Fq 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02' \
+    "$workflow"
+
+# The exact binary built by the workflow must remain the source installed into
+# the guest; falling back to a host-global artifact would break ref fidelity.
+grep -Fq '"$PROJECT_ROOT/images/qemu/provision-vm.sh"' "$runner"
+grep -Fq 'AGENT_CLIENT_SOURCE_BIN:-$repo_root/agent-rs/target/release/agent-client' \
+    "$provisioner"
+grep -Fq 'AGENT_CLIENT_SOURCE_BIN="$agent_binary"' "$provisioner"
+
+# A failed guest gate must retain bounded diagnostic logs/screenshots for the
+# host report copy while the outer cleanup still destroys the disposable VM.
+grep -Fq 'collect_failure_artifacts()' "$runner"
+grep -Fq 'KEEP_WORK_DIR=1 env -u DISPLAY' "$runner"
+grep -Fq 'remote_status=0' "$runner"
+grep -Fq '(( remote_status == 0 )) || exit "$remote_status"' "$runner"
+grep -Fq '</dev/null' "$runner"
+grep -Fq 'required acceptance evidence is missing' "$runner"
+if grep -Fq 'CARBONYL_TEST_NO_SANDBOX' "$runner"; then
+    echo "FAIL: browser acceptance must retain Chromium sandboxing" >&2
+    exit 1
+fi
+
+echo "PASS: browser QA workflow builds and forwards its exact agent client"

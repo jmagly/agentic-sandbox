@@ -405,7 +405,7 @@ jobs:
           test -r /dev/kvm && test -w /dev/kvm
           virsh --connect "${LIBVIRT_DEFAULT_URI}" uri
           test -d "${BASE_IMAGES_DIR}"
-          test -r "${BASE_IMAGES_DIR}/ubuntu-server-24.04-agent.qcow2"
+          test -r "${BASE_IMAGES_DIR}/ubuntu-server-26.04-agent.qcow2"
           sudo test -d "${VM_STORAGE_DIR}"
           sudo test -w "${VM_STORAGE_DIR}"
           docker version --format 'docker client={{.Client.Version}} server={{.Server.Version}}'
@@ -476,7 +476,7 @@ jobs:
         run: |
           set -euo pipefail
           BASE_DIR="${BASE_IMAGES_DIR:-${AIWG_BASE_IMAGE_DIR:-/mnt/ops/base-images}}"
-          BASE_IMG="${BASE_DIR}/ubuntu-server-24.04-agent.qcow2"
+          BASE_IMG="${BASE_DIR}/ubuntu-server-26.04-agent.qcow2"
           MANIFEST="${BASE_DIR}/manifest.json"
           BASE_NAME="$(basename "${BASE_IMG}")"
           if [[ ! -f "${BASE_IMG}" ]]; then
@@ -488,7 +488,7 @@ jobs:
             if [[ -n "${expected}" ]]; then
               actual="$(sha256sum "${BASE_IMG}" | awk '{print $1}')"
               if [[ "${actual}" != "${expected}" ]]; then
-                echo "::error::Base image manifest is stale for ${BASE_NAME}: expected ${expected}, actual ${actual}. Re-run images/qemu/build-base-image.sh 24.04 on titan or explicitly refresh /mnt/ops/base-images/manifest.json with record_qcow2_manifest after verifying the image provenance."
+                echo "::error::Base image manifest is stale for ${BASE_NAME}: expected ${expected}, actual ${actual}. Re-run images/qemu/build-base-image.sh 26.04 on titan or explicitly refresh /mnt/ops/base-images/manifest.json with record_qcow2_manifest after verifying the image provenance."
                 exit 1
               fi
               echo "[bootstrap] manifest entry already present and current for ${BASE_NAME}; skipping"

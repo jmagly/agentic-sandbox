@@ -56,6 +56,14 @@ The `browser-qa` profile creates a per-VM host directory for carbonyl-agent sess
 
 The directory is mounted into the VM with the `carbonylsessions` virtiofs tag and is not deleted when a loadout is changed. Cookie/session files placed there should be mode `0600`. The sandbox does not import, prepopulate, or transform cookie material; higher-level tooling owns that workflow.
 
+The Carbonyl feature artifact is installed after provisioning rather than
+downloaded by cloud-init. Use
+`scripts/install-browser-qa-runtime.sh <vm> <artifact.tgz> <sha256>` followed by
+`scripts/validate-browser-qa.sh <vm>`. The installer rejects unsafe archive
+paths and verifies the supplied digest locally and inside the guest. Browser
+acceptance runs on the guest's private Xorg `:99`; host display sockets and host
+input/GPU devices must not be passed through.
+
 `browser-qa` declares `readiness.setup_timeout_seconds: 1200` because its setup path installs the browser automation stack and can exceed the generic 300 second profile setup budget on loaded hosts. Operators can override the setup wait for any loadout with `AGENTIC_VM_SETUP_WAIT_SECONDS` or `LOADOUT_SETUP_WAIT_SECONDS`. `vm-info.json` is written before readiness waits begin, so timeout diagnostics still include the VM IP, storage path, loadout profile, and generated SSH key path.
 
 ### Backward Compatibility

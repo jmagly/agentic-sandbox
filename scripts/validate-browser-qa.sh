@@ -7,11 +7,13 @@
 #   1. Xorg :99 is running
 #   2. /dev/uinput exists and is writable by the `input` group
 #   3. /opt/carbonyl/carbonyl returns its pinned runtime version
-#   4. python3-uinput is importable
+#   4. Python uinput/Pillow and xdotool are available
 #   5. The `agent` user is in the `input` group
 #   6. xserver-xorg-input-evdev is installed
 #   7. xorg99.service is active
 #   8. Carbonyl session storage is mounted and writable by agent
+#   9. Carbonyl's path-scoped AppArmor userns exception is loaded without
+#      disabling Ubuntu's global restriction
 #
 # Pairs with the browser-qa loadout (images/qemu/loadouts/profiles/browser-qa.yaml).
 # Run AFTER the VM has finished cloud-init (use validate-vm.sh --wait first if needed).
@@ -38,16 +40,37 @@ pass() { echo -e "  ${GREEN}✓${NC} $1"; ((PASS++)); }
 fail() { echo -e "  ${RED}✗${NC} $1"; ((FAIL++)); }
 info() { echo -e "  ${BLUE}→${NC} $1"; }
 
-# Resolve VM IP via libvirt
+# Prefer provisioning metadata because libvirt's guest-agent address report can
+# lag behind an otherwise SSH-ready VM. Fall back to the allocation registry,
+# then libvirt for older VMs.
 get_vm_ip() {
     local name="$1"
-    virsh -c qemu:///system domifaddr "$name" 2>/dev/null \
-        | awk '/ipv4/ {print $4}' | cut -d/ -f1 | head -1
+    local vm_info="/var/lib/agentic-sandbox/vms/${name}/vm-info.json"
+    local ip=""
+    if [[ -f "$vm_info" ]]; then
+        ip=$(python3 - "$vm_info" <<'PY' 2>/dev/null || true
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    print(json.load(handle).get("ip", ""))
+PY
+)
+    fi
+    if [[ -z "$ip" && -r /var/lib/agentic-sandbox/vms/.ip-registry ]]; then
+        ip=$(awk -F= -v name="$name" '$1 == name { print $2; exit }' \
+            /var/lib/agentic-sandbox/vms/.ip-registry)
+    fi
+    if [[ -z "$ip" ]]; then
+        ip=$(virsh -c qemu:///system domifaddr "$name" 2>/dev/null \
+            | awk '/ipv4/ {print $4}' | cut -d/ -f1 | head -1)
+    fi
+    printf '%s\n' "$ip"
 }
 
 VM_IP=$(get_vm_ip "$VM_NAME")
 if [[ -z "$VM_IP" ]]; then
-    echo -e "${RED}error:${NC} could not resolve IP for VM '$VM_NAME' via virsh"
+    echo -e "${RED}error:${NC} could not resolve IP for VM '$VM_NAME'"
     exit 2
 fi
 
@@ -124,7 +147,7 @@ CARBONYL_VERSION=$(run_remote '/opt/carbonyl/carbonyl --version 2>&1 | head -1')
 if [[ -n "$CARBONYL_VERSION" ]] && ! echo "$CARBONYL_VERSION" | grep -qiE "no such file|not found|error"; then
     pass "carbonyl runtime returns version: $CARBONYL_VERSION"
 else
-    fail "carbonyl runtime did not return a version (got: $CARBONYL_VERSION). Check /opt/carbonyl/carbonyl exists + is executable, and runtime-x11-8f070d2720157bd0 tarball extracted cleanly."
+    fail "carbonyl runtime did not return a version (got: $CARBONYL_VERSION). Install a verified X11 artifact with scripts/install-browser-qa-runtime.sh."
 fi
 
 # 4. python3-uinput importable (required for UinputEmitter)
@@ -132,6 +155,18 @@ if run_remote 'python3 -c "import uinput"' >/dev/null; then
     pass "python3-uinput is importable"
 else
     fail "python3-uinput is NOT importable (check: apt list --installed | grep python3-uinput)"
+fi
+
+if run_remote 'python3 -c "from PIL import Image"' >/dev/null; then
+    pass "python3-pil is importable"
+else
+    fail "python3-pil is NOT importable"
+fi
+
+if run_remote 'command -v xdotool >/dev/null'; then
+    pass "xdotool is installed"
+else
+    fail "xdotool is NOT installed"
 fi
 
 # 5. agent user is in input group (required to open /dev/uinput without sudo)
@@ -177,6 +212,16 @@ if run_remote "test -w '$SESSION_DIR' && tmp=\$(mktemp '$SESSION_DIR/.validate.X
     pass "carbonyl session directory is writable by agent"
 else
     fail "carbonyl session directory is not writable by agent"
+fi
+
+# 9. Ubuntu 23.10+ restricts unprivileged user namespaces. Chromium's primary
+# sandbox needs them, so the QA image loads a path-scoped AppArmor exception
+# for the root-owned installed binary while retaining the global restriction.
+# shellcheck disable=SC2016 # Command substitution must run inside the guest.
+if run_remote 'sudo -n apparmor_status 2>/dev/null | grep -q "carbonyl-browser-qa" && { test ! -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns || test "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)" = 1; }'; then
+    pass "Carbonyl AppArmor userns profile is loaded; global restriction remains enabled"
+else
+    fail "Carbonyl AppArmor userns profile is missing or the global restriction was disabled"
 fi
 
 echo ""

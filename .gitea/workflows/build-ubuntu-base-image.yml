@@ -1,0 +1,111 @@
+name: Build Ubuntu Base Image
+
+on:
+  workflow_dispatch:
+
+jobs:
+  ubuntu-26:
+    name: Build signed Ubuntu 26.04 baseline on Titan
+    runs-on: titan
+    timeout-minutes: 90
+    env:
+      ISO_DIR: /mnt/ops/isos/linux
+      BASE_DIR: /mnt/ops/base-images
+      STAGING_ROOT: /mnt/ops/base-image-staging
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Verify headless host contract
+        run: |
+          set -euo pipefail
+          test "$(hostname -s)" = titan
+          test -r /dev/kvm && test -w /dev/kvm
+          virsh -c qemu:///system uri
+          test -z "${DISPLAY:-}"
+          test -z "${WAYLAND_DISPLAY:-}"
+          test ! -e /tmp/.X11-unix/X99
+          for command in curl python3 sha256sum qemu-img virt-install genisoimage virt-customize setfacl; do
+            command -v "$command"
+          done
+
+      - name: Fetch exact signed-checksum-pinned installer
+        run: |
+          set -euo pipefail
+          readarray -t pin < <(python3 - <<'PY'
+          import json
+          with open("images/qemu/iso-pins.json", encoding="utf-8") as handle:
+              entry = json.load(handle)["releases"]["26.04"]
+          print(entry["point_release"])
+          print(entry["sha256"])
+          PY
+          )
+          point_release="${pin[0]}"
+          expected_sha="${pin[1]}"
+          iso="${ISO_DIR}/ubuntu-${point_release}-live-server-amd64.iso"
+          if test -f "$iso" && printf '%s  %s\n' "$expected_sha" "$iso" | sha256sum --check --status; then
+            echo "Using verified cached installer: $iso"
+            exit 0
+          fi
+          partial="${iso}.partial"
+          curl --fail --location --retry 4 --retry-all-errors --retry-delay 5 \
+            --continue-at - --speed-limit 1024 --speed-time 180 \
+            --output "$partial" \
+            "https://releases.ubuntu.com/26.04/ubuntu-${point_release}-live-server-amd64.iso"
+          printf '%s  %s\n' "$expected_sha" "$partial" | sha256sum --check
+          mv "$partial" "$iso"
+
+      - name: Build agent client for the image
+        run: cargo build --release --manifest-path agent-rs/Cargo.toml
+
+      - name: Build and manifest baseline
+        run: |
+          set -euo pipefail
+          staging_dir="${STAGING_ROOT}/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          qemu_user=libvirt-qemu
+          qemu_group=$(id -gn "$qemu_user")
+          sudo install -d -m 0755 "$STAGING_ROOT"
+          sudo install -d -m 0770 -o "$(id -u)" -g "$qemu_group" "$staging_dir"
+          sudo setfacl -m "u:${qemu_user}:rwx,d:u:${qemu_user}:rwx" "$staging_dir"
+          CI=true timeout --signal=TERM --kill-after=2m 75m \
+            env BASE_DIR="$staging_dir" bash images/qemu/build-base-image.sh 26.04
+
+      - name: Verify and promote staged image and manifest
+        run: |
+          set -euo pipefail
+          staging_dir="${STAGING_ROOT}/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          image_name="ubuntu-server-26.04-agent.qcow2"
+          image="${staging_dir}/${image_name}"
+          test -r "$image"
+          qemu-img check "$image"
+          qemu-img info "$image"
+          expected=$(jq -r --arg name "$image_name" '.[$name].sha256 // empty' "${staging_dir}/manifest.json")
+          test -n "$expected"
+          actual=$(sha256sum "$image" | awk '{print $1}')
+          test "$actual" = "$expected"
+
+          existing='{}'
+          if sudo test -r "${BASE_DIR}/manifest.json"; then
+            existing=$(sudo cat "${BASE_DIR}/manifest.json")
+          fi
+          entry=$(jq -c --arg name "$image_name" '.[$name]' "${staging_dir}/manifest.json")
+          printf '%s\n' "$existing" | jq --arg name "$image_name" --argjson entry "$entry" \
+            '. + {($name): $entry}' > "${staging_dir}/promoted-manifest.json"
+
+          sudo chattr -i "${BASE_DIR}/${image_name}" 2>/dev/null || true
+          sudo chattr -i "$image" 2>/dev/null || true
+          sudo mv "$image" "${BASE_DIR}/${image_name}"
+          sudo chmod 0444 "${BASE_DIR}/${image_name}"
+          sudo chattr +i "${BASE_DIR}/${image_name}" 2>/dev/null || true
+          sudo install -m 0644 "${staging_dir}/promoted-manifest.json" \
+            "${BASE_DIR}/manifest.json.new-${GITHUB_RUN_ID}"
+          sudo mv "${BASE_DIR}/manifest.json.new-${GITHUB_RUN_ID}" \
+            "${BASE_DIR}/manifest.json"
+          echo "Verified Ubuntu 26.04 baseline: $actual"
+
+      - name: Remove job staging directory
+        if: always()
+        run: |
+          staging_dir="${STAGING_ROOT}/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          sudo chattr -i "${staging_dir}/ubuntu-server-26.04-agent.qcow2" 2>/dev/null || true
+          sudo rm -rf -- "$staging_dir"

@@ -7,6 +7,7 @@ trap 'rm -rf "$TMP_ROOT"' EXIT
 
 mkdir -p "$TMP_ROOT/base-images" "$TMP_ROOT/vms" "$TMP_ROOT/ssh" "$TMP_ROOT/bin"
 touch "$TMP_ROOT/base-images/ubuntu-server-24.04-agent.qcow2"
+touch "$TMP_ROOT/base-images/ubuntu-server-26.04-agent.qcow2"
 printf '%s\n' 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKbenchmarkdryrunonly agentic-test' \
   > "$TMP_ROOT/ssh/id_ed25519.pub"
 printf '%s\n' 'existing=192.0.2.10' > "$TMP_ROOT/vms/.ip-registry"
@@ -36,10 +37,22 @@ CID_REGISTRY="$TMP_ROOT/vms/.vsock-cid-registry" \
     --base ubuntu-24.04 \
     runtime-benchmark-dry-run)"
 
+baseline_output="$(PATH="$TMP_ROOT/bin:$PATH" \
+BASE_IMAGES_DIR="$TMP_ROOT/base-images" \
+VM_STORAGE_DIR="$TMP_ROOT/vms" \
+IP_REGISTRY="$TMP_ROOT/vms/.ip-registry" \
+CID_REGISTRY="$TMP_ROOT/vms/.vsock-cid-registry" \
+  "$ROOT_DIR/images/qemu/provision-vm.sh" \
+    --dry-run \
+    --ssh-key "$TMP_ROOT/ssh/id_ed25519.pub" \
+    ubuntu-26-baseline-dry-run)"
+
 test "$(sha256sum "$TMP_ROOT/vms/.ip-registry")" = "$before_ip"
 test "$(sha256sum "$TMP_ROOT/vms/.vsock-cid-registry")" = "$before_cid"
 test ! -e "$TMP_ROOT/vms/.vsock-cid-registry.lock"
 test ! -e "$TMP_ROOT/vms/runtime-benchmark-dry-run"
+test ! -e "$TMP_ROOT/vms/ubuntu-26-baseline-dry-run"
 grep -Fq 'IP Address:   192.168.122.202' <<<"$output"
+grep -Fq 'ubuntu-server-26.04-agent.qcow2' <<<"$baseline_output"
 
-echo "provision dry-run leaves IP/CID registries and VM storage unchanged"
+echo "provision dry-run covers Ubuntu 24.04 compatibility and Ubuntu 26.04 baseline without mutations"

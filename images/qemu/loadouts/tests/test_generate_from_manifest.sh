@@ -335,6 +335,16 @@ assert_contains "carbonyl session target created" "/home/agent/.local/share/carb
 assert_contains "carbonyl session fstab entry" "carbonylsessions /home/agent/.local/share/carbonyl-agent/sessions virtiofs rw,noatime,nofail 0 0" "$USERDATA"
 assert_contains "carbonyl session mount command" "mount -t virtiofs carbonylsessions" "$USERDATA"
 assert_contains "carbonyl session directory mode" "chmod 700 /home/agent/.local/share/carbonyl-agent/sessions" "$USERDATA"
+assert_contains "browser-qa installs xdotool" "xdotool" "$USERDATA"
+assert_contains "browser-qa installs Pillow" "python3-pil" "$USERDATA"
+assert_contains "browser-qa installs Python venv" "python3-venv" "$USERDATA"
+assert_contains "browser-qa installs AppArmor" "apparmor" "$USERDATA"
+assert_contains "browser-qa scopes Carbonyl userns" "/opt/carbonyl/carbonyl flags=(unconfined)" "$USERDATA"
+assert_contains "browser-qa retains Chromium sandbox" "userns," "$USERDATA"
+assert_contains "browser-qa loads Carbonyl AppArmor profile" "apparmor_parser -r /etc/apparmor.d/carbonyl-browser-qa" "$USERDATA"
+assert_not_contains "browser-qa omits unrelated fnm bootstrap" "fnm-linux.zip" "$USERDATA"
+assert_not_contains "browser-qa omits unrelated Rust bootstrap" "sh.rustup.rs" "$USERDATA"
+assert_not_contains "browser-qa has no placeholder runtime URL" "downloads.example.invalid/carbonyl" "$USERDATA"
 assert_yaml_ok "browser-qa user-data parses as YAML" "$USERDATA"
 
 # ==============================================================================

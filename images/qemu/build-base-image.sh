@@ -40,7 +40,7 @@ Usage: $0 [OPTIONS] VERSION
 Build an agent-ready Ubuntu base image for agentic-sandbox QEMU adapter.
 
 Arguments:
-  VERSION    Ubuntu version: 22.04, 24.04, or 25.10
+  VERSION    Ubuntu version: 22.04, 24.04, 25.10, or 26.04
 
 Options:
   -d, --disk-size SIZE    Disk size (default: 40G)
@@ -56,9 +56,9 @@ Environment:
   BASE_DIR    Directory for output images (default: /mnt/ops/base-images)
 
 Examples:
-  $0 24.04                     # Build Ubuntu 24.04 agent image
-  $0 --disk-size 60G 24.04     # With 60GB disk
-  $0 --dry-run 25.10           # Preview commands for 25.10
+  $0 26.04                     # Build the Ubuntu 26.04 baseline image
+  $0 --disk-size 60G 26.04     # With 60GB disk
+  $0 --dry-run 24.04           # Preview the Ubuntu 24.04 compatibility image
 
 Output:
   Creates \${BASE_DIR}/ubuntu-server-\${VERSION}-agent.qcow2
@@ -172,7 +172,25 @@ check_dependencies() {
 
 resolve_iso_path() {
     local version="$1"
-    local iso_path
+    local iso_path point_release
+
+    # Prefer the exact point release whose signed digest is pinned. Otherwise
+    # an older major-version filename (for example 26.04.0) can be selected and
+    # then correctly rejected against the 26.04.1 digest, obscuring the real
+    # missing-artifact problem.
+    point_release=$(python3 - "$SCRIPT_DIR/iso-pins.json" "$version" <<'PY' 2>/dev/null || true
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    print(json.load(handle).get("releases", {}).get(sys.argv[2], {}).get("point_release", ""))
+PY
+)
+    if [[ -n "$point_release" ]]; then
+        iso_path="$ISO_DIR/ubuntu-${point_release}-live-server-amd64.iso"
+        [[ -f "$iso_path" ]] && echo "$iso_path" && return
+        return 1
+    fi
 
     # Try exact version match first
     iso_path="$ISO_DIR/ubuntu-${version}-live-server-amd64.iso"
@@ -184,6 +202,16 @@ resolve_iso_path() {
     done
 
     return 1
+}
+
+resolve_os_variant() {
+    local version="$1"
+    local config="$SCRIPT_DIR/configs/ubuntu-${version}.yaml"
+    local configured=""
+    if [[ -f "$config" ]]; then
+        configured=$(awk -F: '/^[[:space:]]*os_variant:/ {gsub(/[[:space:]"'\'']/, "", $2); print $2; exit}' "$config")
+    fi
+    printf '%s\n' "${configured:-ubuntu${version}}"
 }
 
 generate_autoinstall_iso() {
@@ -270,13 +298,14 @@ build_image() {
 
     ensure_output_directory_writable "$image_path" "$dry_run" || return 1
 
-    local iso_path
+    local iso_path os_variant
     if ! iso_path=$(resolve_iso_path "$version"); then
         log_error "ISO not found for Ubuntu $version"
         echo "Available ISOs in $ISO_DIR:"
         ls -la "$ISO_DIR"/*.iso 2>/dev/null || echo "  (none)"
         exit 1
     fi
+    os_variant=$(resolve_os_variant "$version")
 
     # #258: verify ISO sha256 against pinned value in iso-pins.json before
     # virt-install. Override with AIWG_SKIP_BASE_VERIFY=1 only when pinning a
@@ -294,6 +323,7 @@ build_image() {
     echo "  Disk:       $disk_size"
     echo "  RAM:        ${ram}MB"
     echo "  CPUs:       $cpus"
+    echo "  OS variant: $os_variant"
     echo ""
 
     if [[ "$dry_run" == "true" ]]; then
@@ -338,7 +368,7 @@ build_image() {
         --disk "path=$image_path,format=qcow2" \
         --location "$iso_path,kernel=casper/vmlinuz,initrd=casper/initrd" \
         --disk "path=$autoinstall_iso,device=cdrom" \
-        --os-variant "ubuntu${version}" \
+        --os-variant "$os_variant" \
         --network network=default \
         --graphics none \
         --console pty,target_type=serial \
@@ -446,7 +476,7 @@ build_image() {
     fi
 
     virsh undefine "$vm_name" --nvram 2>/dev/null || true
-    rm -f "$autoinstall_iso"
+    rm -f "$autoinstall_iso" 2>/dev/null || sudo rm -f "$autoinstall_iso"
 
     log_info "Optimizing image size..."
     virt-sparsify --in-place "$image_path" 2>/dev/null || true
@@ -483,7 +513,7 @@ main() {
             -y|--yes|--force) force="true"; shift ;;
             -n|--dry-run) dry_run="true"; shift ;;
             -h|--help) usage; exit 0 ;;
-            22.04|24.04|25.10) version="$1"; shift ;;
+            22.04|24.04|25.10|26.04) version="$1"; shift ;;
             *) log_error "Unknown option: $1"; usage; exit 1 ;;
         esac
     done

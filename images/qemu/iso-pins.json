@@ -27,6 +27,14 @@
       "sha256sums_url": "https://releases.ubuntu.com/25.10/SHA256SUMS",
       "sha256sums_gpg_url": "https://releases.ubuntu.com/25.10/SHA256SUMS.gpg",
       "pinned_at": ""
+    },
+    "26.04": {
+      "point_release": "26.04.1",
+      "iso_filename_pattern": "ubuntu-${point_release}-live-server-amd64.iso",
+      "sha256": "cc8a95cde20f6ced61a322420de00f10cc3c90ced545daa46cb9c1a117f1d927",
+      "sha256sums_url": "https://releases.ubuntu.com/26.04/SHA256SUMS",
+      "sha256sums_gpg_url": "https://releases.ubuntu.com/26.04/SHA256SUMS.gpg",
+      "pinned_at": "2026-08-31T16:33:09+00:00"
     }
   }
 }

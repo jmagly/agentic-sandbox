@@ -5,26 +5,31 @@ metadata:
   description: Headless Xorg + carbonyl x11 runtime + uinput trusted-input QA stack
 
 # Composable layer for trusted-input browser automation. Pair with a profile
-# that extends layers/base-dev.yaml — see profiles/browser-qa.yaml.
+# that provides the minimal host utilities — see profiles/browser-qa.yaml.
 #
 # Docker isolation (carbonyl-agent/docker/qa-runner) is the preferred runtime;
 # this VM layer is the fallback when Docker hot-plug for runtime-created uinput
 # devices regresses (see roctinam/carbonyl-agent#120).
 
 packages:
+  - apparmor
+  - python3
+  - python3-venv
   - xserver-xorg-core
   - xserver-xorg-video-dummy
   # xserver-xorg-video-modesetting was in the issue body's proposed YAML but
-  # does not exist as a standalone package in Ubuntu 24.04; modesetting is
+  # does not exist as a standalone package in Ubuntu 24.04 or 26.04; modesetting is
   # built into xserver-xorg-core. Including it makes cloud-init's package
   # install raise NoPackageError and abort the whole package run.
   - xserver-xorg-input-evdev
   - xserver-xorg-input-libinput
   - xauth
   - xvfb
+  - xdotool
   - scrot
   - ffmpeg
   - x11vnc
+  - python3-pil
   - python3-uinput
   - systemd  # systemd-udevd is required for X to hot-plug runtime-created uinput devices
 
@@ -72,6 +77,20 @@ write_files:
     permissions: "0644"
     content: |
       KERNEL=="uinput", MODE="0660", GROUP="input"
+  - path: /etc/apparmor.d/carbonyl-browser-qa
+    permissions: "0644"
+    content: |
+      abi <abi/4.0>,
+      include <tunables/global>
+
+      # Ubuntu 23.10+ restricts unprivileged user namespaces through AppArmor.
+      # Carbonyl needs user namespaces for Chromium's primary sandbox. Keep the
+      # exception attached to the root-owned installed QA binary instead of
+      # disabling the kernel restriction globally.
+      profile carbonyl-browser-qa /opt/carbonyl/carbonyl flags=(unconfined) {
+        userns,
+        include if exists <local/carbonyl-browser-qa>
+      }
   - path: /etc/systemd/system/xorg99.service
     permissions: "0644"
     content: |
@@ -92,11 +111,12 @@ write_files:
       WantedBy=multi-user.target
 
 runcmd:
-  # Carbonyl runtime pin matches carbonyl-agent/.carbonyl-runtime-version.
-  # Bump the tag below in lockstep with carbonyl-agent's pin file.
+  # The feature runtime is checksum-verified and injected after provisioning by
+  # scripts/install-browser-qa-runtime.sh. Keeping it out of cloud-init avoids
+  # embedding release credentials and prevents stale placeholder URLs from
+  # breaking otherwise valid VM provisioning.
   - mkdir -p /opt/carbonyl
-  - curl -fsSL https://downloads.example.invalid/carbonyl/runtime-x11-8f070d2720157bd0/x86_64-unknown-linux-gnu.tgz | tar -xz -C /opt/carbonyl --strip-components=1
-  - chmod +x /opt/carbonyl/carbonyl
+  - apparmor_parser -r /etc/apparmor.d/carbonyl-browser-qa
   - usermod -aG input agent
   - install -d -m 0700 -o agent -g agent /home/agent/.local/share/carbonyl-agent/sessions
   - grep -q '^carbonylsessions ' /etc/fstab || echo 'carbonylsessions /home/agent/.local/share/carbonyl-agent/sessions virtiofs rw,noatime,nofail 0 0' >> /etc/fstab

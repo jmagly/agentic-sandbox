@@ -393,25 +393,27 @@ Base images are minimal Ubuntu Server with cloud-init and qemu-guest-agent.
 ### Build
 
 ```bash
-# Build Ubuntu 24.04 base image
-./build-base-image.sh 24.04
+# Build the Ubuntu 26.04 baseline image
+./build-base-image.sh 26.04
 
 # Custom disk size
-./build-base-image.sh --disk-size 60G 24.04
+./build-base-image.sh --disk-size 60G 26.04
 
-# Dry run
+# Dry run the Ubuntu 24.04 compatibility image
 ./build-base-image.sh --dry-run 24.04
 ```
 
 ### Requirements
 
 ISOs in `/mnt/ops/isos/linux/`:
-- `ubuntu-24.04.x-live-server-amd64.iso`
+- `ubuntu-26.04.1-live-server-amd64.iso` (baseline)
+- `ubuntu-24.04.x-live-server-amd64.iso` (compatibility)
 
 ### Output
 
 Images created in `/mnt/ops/base-images/`:
-- `ubuntu-server-24.04-agent.qcow2`
+- `ubuntu-server-26.04-agent.qcow2` (baseline)
+- `ubuntu-server-24.04-agent.qcow2` (compatibility)
 
 ### Base Image Contents
 
