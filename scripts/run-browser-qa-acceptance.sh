@@ -57,7 +57,8 @@ cleanup() {
     if (( VM_CREATED )); then
         "$PROJECT_ROOT/scripts/destroy-vm.sh" "$VM_NAME" --force || true
     fi
-    rm -rf -- "$SCRATCH_DIR"
+    rm -rf -- "$SCRATCH_DIR" 2>/dev/null \
+        || sudo -n rm -rf -- "$SCRATCH_DIR"
     exit "$status"
 }
 trap cleanup EXIT INT TERM

@@ -128,7 +128,7 @@ fi
 
 # --- Resolve SSH key ---
 SSH_KEY="$SSH_KEY_DIR/$VM_NAME"
-if [[ ! -f "$SSH_KEY" ]]; then
+if [[ ! -f "$SSH_KEY" ]] && ! sudo -n test -f "$SSH_KEY" 2>/dev/null; then
     log_error "Ephemeral SSH key not found: $SSH_KEY"
     echo "  This VM may not have been provisioned with provision-vm.sh."
     echo "  Expected key at: $SSH_KEY"
