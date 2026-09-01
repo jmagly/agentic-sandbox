@@ -146,7 +146,9 @@ mkdir -p "$acceptance_root/carbonyl" "$acceptance_root/agent" "$acceptance_root/
 collect_failure_artifacts() {
     status=$?
     if (( status != 0 )); then
-        for work_dir in /tmp/carbonyl-operator-test.* /tmp/carbonyl-storage-flush.*; do
+        for work_dir in /tmp/carbonyl-operator-test.* \
+            /tmp/carbonyl-extension-actions.* \
+            /tmp/carbonyl-storage-flush.*; do
             [[ -d "$work_dir" ]] || continue
             for artifact in "$work_dir"/*.log "$work_dir"/*.png; do
                 [[ -f "$artifact" ]] || continue
@@ -178,6 +180,16 @@ CARBONYL_DISPOSABLE_BROWSER_QA=1 \
     env -u WAYLAND_DISPLAY -u WAYLAND_SOCKET \
     bash "$acceptance_root/carbonyl/scripts/test-extension-runtime-integration.sh" \
     | tee "$reports/extension-runtime.log"
+
+CARBONYL_UI_TEST_GUEST=1 \
+    env -u WAYLAND_DISPLAY -u WAYLAND_SOCKET \
+    bash "$acceptance_root/carbonyl/scripts/test-operator-controls.sh" \
+    | tee "$reports/operator-controls.log"
+
+CARBONYL_UI_TEST_GUEST=1 \
+    env -u WAYLAND_DISPLAY -u WAYLAND_SOCKET \
+    bash "$acceptance_root/carbonyl/scripts/test-extension-actions.sh" \
+    | tee "$reports/extension-actions.log"
 
 KEEP_WORK_DIR=1 bash "$acceptance_root/carbonyl/scripts/test-operator-window.sh" \
     | tee "$reports/operator-window.log"
@@ -219,6 +231,10 @@ echo "==> Running Layer 6 profile-persistence suite"
 
 for required_report in \
     extension-runtime.log \
+    operator-controls.log \
+    extension-actions.log \
+    operator-window.log \
+    storage-flush.log \
     browser-profile-transition.xml \
     layer1-cycle-1.xml \
     layer1-cycle-2.xml \
