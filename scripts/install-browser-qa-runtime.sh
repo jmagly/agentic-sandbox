@@ -31,7 +31,9 @@ while IFS= read -r member; do
     esac
 done < <(tar -tzf "$ARTIFACT")
 
-tar -tzf "$ARTIFACT" | grep -qE '(^|/)carbonyl$' || {
+# Do not use grep -q under pipefail here: once grep finds the executable it
+# closes the pipe, tar exits on SIGPIPE, and a valid archive is rejected.
+tar -tzf "$ARTIFACT" | grep -E '(^|/)carbonyl$' >/dev/null || {
     echo "error: runtime archive does not contain a carbonyl executable" >&2
     exit 1
 }
