@@ -182,11 +182,13 @@ export DISPLAY=:99
 KEEP_WORK_DIR=1 CARBONYL_DISPOSABLE_BROWSER_QA=1 \
     env -u WAYLAND_DISPLAY -u WAYLAND_SOCKET \
     bash "$acceptance_root/carbonyl/scripts/test-extension-runtime-integration.sh" \
+    </dev/null \
     | tee "$reports/extension-runtime.log"
 
 KEEP_WORK_DIR=1 CARBONYL_UI_TEST_GUEST=1 \
     env -u WAYLAND_DISPLAY -u WAYLAND_SOCKET \
     bash "$acceptance_root/carbonyl/scripts/test-operator-controls.sh" \
+    </dev/null \
     | tee "$reports/operator-controls.log"
 operator_controls_dir=$(find /tmp -maxdepth 1 -type d \
     -name 'carbonyl-controls-test.*' -printf '%T@ %p\n' \
@@ -197,6 +199,7 @@ cp "$operator_controls_dir"/*.png "$reports/"
 KEEP_WORK_DIR=1 CARBONYL_UI_TEST_GUEST=1 \
     env -u WAYLAND_DISPLAY -u WAYLAND_SOCKET \
     bash "$acceptance_root/carbonyl/scripts/test-extension-actions.sh" \
+    </dev/null \
     | tee "$reports/extension-actions.log"
 extension_action_dir=$(find /tmp -maxdepth 1 -type d \
     -name 'carbonyl-extension-actions.*' -printf '%T@ %p\n' \
@@ -205,6 +208,7 @@ extension_action_dir=$(find /tmp -maxdepth 1 -type d \
 cp "$extension_action_dir"/*.png "$reports/"
 
 KEEP_WORK_DIR=1 bash "$acceptance_root/carbonyl/scripts/test-operator-window.sh" \
+    </dev/null \
     | tee "$reports/operator-window.log"
 operator_dir=$(find /tmp -maxdepth 1 -type d -name 'carbonyl-operator-test.*' \
     -printf '%T@ %p\n' | sort -nr | head -1 | cut -d' ' -f2-)
