@@ -27,7 +27,7 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
     exit 2
 }
 for source_dir in "$CARBONYL_SOURCE" "$AGENT_SOURCE" "$QA_SOURCE"; do
-    [[ -d "$source_dir/.git" ]] || {
+    git -C "$source_dir" rev-parse --is-inside-work-tree >/dev/null 2>&1 || {
         echo "error: expected a Git checkout: $source_dir" >&2
         exit 2
     }
@@ -174,6 +174,11 @@ export CARBONYL_QA_DISPOSABLE_WORKER=1
 export CARBONYL_QA_PRIVATE_X11=1
 export DISPLAY=:99
 
+CARBONYL_DISPOSABLE_BROWSER_QA=1 \
+    env -u WAYLAND_DISPLAY -u WAYLAND_SOCKET \
+    bash "$acceptance_root/carbonyl/scripts/test-extension-runtime-integration.sh" \
+    | tee "$reports/extension-runtime.log"
+
 KEEP_WORK_DIR=1 bash "$acceptance_root/carbonyl/scripts/test-operator-window.sh" \
     | tee "$reports/operator-window.log"
 operator_dir=$(find /tmp -maxdepth 1 -type d -name 'carbonyl-operator-test.*' \
@@ -213,6 +218,7 @@ echo "==> Running Layer 6 profile-persistence suite"
 } > "$reports/environment.txt"
 
 for required_report in \
+    extension-runtime.log \
     browser-profile-transition.xml \
     layer1-cycle-1.xml \
     layer1-cycle-2.xml \
