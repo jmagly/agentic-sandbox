@@ -13,7 +13,10 @@ metadata:
 # devices is unavailable (see roctinam/carbonyl-agent#120).
 
 extends:
-  - layers/base-dev.yaml
+  # Browser acceptance needs the OS/Python test substrate, not the full
+  # language-toolchain bootstrap (fnm, Go, Rust, Bun). Keeping this profile
+  # task-focused avoids unrelated external downloads blocking Xorg readiness.
+  - layers/base-minimal.yaml
   - layers/browser-automation.yaml
 
 resources:

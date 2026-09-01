@@ -5,13 +5,15 @@ metadata:
   description: Headless Xorg + carbonyl x11 runtime + uinput trusted-input QA stack
 
 # Composable layer for trusted-input browser automation. Pair with a profile
-# that extends layers/base-dev.yaml — see profiles/browser-qa.yaml.
+# that provides the minimal host utilities — see profiles/browser-qa.yaml.
 #
 # Docker isolation (carbonyl-agent/docker/qa-runner) is the preferred runtime;
 # this VM layer is the fallback when Docker hot-plug for runtime-created uinput
 # devices regresses (see roctinam/carbonyl-agent#120).
 
 packages:
+  - python3
+  - python3-venv
   - xserver-xorg-core
   - xserver-xorg-video-dummy
   # xserver-xorg-video-modesetting was in the issue body's proposed YAML but

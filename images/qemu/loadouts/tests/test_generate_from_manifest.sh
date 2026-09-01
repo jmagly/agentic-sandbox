@@ -337,6 +337,9 @@ assert_contains "carbonyl session mount command" "mount -t virtiofs carbonylsess
 assert_contains "carbonyl session directory mode" "chmod 700 /home/agent/.local/share/carbonyl-agent/sessions" "$USERDATA"
 assert_contains "browser-qa installs xdotool" "xdotool" "$USERDATA"
 assert_contains "browser-qa installs Pillow" "python3-pil" "$USERDATA"
+assert_contains "browser-qa installs Python venv" "python3-venv" "$USERDATA"
+assert_not_contains "browser-qa omits unrelated fnm bootstrap" "fnm-linux.zip" "$USERDATA"
+assert_not_contains "browser-qa omits unrelated Rust bootstrap" "sh.rustup.rs" "$USERDATA"
 assert_not_contains "browser-qa has no placeholder runtime URL" "downloads.example.invalid/carbonyl" "$USERDATA"
 assert_yaml_ok "browser-qa user-data parses as YAML" "$USERDATA"
 
