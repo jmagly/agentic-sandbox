@@ -183,23 +183,27 @@ cp "$operator_dir"/*.png "$reports/"
 
 KEEP_WORK_DIR=1 env -u DISPLAY -u CARBONYL_QA_PRIVATE_X11 \
     bash "$acceptance_root/carbonyl/scripts/test-storage-flush.sh" \
+    </dev/null \
     | tee "$reports/storage-flush.log"
 
 cd "$acceptance_root/qa"
+echo "==> Running browser-backed operator/headless profile transition"
 "$acceptance_root/venv/bin/python" -m pytest \
     tests/integration/test_browser_profile_transition.py \
-    --junitxml="$reports/browser-profile-transition.xml" -q
+    --junitxml="$reports/browser-profile-transition.xml" -q </dev/null
 
 for cycle in 1 2 3; do
+    echo "==> Running Layer 1 trusted-input cycle $cycle/3"
     "$acceptance_root/venv/bin/python" -m pytest --runxfail \
         tests/integration/test_layer1_trusted_input.py \
         -m live \
-        --junitxml="$reports/layer1-cycle-${cycle}.xml" -q
+        --junitxml="$reports/layer1-cycle-${cycle}.xml" -q </dev/null
 done
 
+echo "==> Running Layer 6 profile-persistence suite"
 "$acceptance_root/venv/bin/python" -m pytest \
     tests/integration/test_layer6_profile_persistence.py \
-    --junitxml="$reports/layer6-profile-persistence.xml" -q
+    --junitxml="$reports/layer6-profile-persistence.xml" -q </dev/null
 
 {
     echo "ubuntu=$( . /etc/os-release; printf '%s' "$PRETTY_NAME" )"
@@ -207,6 +211,19 @@ done
     echo "runtime_sha256=$(sha256sum /opt/carbonyl/carbonyl | awk '{print $1}')"
     echo "xorg=$(systemctl is-active xorg99.service)"
 } > "$reports/environment.txt"
+
+for required_report in \
+    browser-profile-transition.xml \
+    layer1-cycle-1.xml \
+    layer1-cycle-2.xml \
+    layer1-cycle-3.xml \
+    layer6-profile-persistence.xml \
+    environment.txt; do
+    [[ -s "$reports/$required_report" ]] || {
+        echo "error: required acceptance evidence is missing: $required_report" >&2
+        exit 1
+    }
+done
 REMOTE
 
 "${SSH_PREFIX[@]}" scp "${SSH_OPTS[@]}" -r \

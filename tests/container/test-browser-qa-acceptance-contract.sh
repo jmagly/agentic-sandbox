@@ -30,6 +30,8 @@ grep -Fq 'collect_failure_artifacts()' "$runner"
 grep -Fq 'KEEP_WORK_DIR=1 env -u DISPLAY' "$runner"
 grep -Fq 'remote_status=0' "$runner"
 grep -Fq '(( remote_status == 0 )) || exit "$remote_status"' "$runner"
+grep -Fq '</dev/null' "$runner"
+grep -Fq 'required acceptance evidence is missing' "$runner"
 if grep -Fq 'CARBONYL_TEST_NO_SANDBOX' "$runner"; then
     echo "FAIL: browser acceptance must retain Chromium sandboxing" >&2
     exit 1
