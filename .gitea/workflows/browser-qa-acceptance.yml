@@ -70,6 +70,21 @@ jobs:
           printf '%s  %s\n' "${RUNTIME_SHA256}" carbonyl-runtime.tgz \
             | sha256sum --check
 
+      - name: Build exact agent client for the guest
+        env:
+          CARGO_BUILD_JOBS: "4"
+          CARGO_TARGET_DIR: ${{ github.workspace }}/agent-client-target
+        run: |
+          set -euo pipefail
+          cargo build \
+            --manifest-path agentic-sandbox/agent-rs/Cargo.toml \
+            --release \
+            --bin agent-client
+          agent_client="$CARGO_TARGET_DIR/release/agent-client"
+          test -x "$agent_client"
+          printf 'AGENT_CLIENT_SOURCE_BIN=%s\n' "$agent_client" \
+            >> "$GITHUB_ENV"
+
       - name: Run isolated full-UI and profile acceptance
         env:
           RUNTIME_SHA256: ${{ inputs.runtime_sha256 }}
