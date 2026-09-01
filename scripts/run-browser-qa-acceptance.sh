@@ -147,6 +147,7 @@ collect_failure_artifacts() {
     status=$?
     if (( status != 0 )); then
         for work_dir in /tmp/carbonyl-operator-test.* \
+            /tmp/carbonyl-controls-test.* \
             /tmp/carbonyl-extension-actions.* \
             /tmp/carbonyl-storage-flush.*; do
             [[ -d "$work_dir" ]] || continue
@@ -181,15 +182,25 @@ CARBONYL_DISPOSABLE_BROWSER_QA=1 \
     bash "$acceptance_root/carbonyl/scripts/test-extension-runtime-integration.sh" \
     | tee "$reports/extension-runtime.log"
 
-CARBONYL_UI_TEST_GUEST=1 \
+KEEP_WORK_DIR=1 CARBONYL_UI_TEST_GUEST=1 \
     env -u WAYLAND_DISPLAY -u WAYLAND_SOCKET \
     bash "$acceptance_root/carbonyl/scripts/test-operator-controls.sh" \
     | tee "$reports/operator-controls.log"
+operator_controls_dir=$(find /tmp -maxdepth 1 -type d \
+    -name 'carbonyl-controls-test.*' -printf '%T@ %p\n' \
+    | sort -nr | head -1 | cut -d' ' -f2-)
+[[ -n "$operator_controls_dir" ]]
+cp "$operator_controls_dir"/*.png "$reports/"
 
-CARBONYL_UI_TEST_GUEST=1 \
+KEEP_WORK_DIR=1 CARBONYL_UI_TEST_GUEST=1 \
     env -u WAYLAND_DISPLAY -u WAYLAND_SOCKET \
     bash "$acceptance_root/carbonyl/scripts/test-extension-actions.sh" \
     | tee "$reports/extension-actions.log"
+extension_action_dir=$(find /tmp -maxdepth 1 -type d \
+    -name 'carbonyl-extension-actions.*' -printf '%T@ %p\n' \
+    | sort -nr | head -1 | cut -d' ' -f2-)
+[[ -n "$extension_action_dir" ]]
+cp "$extension_action_dir"/*.png "$reports/"
 
 KEEP_WORK_DIR=1 bash "$acceptance_root/carbonyl/scripts/test-operator-window.sh" \
     | tee "$reports/operator-window.log"
