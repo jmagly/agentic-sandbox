@@ -5,7 +5,7 @@ project: "agentic-sandbox"
 type: report
 tags: [report, "2026-08", "agentic-sandbox"]
 summary: "August made agentic-sandbox easier to trust while it runs real work: clearer fleet state, better activity evidence, safer Docker control, VM package fixes, and the start of first-class Celld runtime integration."
-hero: "/assets/blog/2026-08-agentic-sandbox.png"
+hero: "https://docs.aiwg.io/agentic-sandbox/assets/blog/2026-08-agentic-sandbox.png"
 hero_alt: "Sunlit glacier-blue glass forms rising from water, representing visible and bounded runtime state."
 status: published
 ---

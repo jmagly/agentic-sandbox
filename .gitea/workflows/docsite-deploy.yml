@@ -120,6 +120,14 @@ jobs:
         # repo package.json needed; this repo is not a Node project.
         run: npx -y -p @pagenary/publisher@2026.7.12 -p terser pagenary build:tenants agentic-sandbox-docs
 
+      - name: Copy static documentation assets
+        if: steps.secret.outputs.available == 'true'
+        run: |
+          set -euo pipefail
+          OUT="${{ gitea.workspace }}/dist/agentic-sandbox-docs"
+          mkdir -p "$OUT/assets"
+          cp -a "${{ gitea.workspace }}/docs/assets/." "$OUT/assets/"
+
       - name: Verify build output
         if: steps.secret.outputs.available == 'true'
         run: |
@@ -129,6 +137,8 @@ jobs:
           test -f "$OUT/index.html" || { echo "::error::Missing index.html"; exit 1; }
           test -d "$OUT/pages" || { echo "::error::Missing static HTML snapshot directory"; exit 1; }
           test -f "$OUT/pages/welcome.html" || { echo "::error::Missing welcome static HTML snapshot"; exit 1; }
+          test -f "$OUT/assets/blog/2026-08-agentic-sandbox.png" || { echo "::error::Missing August report hero"; exit 1; }
+          test "$(file --brief --mime-type "$OUT/assets/blog/2026-08-agentic-sandbox.png")" = "image/png" || { echo "::error::August report hero is not a PNG"; exit 1; }
           grep -q 'id="app" class="canvas"' "$OUT/index.html" || { echo "::error::Root HTML fallback was not embedded"; exit 1; }
           grep -q '<section class="section doc markdown"' "$OUT/index.html" || { echo "::error::Root HTML fallback content is missing"; exit 1; }
           grep -q 'nav-static-fallback' "$OUT/index.html" || { echo "::error::Static navigation fallback is missing"; exit 1; }
@@ -214,6 +224,11 @@ jobs:
                echo '::error::Deploy failed: index.html missing at /${SUBPATH}/'
                exit 1
              fi"
+          curl --fail --silent --show-error --head \
+            "https://docs.aiwg.io/${SUBPATH}/assets/blog/2026-08-agentic-sandbox.png" \
+            | tr -d '\r' \
+            | grep -qi '^content-type: image/png$' \
+            || { echo "::error::Deployed August report hero is missing or has the wrong MIME type"; exit 1; }
 
       - name: Fetch Cloudflare purge token from vault
         if: steps.secret.outputs.available == 'true' && steps.secret.outputs.cache == 'true'
