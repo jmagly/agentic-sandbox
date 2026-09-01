@@ -12,6 +12,7 @@ metadata:
 # devices regresses (see roctinam/carbonyl-agent#120).
 
 packages:
+  - apparmor
   - python3
   - python3-venv
   - xserver-xorg-core
@@ -76,6 +77,20 @@ write_files:
     permissions: "0644"
     content: |
       KERNEL=="uinput", MODE="0660", GROUP="input"
+  - path: /etc/apparmor.d/carbonyl-browser-qa
+    permissions: "0644"
+    content: |
+      abi <abi/4.0>,
+      include <tunables/global>
+
+      # Ubuntu 23.10+ restricts unprivileged user namespaces through AppArmor.
+      # Carbonyl needs user namespaces for Chromium's primary sandbox. Keep the
+      # exception attached to the root-owned installed QA binary instead of
+      # disabling the kernel restriction globally.
+      profile carbonyl-browser-qa /opt/carbonyl/carbonyl flags=(unconfined) {
+        userns,
+        include if exists <local/carbonyl-browser-qa>
+      }
   - path: /etc/systemd/system/xorg99.service
     permissions: "0644"
     content: |
@@ -101,6 +116,7 @@ runcmd:
   # embedding release credentials and prevents stale placeholder URLs from
   # breaking otherwise valid VM provisioning.
   - mkdir -p /opt/carbonyl
+  - apparmor_parser -r /etc/apparmor.d/carbonyl-browser-qa
   - usermod -aG input agent
   - install -d -m 0700 -o agent -g agent /home/agent/.local/share/carbonyl-agent/sessions
   - grep -q '^carbonylsessions ' /etc/fstab || echo 'carbonylsessions /home/agent/.local/share/carbonyl-agent/sessions virtiofs rw,noatime,nofail 0 0' >> /etc/fstab

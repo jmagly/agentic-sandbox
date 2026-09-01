@@ -173,7 +173,6 @@ export LD_LIBRARY_PATH=/opt/carbonyl
 export CARBONYL_QA_DISPOSABLE_WORKER=1
 export CARBONYL_QA_PRIVATE_X11=1
 export DISPLAY=:99
-export CARBONYL_TEST_NO_SANDBOX=1
 
 KEEP_WORK_DIR=1 bash "$acceptance_root/carbonyl/scripts/test-operator-window.sh" \
     | tee "$reports/operator-window.log"

@@ -12,6 +12,8 @@
 #   6. xserver-xorg-input-evdev is installed
 #   7. xorg99.service is active
 #   8. Carbonyl session storage is mounted and writable by agent
+#   9. Carbonyl's path-scoped AppArmor userns exception is loaded without
+#      disabling Ubuntu's global restriction
 #
 # Pairs with the browser-qa loadout (images/qemu/loadouts/profiles/browser-qa.yaml).
 # Run AFTER the VM has finished cloud-init (use validate-vm.sh --wait first if needed).
@@ -210,6 +212,16 @@ if run_remote "test -w '$SESSION_DIR' && tmp=\$(mktemp '$SESSION_DIR/.validate.X
     pass "carbonyl session directory is writable by agent"
 else
     fail "carbonyl session directory is not writable by agent"
+fi
+
+# 9. Ubuntu 23.10+ restricts unprivileged user namespaces. Chromium's primary
+# sandbox needs them, so the QA image loads a path-scoped AppArmor exception
+# for the root-owned installed binary while retaining the global restriction.
+# shellcheck disable=SC2016 # Command substitution must run inside the guest.
+if run_remote 'sudo -n apparmor_status 2>/dev/null | grep -q "carbonyl-browser-qa" && { test ! -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns || test "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)" = 1; }'; then
+    pass "Carbonyl AppArmor userns profile is loaded; global restriction remains enabled"
+else
+    fail "Carbonyl AppArmor userns profile is missing or the global restriction was disabled"
 fi
 
 echo ""

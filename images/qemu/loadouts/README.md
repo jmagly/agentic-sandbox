@@ -56,6 +56,11 @@ after transfer. Display and input tests must run only against the VM's private
 Xorg `:99`; do not expose host display sockets, `/dev/input`, `/dev/uinput`, or
 `/dev/dri` to the guest.
 
+Ubuntu's global AppArmor restriction on unprivileged user namespaces remains
+enabled. The loadout installs a root-owned, path-scoped profile for
+`/opt/carbonyl/carbonyl` so Chromium can use its normal user-namespace sandbox;
+browser acceptance must not substitute `--no-sandbox` for this profile.
+
 ## Runtime Options
 
 Loadouts may declare `runtime_options` to describe portable launch intent for
