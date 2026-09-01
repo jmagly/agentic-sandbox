@@ -31,6 +31,7 @@ packages:
   - x11vnc
   - python3-pil
   - python3-uinput
+  - ripgrep  # Carbonyl browser acceptance scripts use rg for output assertions
   - systemd  # systemd-udevd is required for X to hot-plug runtime-created uinput devices
 
 write_files:
