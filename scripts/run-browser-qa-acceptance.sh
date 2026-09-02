@@ -27,7 +27,7 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
     exit 2
 }
 for source_dir in "$CARBONYL_SOURCE" "$AGENT_SOURCE" "$QA_SOURCE"; do
-    [[ -d "$source_dir/.git" ]] || {
+    git -C "$source_dir" rev-parse --is-inside-work-tree >/dev/null 2>&1 || {
         echo "error: expected a Git checkout: $source_dir" >&2
         exit 2
     }
@@ -125,7 +125,13 @@ SSH_OPTS=(
     "agent@${VM_IP}:/tmp/"
 
 remote_status=0
-"${SSH_PREFIX[@]}" ssh "${SSH_OPTS[@]}" "agent@${VM_IP}" bash -s <<'REMOTE' \
+case "${CARBONYL_QA_CAPTURE_CORES:-0}" in
+    0|1) ;;
+    *) echo "error: CARBONYL_QA_CAPTURE_CORES must be 0 or 1" >&2; exit 2 ;;
+esac
+"${SSH_PREFIX[@]}" ssh "${SSH_OPTS[@]}" "agent@${VM_IP}" \
+    env CARBONYL_QA_CAPTURE_CORES="${CARBONYL_QA_CAPTURE_CORES:-0}" \
+    bash -s <<'REMOTE' \
     || remote_status=$?
 set -euo pipefail
 
@@ -143,17 +149,34 @@ reports=/tmp/carbonyl-qa-reports
 rm -rf -- "$acceptance_root" "$reports"
 mkdir -p "$acceptance_root/carbonyl" "$acceptance_root/agent" "$acceptance_root/qa" "$reports"
 
+if [[ "$CARBONYL_QA_CAPTURE_CORES" == 1 ]]; then
+    sudo -n sysctl -q -w kernel.core_pattern=/tmp/carbonyl-core.%e.%p
+    ulimit -c unlimited
+fi
+
 collect_failure_artifacts() {
     status=$?
     if (( status != 0 )); then
-        for work_dir in /tmp/carbonyl-operator-test.* /tmp/carbonyl-storage-flush.*; do
+        for work_dir in /tmp/carbonyl-operator-test.* \
+            /tmp/carbonyl-controls-test.* \
+            /tmp/carbonyl-extension-runtime.* \
+            /tmp/carbonyl-extension-actions.* \
+            /tmp/carbonyl-storage-flush.*; do
             [[ -d "$work_dir" ]] || continue
-            for artifact in "$work_dir"/*.log "$work_dir"/*.png; do
+            for artifact in "$work_dir"/*.log "$work_dir"/*.out \
+                "$work_dir"/*.png; do
                 [[ -f "$artifact" ]] || continue
                 cp "$artifact" \
                     "$reports/$(basename "$work_dir")-$(basename "$artifact")"
             done
         done
+        if [[ "$CARBONYL_QA_CAPTURE_CORES" == 1 ]]; then
+            for core_file in /tmp/carbonyl-core.*; do
+                [[ -f "$core_file" ]] || continue
+                gzip -1 -c -- "$core_file" \
+                    >"$reports/$(basename "$core_file").gz"
+            done
+        fi
     fi
     return "$status"
 }
@@ -174,7 +197,36 @@ export CARBONYL_QA_DISPOSABLE_WORKER=1
 export CARBONYL_QA_PRIVATE_X11=1
 export DISPLAY=:99
 
+KEEP_WORK_DIR=1 CARBONYL_DISPOSABLE_BROWSER_QA=1 \
+    env -u WAYLAND_DISPLAY -u WAYLAND_SOCKET \
+    bash "$acceptance_root/carbonyl/scripts/test-extension-runtime-integration.sh" \
+    </dev/null \
+    | tee "$reports/extension-runtime.log"
+
+KEEP_WORK_DIR=1 CARBONYL_UI_TEST_GUEST=1 \
+    env -u WAYLAND_DISPLAY -u WAYLAND_SOCKET \
+    bash "$acceptance_root/carbonyl/scripts/test-operator-controls.sh" \
+    </dev/null \
+    | tee "$reports/operator-controls.log"
+operator_controls_dir=$(find /tmp -maxdepth 1 -type d \
+    -name 'carbonyl-controls-test.*' -printf '%T@ %p\n' \
+    | sort -nr | head -1 | cut -d' ' -f2-)
+[[ -n "$operator_controls_dir" ]]
+cp "$operator_controls_dir"/*.png "$reports/"
+
+KEEP_WORK_DIR=1 CARBONYL_UI_TEST_GUEST=1 \
+    env -u WAYLAND_DISPLAY -u WAYLAND_SOCKET \
+    bash "$acceptance_root/carbonyl/scripts/test-extension-actions.sh" \
+    </dev/null \
+    | tee "$reports/extension-actions.log"
+extension_action_dir=$(find /tmp -maxdepth 1 -type d \
+    -name 'carbonyl-extension-actions.*' -printf '%T@ %p\n' \
+    | sort -nr | head -1 | cut -d' ' -f2-)
+[[ -n "$extension_action_dir" ]]
+cp "$extension_action_dir"/*.png "$reports/"
+
 KEEP_WORK_DIR=1 bash "$acceptance_root/carbonyl/scripts/test-operator-window.sh" \
+    </dev/null \
     | tee "$reports/operator-window.log"
 operator_dir=$(find /tmp -maxdepth 1 -type d -name 'carbonyl-operator-test.*' \
     -printf '%T@ %p\n' | sort -nr | head -1 | cut -d' ' -f2-)
@@ -213,6 +265,11 @@ echo "==> Running Layer 6 profile-persistence suite"
 } > "$reports/environment.txt"
 
 for required_report in \
+    extension-runtime.log \
+    operator-controls.log \
+    extension-actions.log \
+    operator-window.log \
+    storage-flush.log \
     browser-profile-transition.xml \
     layer1-cycle-1.xml \
     layer1-cycle-2.xml \

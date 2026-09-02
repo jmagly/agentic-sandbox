@@ -7,7 +7,7 @@
 #   1. Xorg :99 is running
 #   2. /dev/uinput exists and is writable by the `input` group
 #   3. /opt/carbonyl/carbonyl returns its pinned runtime version
-#   4. Python uinput/Pillow and xdotool are available
+#   4. Python uinput/Pillow, xdotool, xclip, and ripgrep are available
 #   5. The `agent` user is in the `input` group
 #   6. xserver-xorg-input-evdev is installed
 #   7. xorg99.service is active
@@ -169,6 +169,18 @@ else
     fail "xdotool is NOT installed"
 fi
 
+if run_remote 'command -v xclip >/dev/null'; then
+    pass "xclip is installed"
+else
+    fail "xclip is NOT installed"
+fi
+
+if run_remote 'command -v rg >/dev/null'; then
+    pass "ripgrep is installed"
+else
+    fail "ripgrep is NOT installed"
+fi
+
 # 5. agent user is in input group (required to open /dev/uinput without sudo)
 AGENT_GROUPS=$(run_remote 'id agent 2>&1')
 if echo "$AGENT_GROUPS" | grep -qE '\(input\)'; then
@@ -218,10 +230,10 @@ fi
 # sandbox needs them, so the QA image loads a path-scoped AppArmor exception
 # for the root-owned installed binary while retaining the global restriction.
 # shellcheck disable=SC2016 # Command substitution must run inside the guest.
-if run_remote 'sudo -n apparmor_status 2>/dev/null | grep -q "carbonyl-browser-qa" && { test ! -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns || test "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)" = 1; }'; then
-    pass "Carbonyl AppArmor userns profile is loaded; global restriction remains enabled"
+if run_remote 'status=$(sudo -n apparmor_status 2>/dev/null) && grep -q "carbonyl-browser-qa" <<<"$status" && grep -q "carbonyl-browser-qa-headless-shell" <<<"$status" && grep -q "carbonyl-browser-qa-operator-shell" <<<"$status" && { test ! -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns || test "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)" = 1; }'; then
+    pass "Carbonyl AppArmor userns profiles are loaded; global restriction remains enabled"
 else
-    fail "Carbonyl AppArmor userns profile is missing or the global restriction was disabled"
+    fail "A Carbonyl AppArmor userns profile is missing or the global restriction was disabled"
 fi
 
 echo ""

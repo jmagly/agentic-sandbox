@@ -6,6 +6,7 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 workflow="$repo_root/.gitea/workflows/browser-qa-acceptance.yml"
 runner="$repo_root/scripts/run-browser-qa-acceptance.sh"
+installer="$repo_root/scripts/install-browser-qa-runtime.sh"
 provisioner="$repo_root/images/qemu/provision-vm.sh"
 
 grep -Fq 'CARGO_BUILD_JOBS: "4"' "$workflow"
@@ -36,5 +37,12 @@ if grep -Fq 'CARBONYL_TEST_NO_SANDBOX' "$runner"; then
     echo "FAIL: browser acceptance must retain Chromium sandboxing" >&2
     exit 1
 fi
+
+# A file named carbonyl_operator_shell changes the Carbonyl test launch path;
+# reject artifacts that alias it to headless_shell instead of shipping the
+# dedicated flag-injecting launcher.
+grep -Fq 'carbonyl_operator_shell must be the dedicated launcher' "$installer"
+grep -Fq 'sudo test /opt/carbonyl/carbonyl_operator_shell -ef /opt/carbonyl/headless_shell' \
+    "$installer"
 
 echo "PASS: browser QA workflow builds and forwards its exact agent client"
