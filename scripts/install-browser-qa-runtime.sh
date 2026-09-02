@@ -22,6 +22,8 @@ ACTUAL_SHA=$(sha256sum "$ARTIFACT" | awk '{print $1}')
     exit 1
 }
 
+mapfile -t ARCHIVE_MEMBERS < <(tar -tzf "$ARTIFACT")
+
 while IFS= read -r member; do
     case "$member" in
         /*|../*|*/../*|*/..)
@@ -29,14 +31,15 @@ while IFS= read -r member; do
             exit 1
             ;;
     esac
-done < <(tar -tzf "$ARTIFACT")
+done < <(printf '%s\n' "${ARCHIVE_MEMBERS[@]}")
 
-# Do not use grep -q under pipefail here: once grep finds the executable it
-# closes the pipe, tar exits on SIGPIPE, and a valid archive is rejected.
-tar -tzf "$ARTIFACT" | grep -E '(^|/)carbonyl$' >/dev/null || {
-    echo "error: runtime archive does not contain a carbonyl executable" >&2
-    exit 1
-}
+for required_file in carbonyl headless_lib_data.pak headless_lib_strings.pak; do
+    if ! printf '%s\n' "${ARCHIVE_MEMBERS[@]}" \
+        | grep -E "(^|/)${required_file}$" >/dev/null; then
+        echo "error: runtime archive does not contain required file: ${required_file}" >&2
+        exit 1
+    fi
+done
 
 VM_INFO="/var/lib/agentic-sandbox/vms/${VM_NAME}/vm-info.json"
 VM_IP=""
@@ -106,6 +109,12 @@ actual_sha=$(sha256sum "$artifact" | awk '{print $1}')
 sudo install -d -m 0755 /opt/carbonyl
 sudo find /opt/carbonyl -mindepth 1 -maxdepth 1 -delete
 sudo tar -xzf "$artifact" -C /opt/carbonyl --strip-components=1 --no-same-owner --no-same-permissions
+for required_file in carbonyl headless_lib_data.pak headless_lib_strings.pak; do
+    sudo test -f "/opt/carbonyl/$required_file" || {
+        echo "error: installed runtime is missing required file: $required_file" >&2
+        exit 1
+    }
+done
 sudo chmod 0755 /opt/carbonyl/carbonyl
 rm -f "$artifact"
 /opt/carbonyl/carbonyl --version
