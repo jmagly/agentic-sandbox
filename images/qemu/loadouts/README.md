@@ -58,8 +58,9 @@ Xorg `:99`; do not expose host display sockets, `/dev/input`, `/dev/uinput`, or
 
 Ubuntu's global AppArmor restriction on unprivileged user namespaces remains
 enabled. The loadout installs a root-owned, path-scoped profile for
-`/opt/carbonyl/carbonyl` so Chromium can use its normal user-namespace sandbox;
-browser acceptance must not substitute `--no-sandbox` for this profile.
+each shipped executable entry point under `/opt/carbonyl` so Chromium can use
+its normal user-namespace sandbox; browser acceptance must not substitute
+`--no-sandbox` for these profiles.
 
 ## Runtime Options
 

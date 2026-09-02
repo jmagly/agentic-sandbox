@@ -230,10 +230,10 @@ fi
 # sandbox needs them, so the QA image loads a path-scoped AppArmor exception
 # for the root-owned installed binary while retaining the global restriction.
 # shellcheck disable=SC2016 # Command substitution must run inside the guest.
-if run_remote 'sudo -n apparmor_status 2>/dev/null | grep -q "carbonyl-browser-qa" && { test ! -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns || test "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)" = 1; }'; then
-    pass "Carbonyl AppArmor userns profile is loaded; global restriction remains enabled"
+if run_remote 'status=$(sudo -n apparmor_status 2>/dev/null) && grep -q "carbonyl-browser-qa" <<<"$status" && grep -q "carbonyl-browser-qa-headless-shell" <<<"$status" && grep -q "carbonyl-browser-qa-operator-shell" <<<"$status" && { test ! -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns || test "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)" = 1; }'; then
+    pass "Carbonyl AppArmor userns profiles are loaded; global restriction remains enabled"
 else
-    fail "Carbonyl AppArmor userns profile is missing or the global restriction was disabled"
+    fail "A Carbonyl AppArmor userns profile is missing or the global restriction was disabled"
 fi
 
 echo ""
