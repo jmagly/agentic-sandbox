@@ -493,9 +493,9 @@ lifecycle:
 
 `task.provider` selects a registered executor. Built-ins are `claude` and
 `dsh`. DSH runs one-shot work as `dsh --profile headless <prompt>` and resolves
-its OpenRouter lease from
+its OpenRouter lease after workload-identity separation from
 `$AGENTIC_CREDENTIAL_DIR/openrouter_api_key` into `OPENROUTER_API_KEY`.
-Claude resolves `anthropic_api_key` into `ANTHROPIC_API_KEY`. Existing manifests
+Claude resolves `anthropic_api_key` into `ANTHROPIC_API_KEY` the same way. Existing manifests
 with a `claude:` block and provider-task messages using `__claude_task__` remain
 accepted.
 

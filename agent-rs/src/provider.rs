@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
@@ -47,8 +47,6 @@ pub enum ProviderError {
     UnknownProvider(String),
     #[error("provider executable not found: {0}")]
     NotFound(String),
-    #[error("provider credential not available: {0}")]
-    CredentialMissing(String),
     #[error("working directory missing: {0}")]
     WorkingDirMissing(String),
     #[error("failed to spawn provider: {0}")]
@@ -64,6 +62,7 @@ pub trait ProviderExecutor: Send + Sync {
     fn executable(&self) -> &'static str;
     fn credential_env(&self, config: &TaskConfig) -> String;
     fn credential_file(&self) -> &'static str;
+    fn credential_file_env(&self) -> &'static str;
     fn args(&self, config: &TaskConfig) -> Vec<String>;
 }
 
@@ -73,7 +72,7 @@ impl ProviderExecutor for ClaudeExecutor {
         "claude"
     }
     fn executable(&self) -> &'static str {
-        "claude"
+        "agentic-claude-automation"
     }
     fn credential_env(&self, config: &TaskConfig) -> String {
         config
@@ -83,6 +82,9 @@ impl ProviderExecutor for ClaudeExecutor {
     }
     fn credential_file(&self) -> &'static str {
         "anthropic_api_key"
+    }
+    fn credential_file_env(&self) -> &'static str {
+        "ANTHROPIC_API_KEY_FILE"
     }
     fn args(&self, config: &TaskConfig) -> Vec<String> {
         let mut args = vec![
@@ -114,7 +116,7 @@ impl ProviderExecutor for DshExecutor {
         "dsh"
     }
     fn executable(&self) -> &'static str {
-        "dsh"
+        "agentic-dsh-automation"
     }
     fn credential_env(&self, config: &TaskConfig) -> String {
         config
@@ -124,6 +126,9 @@ impl ProviderExecutor for DshExecutor {
     }
     fn credential_file(&self) -> &'static str {
         "openrouter_api_key"
+    }
+    fn credential_file_env(&self) -> &'static str {
+        "OPENROUTER_API_KEY_FILE"
     }
     fn args(&self, config: &TaskConfig) -> Vec<String> {
         vec!["--profile".into(), "headless".into(), config.prompt.clone()]
@@ -155,10 +160,7 @@ pub async fn run(
         return Err(ProviderError::WorkingDirMissing(config.working_dir.clone()));
     }
     let credential = executor.credential_env(config);
-    let leased_credential = resolve_credential(&credential, executor.credential_file());
-    if leased_credential.is_none() {
-        return Err(ProviderError::CredentialMissing(credential.clone()));
-    }
+    let credential_file = credential_file_path(executor.credential_file());
 
     let args = executor.args(config);
     info!(task_id = %config.task_id, provider = executor.name(), argument_count = args.len(), "Running task provider");
@@ -172,8 +174,12 @@ pub async fn run(
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    if std::env::var_os(&credential).is_none() {
-        command.env(&credential, leased_credential.expect("credential resolved"));
+    if std::env::var_os(&credential).is_none()
+        && std::env::var_os(executor.credential_file_env()).is_none()
+    {
+        // Pass only the lease reference through the control process. The
+        // provider wrapper reads it after workload-identity separation.
+        command.env(executor.credential_file_env(), credential_file);
     }
     crate::workload_identity::configure_command_in_dir(
         &mut command,
@@ -237,18 +243,10 @@ fn unsafe_arg_logging_enabled() -> bool {
     )
 }
 
-fn resolve_credential(env_name: &str, file_name: &str) -> Option<String> {
-    if let Ok(value) = std::env::var(env_name) {
-        if !value.trim().is_empty() {
-            return Some(value);
-        }
-    }
+fn credential_file_path(file_name: &str) -> PathBuf {
     let directory = std::env::var("AGENTIC_CREDENTIAL_DIR")
         .unwrap_or_else(|_| "/run/agentic-sandbox/credentials".into());
-    std::fs::read_to_string(Path::new(&directory).join(file_name))
-        .ok()
-        .map(|v| v.trim_end_matches(['\r', '\n']).to_string())
-        .filter(|v| !v.is_empty())
+    Path::new(&directory).join(file_name)
 }
 
 #[cfg(test)]
@@ -277,8 +275,14 @@ mod tests {
 
     #[test]
     fn registry_contains_claude_and_dsh() {
-        assert_eq!(provider("claude").unwrap().executable(), "claude");
-        assert_eq!(provider("dsh").unwrap().executable(), "dsh");
+        assert_eq!(
+            provider("claude").unwrap().executable(),
+            "agentic-claude-automation"
+        );
+        assert_eq!(
+            provider("dsh").unwrap().executable(),
+            "agentic-dsh-automation"
+        );
         assert!(matches!(
             provider("missing"),
             Err(ProviderError::UnknownProvider(_))
@@ -292,5 +296,11 @@ mod tests {
         assert_eq!(p.args(&c), vec!["--profile", "headless", "fix tests"]);
         assert_eq!(p.credential_env(&c), "OPENROUTER_API_KEY");
         assert_eq!(p.credential_file(), "openrouter_api_key");
+        assert_eq!(p.credential_file_env(), "OPENROUTER_API_KEY_FILE");
+    }
+
+    #[test]
+    fn lease_reference_uses_runtime_credential_directory() {
+        assert!(credential_file_path("openrouter_api_key").ends_with("openrouter_api_key"));
     }
 }
