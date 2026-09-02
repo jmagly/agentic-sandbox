@@ -102,14 +102,14 @@ integration_runner="$(
   ' .gitea/workflows/ci.yaml
 )"
 
-if [ "$integration_runner" != "rust" ]; then
-  echo "✗ lint-ci-runner-policy: VM-backed integration job must use the shared rust runner label"
+if [ "$integration_runner" != "titan" ]; then
+  echo "✗ lint-ci-runner-policy: VM-backed integration job must use the qualified Titan runner label"
   echo "  observed runs-on: ${integration_runner:-<missing>}"
-  echo "Both build01 and Titan provide the KVM/libvirt and storage contract required by E2E."
+  echo "Portable rust runners do not guarantee Titan's base-image and shared-storage contract."
   exit 1
 fi
 
-echo "✓ lint-ci-runner-policy: VM-backed integration uses the shared build01/Titan pool"
+echo "✓ lint-ci-runner-policy: VM-backed integration uses the qualified Titan runner"
 
 integration_max_parallel="$(
   awk '
@@ -120,13 +120,13 @@ integration_max_parallel="$(
 )"
 
 if [ "$integration_max_parallel" != "2" ]; then
-  echo "✗ lint-ci-runner-policy: E2E matrix must expose both host-isolated capacity lanes"
+  echo "✗ lint-ci-runner-policy: E2E matrix must retain both backend lanes"
   echo "  observed max-parallel: ${integration_max_parallel:-<missing>}"
-  echo "Gitea does not enforce max-parallel=1 across runners; two capacity-one hosts are explicitly allowed to overlap (#796)."
+  echo "Titan's capacity-one runner serializes the two backend lanes."
   exit 1
 fi
 
-echo "✓ lint-ci-runner-policy: E2E matrix uses two explicit host-isolated capacity lanes"
+echo "✓ lint-ci-runner-policy: E2E matrix retains two serialized backend lanes"
 
 vm_root_forward_count="$(
   grep -F -c -- '--vm-root "${VM_STORAGE_DIR}"' .gitea/workflows/ci.yaml || true
