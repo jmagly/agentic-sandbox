@@ -115,9 +115,11 @@ pub struct RepositoryConfig {
     pub subpath: Option<String>,
 }
 
-/// Claude execution configuration
+/// Provider-neutral task execution configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ClaudeConfig {
+pub struct TaskConfig {
+    #[serde(default = "default_provider")]
+    pub provider: String,
     pub prompt: String,
     #[serde(default = "default_true")]
     pub headless: bool,
@@ -134,6 +136,14 @@ pub struct ClaudeConfig {
     #[serde(default)]
     pub max_turns: Option<u32>,
 }
+
+fn default_provider() -> String {
+    "claude".to_string()
+}
+
+/// Source compatibility for callers that still construct Claude manifests.
+#[deprecated(note = "use TaskConfig")]
+pub type ClaudeConfig = TaskConfig;
 
 fn default_true() -> bool {
     true
@@ -251,7 +261,8 @@ pub struct Task {
     pub labels: HashMap<String, String>,
 
     pub repository: RepositoryConfig,
-    pub claude: ClaudeConfig,
+    #[serde(alias = "claude")]
+    pub task: TaskConfig,
     pub vm: VmConfig,
     pub secrets: Vec<SecretRef>,
     pub lifecycle: LifecycleConfig,
@@ -290,7 +301,7 @@ impl Task {
             name: manifest.metadata.name,
             labels: manifest.metadata.labels,
             repository: manifest.repository,
-            claude: manifest.claude,
+            task: manifest.task,
             vm: manifest.vm,
             secrets: manifest.secrets,
             lifecycle: manifest.lifecycle,
@@ -333,7 +344,7 @@ impl Task {
             TaskState::Staging => "Cloning repository and preparing workspace".to_string(),
             TaskState::Provisioning => "Creating VM".to_string(),
             TaskState::Ready => "VM ready, starting execution".to_string(),
-            TaskState::Running => "Claude Code executing".to_string(),
+            TaskState::Running => "Task provider executing".to_string(),
             TaskState::Completing => "Collecting artifacts".to_string(),
             TaskState::Completed => "Task completed successfully".to_string(),
             TaskState::Failed => "Task failed".to_string(),

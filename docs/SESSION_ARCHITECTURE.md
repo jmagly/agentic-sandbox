@@ -53,7 +53,7 @@ are tracked in [Security Status](security/security-status.md).
 │              ┌──────────────────────┼───────────────────────┐               │
 │              │                      │                       │               │
 │    ┌─────────▼─────────┐  ┌─────────▼─────────┐  ┌─────────▼─────────┐     │
-│    │  execute_command  │  │ execute_cmd_pty   │  │ execute_claude    │     │
+│    │  execute_command  │  │ execute_cmd_pty   │  │ execute_provider  │     │
 │    │  (standard)       │  │ (interactive)     │  │ (headless agent)  │     │
 │    │  - piped I/O      │  │ - PTY master/slave│  │ - stream-json     │     │
 │    │  - timeout        │  │ - fork/exec       │  │ - event parsing   │     │
@@ -239,12 +239,12 @@ Orchestrator::submit_task()
   ↓ Agent connects: Registration → SHA256 verification ✓
   ↓
 [RUNNING]
-  ↓ TaskExecutor::execute_claude()
-  ↓ Send __claude_task__ command via gRPC
+  ↓ TaskExecutor::execute_provider()
+  ↓ Send __provider_task__ command via gRPC (`__claude_task__` remains accepted)
   ↓
 Agent receives command
-  ↓ execute_claude_task()
-  ↓ Spawn: Command::new("claude") with stream-json
+  ↓ execute_provider_task()
+  ↓ Registry selects provider; spawn under workload identity
   ↓ Parse events, forward output
   ↓
 [COMPLETING]
