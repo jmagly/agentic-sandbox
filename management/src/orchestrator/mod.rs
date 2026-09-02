@@ -209,8 +209,8 @@ impl Orchestrator {
         // Start monitoring output
         let _monitor_handle = monitor.start_monitoring(&task_id).await;
 
-        // Execute Claude task
-        let result = executor.execute_claude(&task).await;
+        // Execute the selected task provider.
+        let result = executor.execute_provider(&task).await;
 
         // Stop monitoring
         monitor.stop_monitoring(&task_id).await;

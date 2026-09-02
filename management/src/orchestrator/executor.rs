@@ -1,7 +1,7 @@
-//! Task executor - VM lifecycle and Claude execution
+//! Task executor - VM lifecycle and provider execution
 #![allow(dead_code)] // Fields reserved for future execution modes
 //!
-//! Handles VM provisioning, Claude Code execution, and cleanup.
+//! Handles VM provisioning, registered task-provider execution, and cleanup.
 
 use std::collections::HashMap;
 use std::process::Stdio;
@@ -61,7 +61,7 @@ impl TaskExecutor {
         let repo_url = t.repository.url.clone();
         let branch = t.repository.branch.clone();
         let commit = t.repository.commit.clone();
-        let prompt = t.claude.prompt.clone();
+        let prompt = t.task.prompt.clone();
         drop(t);
 
         let inbox_path = self.storage.inbox_path(&task_id);
@@ -193,16 +193,17 @@ impl TaskExecutor {
         })
     }
 
-    /// Execute Claude Code in the VM
-    pub async fn execute_claude(&self, task: &Arc<RwLock<Task>>) -> Result<i32, ExecutorError> {
+    /// Execute the configured provider in the VM.
+    pub async fn execute_provider(&self, task: &Arc<RwLock<Task>>) -> Result<i32, ExecutorError> {
         let t = task.read().await;
         let task_id = t.id.clone();
         let vm_ip = t.vm_ip.clone().ok_or(ExecutorError::VmNotReady)?;
-        let claude_config = t.claude.clone();
+        let task_config = t.task.clone();
         let secrets_config = t.secrets.clone();
         drop(t);
 
-        info!("Executing Claude Code for task {}", task_id);
+        let provider = provider_executor(&task_config.provider)?;
+        info!(provider = provider.name(), %task_id, "Executing task provider");
 
         // Resolve secrets
         let mut env_vars = HashMap::new();
@@ -221,32 +222,7 @@ impl TaskExecutor {
             }
         }
 
-        // Build Claude command
-        let mut claude_args = vec!["--print".to_string()];
-
-        if claude_config.skip_permissions {
-            claude_args.push("--dangerously-skip-permissions".to_string());
-        }
-
-        if claude_config.output_format == "stream-json" {
-            claude_args.push("--output-format".to_string());
-            claude_args.push("stream-json".to_string());
-        }
-
-        if let Some(max_turns) = claude_config.max_turns {
-            claude_args.push("--max-turns".to_string());
-            claude_args.push(max_turns.to_string());
-        }
-
-        // Add allowed tools
-        for tool in &claude_config.allowed_tools {
-            claude_args.push("--allowedTools".to_string());
-            claude_args.push(tool.clone());
-        }
-
-        // The prompt comes from TASK.md in the inbox
-        claude_args.push("--prompt".to_string());
-        claude_args.push("Read TASK.md for your instructions".to_string());
+        let provider_args = provider.args(&task_config);
 
         // Build SSH command
         let ssh_key_path = format!(
@@ -263,16 +239,20 @@ impl TaskExecutor {
 
         // Full command to run on VM
         let remote_cmd = format!(
-            "cd ~/workspace && {} && claude {}",
+            "cd ~/workspace && {} && {} {}",
             if env_cmd.is_empty() {
                 "true".to_string()
             } else {
                 env_cmd
             },
-            claude_args.join(" ")
+            provider.executable(),
+            provider_args.join(" ")
         );
 
-        info!("SSH to {} to execute Claude", vm_ip);
+        info!(
+            provider = provider.name(),
+            "SSH to {} to execute provider", vm_ip
+        );
 
         // Execute via SSH
         let mut ssh_command = Command::new("ssh");
@@ -354,7 +334,10 @@ impl TaskExecutor {
         }
 
         let exit_code = status.code().unwrap_or(-1);
-        info!("Claude execution completed with exit code {}", exit_code);
+        info!(
+            provider = provider.name(),
+            "Provider execution completed with exit code {}", exit_code
+        );
 
         Ok(exit_code)
     }
@@ -387,9 +370,74 @@ impl TaskExecutor {
     }
 }
 
+trait ProviderExecutor: Send + Sync {
+    fn name(&self) -> &'static str;
+    fn executable(&self) -> &'static str;
+    fn args(&self, config: &super::task::TaskConfig) -> Vec<String>;
+}
+
+struct ClaudeProvider;
+impl ProviderExecutor for ClaudeProvider {
+    fn name(&self) -> &'static str {
+        "claude"
+    }
+    fn executable(&self) -> &'static str {
+        "claude"
+    }
+    fn args(&self, config: &super::task::TaskConfig) -> Vec<String> {
+        let mut args = vec!["--print".to_string()];
+        if config.skip_permissions {
+            args.push("--dangerously-skip-permissions".into());
+        }
+        if config.output_format == "stream-json" {
+            args.extend(["--output-format".into(), "stream-json".into()]);
+        }
+        if let Some(turns) = config.max_turns {
+            args.extend(["--max-turns".into(), turns.to_string()]);
+        }
+        for tool in &config.allowed_tools {
+            args.extend(["--allowedTools".into(), tool.clone()]);
+        }
+        args.extend([
+            "--prompt".into(),
+            "Read TASK.md for your instructions".into(),
+        ]);
+        args
+    }
+}
+
+struct DshProvider;
+impl ProviderExecutor for DshProvider {
+    fn name(&self) -> &'static str {
+        "dsh"
+    }
+    fn executable(&self) -> &'static str {
+        "dsh"
+    }
+    fn args(&self, _config: &super::task::TaskConfig) -> Vec<String> {
+        vec![
+            "--profile".into(),
+            "headless".into(),
+            "Read TASK.md for your instructions".into(),
+        ]
+    }
+}
+
+fn provider_executor(name: &str) -> Result<&'static dyn ProviderExecutor, ExecutorError> {
+    static CLAUDE: ClaudeProvider = ClaudeProvider;
+    static DSH: DshProvider = DshProvider;
+    match name {
+        "claude" => Ok(&CLAUDE),
+        "dsh" => Ok(&DSH),
+        other => Err(ExecutorError::UnknownProvider(other.to_string())),
+    }
+}
+
 /// Executor errors
 #[derive(Debug, thiserror::Error)]
 pub enum ExecutorError {
+    #[error("Unknown task provider: {0}")]
+    UnknownProvider(String),
     #[error("Command failed: {0}")]
     CommandFailed(String),
 
@@ -404,4 +452,46 @@ pub enum ExecutorError {
 
     #[error("Secret resolution failed: {0}")]
     SecretError(String),
+}
+
+#[cfg(test)]
+mod provider_tests {
+    use super::*;
+    use crate::orchestrator::task::TaskConfig;
+
+    fn config(provider: &str) -> TaskConfig {
+        TaskConfig {
+            provider: provider.into(),
+            prompt: "work".into(),
+            headless: true,
+            skip_permissions: true,
+            output_format: "stream-json".into(),
+            model: "model".into(),
+            allowed_tools: vec![],
+            mcp_config: None,
+            max_turns: None,
+        }
+    }
+
+    #[test]
+    fn registry_selects_built_in_providers() {
+        assert_eq!(provider_executor("claude").unwrap().executable(), "claude");
+        assert_eq!(provider_executor("dsh").unwrap().executable(), "dsh");
+        assert!(matches!(
+            provider_executor("unknown"),
+            Err(ExecutorError::UnknownProvider(_))
+        ));
+    }
+
+    #[test]
+    fn dsh_uses_headless_profile() {
+        assert_eq!(
+            provider_executor("dsh").unwrap().args(&config("dsh")),
+            vec![
+                "--profile",
+                "headless",
+                "Read TASK.md for your instructions"
+            ]
+        );
+    }
 }

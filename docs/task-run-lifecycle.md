@@ -442,7 +442,9 @@ repository:
   # commit: abc123  # Optional: pin to commit
   # subpath: packages/auth  # Optional: subdirectory
 
-claude:
+task:
+  # Omit provider (or keep the legacy `claude:` block) for Claude compatibility.
+  provider: claude
   prompt: |
     Refactor the authentication module to use OAuth 2.0.
     Update all tests and documentation.
@@ -488,6 +490,14 @@ lifecycle:
     - "coverage/**/*"
     - "reports/*.json"
 ```
+
+`task.provider` selects a registered executor. Built-ins are `claude` and
+`dsh`. DSH runs one-shot work as `dsh --profile headless <prompt>` and resolves
+its OpenRouter lease from
+`$AGENTIC_CREDENTIAL_DIR/openrouter_api_key` into `OPENROUTER_API_KEY`.
+Claude resolves `anthropic_api_key` into `ANTHROPIC_API_KEY`. Existing manifests
+with a `claude:` block and provider-task messages using `__claude_task__` remain
+accepted.
 
 ## API Endpoints
 
