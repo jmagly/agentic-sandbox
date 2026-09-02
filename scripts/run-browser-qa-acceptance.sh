@@ -244,6 +244,11 @@ echo "==> Running browser-backed operator/headless profile transition"
     tests/integration/test_browser_profile_transition.py \
     --junitxml="$reports/browser-profile-transition.xml" -q </dev/null
 
+echo "==> Running lease-bound extension lifecycle acceptance"
+"$acceptance_root/venv/bin/python" -m pytest \
+    tests/integration/test_extension_lifecycle_restart.py \
+    --junitxml="$reports/extension-lifecycle.xml" -q </dev/null
+
 for cycle in 1 2 3; do
     echo "==> Running Layer 1 trusted-input cycle $cycle/3"
     "$acceptance_root/venv/bin/python" -m pytest --runxfail \
@@ -271,6 +276,7 @@ for required_report in \
     operator-window.log \
     storage-flush.log \
     browser-profile-transition.xml \
+    extension-lifecycle.xml \
     layer1-cycle-1.xml \
     layer1-cycle-2.xml \
     layer1-cycle-3.xml \

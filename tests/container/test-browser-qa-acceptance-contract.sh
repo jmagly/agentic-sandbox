@@ -33,6 +33,8 @@ grep -Fq 'remote_status=0' "$runner"
 grep -Fq '(( remote_status == 0 )) || exit "$remote_status"' "$runner"
 grep -Fq '</dev/null' "$runner"
 grep -Fq 'required acceptance evidence is missing' "$runner"
+grep -Fq 'tests/integration/test_extension_lifecycle_restart.py' "$runner"
+grep -Fq 'extension-lifecycle.xml' "$runner"
 if grep -Fq 'CARBONYL_TEST_NO_SANDBOX' "$runner"; then
     echo "FAIL: browser acceptance must retain Chromium sandboxing" >&2
     exit 1
