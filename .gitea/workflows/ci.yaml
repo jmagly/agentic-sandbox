@@ -360,9 +360,9 @@ jobs:
 
   integration:
     name: E2E Tests (${{ matrix.backend }})
-    # Both build01 and Titan provide the Rust, KVM/libvirt, and shared-storage
-    # contract required by VM-backed E2E.
-    runs-on: rust
+    # VM-backed E2E requires Titan's qualified base-image and shared-storage
+    # substrate; portable Rust runners do not guarantee that host contract.
+    runs-on: titan
     env:
       BASE_IMAGES_DIR: /build/agentic-sandbox/base-images
       VM_STORAGE_DIR: /build/agentic-sandbox/vms
