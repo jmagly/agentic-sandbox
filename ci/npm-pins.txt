@@ -21,3 +21,4 @@ ajv-formats              3.0.1     2026-05-17  .gitea/workflows/schema-lint.yml 
 aiwg                     2026.8.12 2026-08-20  images/qemu/cloud-init/ubuntu.sh, images/qemu/profiles/agentic-dev-cloud-init.yaml, images/qemu/loadouts/generate-from-manifest.sh, images/container/Dockerfile.dev  framework refresh
 @github/copilot          1.0.80    2026-08-20  images/qemu/loadouts/providers/copilot.yaml                                                                    provider refresh
 openclaw                 2026.7.1-2 2026-08-20 images/qemu/loadouts/providers/openclaw.yaml                                                                   provider refresh
+@deepseek-ai/dsh         0.1.1-rc.2 2026-08-26 images/container/Dockerfile.dsh                                                                                initial dsh platform pin; sha512-UP1UIh6q3Gme/yXRn/QL2P8IsVlv8Shpg22TRJIZPsCRWLm4CBiA1MUvXmJAfsOEETBMLAl+xWPtFw6ICsN3wg==

@@ -12,7 +12,7 @@ fi
 if [[ $# -gt 0 ]]; then
   tools=("$@")
 else
-  tools=(codex claude opencode aider goose)
+  tools=(codex claude opencode dsh aider goose)
 fi
 
 printf 'schema\tagentic.provider_inventory.v1\n'

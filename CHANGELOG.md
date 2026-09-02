@@ -8,6 +8,15 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+### Added
+
+- **agentic/dsh platform image** — DeepSeek Harness CLI (`@deepseek-ai/dsh`,
+  version and npm integrity pinned) layered on `agent:dev`: provider
+  inventory/readiness validation, a credential-free OpenRouter worker seed,
+  and a workload-side `agentic-dsh-automation` launcher that resolves the
+  `openrouter_api_key` lease after identity separation. Design:
+  `docs/proposals/dsh-platform-integration.md`.
+
 ## [2026.8.10] — 2026-08-31
 
 Patch release aligning the management dashboard with current mutation and
