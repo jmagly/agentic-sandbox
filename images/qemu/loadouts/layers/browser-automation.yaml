@@ -26,6 +26,7 @@ packages:
   - xauth
   - xvfb
   - xdotool
+  - xclip
   - scrot
   - ffmpeg
   - x11vnc

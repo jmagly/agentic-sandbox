@@ -336,6 +336,7 @@ assert_contains "carbonyl session fstab entry" "carbonylsessions /home/agent/.lo
 assert_contains "carbonyl session mount command" "mount -t virtiofs carbonylsessions" "$USERDATA"
 assert_contains "carbonyl session directory mode" "chmod 700 /home/agent/.local/share/carbonyl-agent/sessions" "$USERDATA"
 assert_contains "browser-qa installs xdotool" "xdotool" "$USERDATA"
+assert_contains "browser-qa installs xclip" "xclip" "$USERDATA"
 assert_contains "browser-qa installs ripgrep" "ripgrep" "$USERDATA"
 assert_contains "browser-qa installs Pillow" "python3-pil" "$USERDATA"
 assert_contains "browser-qa installs Python venv" "python3-venv" "$USERDATA"

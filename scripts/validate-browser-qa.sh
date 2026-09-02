@@ -7,7 +7,7 @@
 #   1. Xorg :99 is running
 #   2. /dev/uinput exists and is writable by the `input` group
 #   3. /opt/carbonyl/carbonyl returns its pinned runtime version
-#   4. Python uinput/Pillow, xdotool, and ripgrep are available
+#   4. Python uinput/Pillow, xdotool, xclip, and ripgrep are available
 #   5. The `agent` user is in the `input` group
 #   6. xserver-xorg-input-evdev is installed
 #   7. xorg99.service is active
@@ -167,6 +167,12 @@ if run_remote 'command -v xdotool >/dev/null'; then
     pass "xdotool is installed"
 else
     fail "xdotool is NOT installed"
+fi
+
+if run_remote 'command -v xclip >/dev/null'; then
+    pass "xclip is installed"
+else
+    fail "xclip is NOT installed"
 fi
 
 if run_remote 'command -v rg >/dev/null'; then
