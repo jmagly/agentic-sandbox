@@ -115,6 +115,17 @@ for required_file in carbonyl headless_lib_data.pak headless_lib_strings.pak; do
         exit 1
     }
 done
+if sudo test -e /opt/carbonyl/carbonyl_operator_shell; then
+    sudo test -f /opt/carbonyl/headless_shell || {
+        echo "error: operator launcher requires sibling headless_shell" >&2
+        exit 1
+    }
+    if sudo test /opt/carbonyl/carbonyl_operator_shell -ef /opt/carbonyl/headless_shell; then
+        echo "error: carbonyl_operator_shell must be the dedicated launcher, not a hardlink to headless_shell" >&2
+        exit 1
+    fi
+    sudo chmod 0755 /opt/carbonyl/carbonyl_operator_shell /opt/carbonyl/headless_shell
+fi
 sudo chmod 0755 /opt/carbonyl/carbonyl
 rm -f "$artifact"
 /opt/carbonyl/carbonyl --version
