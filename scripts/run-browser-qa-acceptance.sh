@@ -125,7 +125,13 @@ SSH_OPTS=(
     "agent@${VM_IP}:/tmp/"
 
 remote_status=0
-"${SSH_PREFIX[@]}" ssh "${SSH_OPTS[@]}" "agent@${VM_IP}" bash -s <<'REMOTE' \
+case "${CARBONYL_QA_CAPTURE_CORES:-0}" in
+    0|1) ;;
+    *) echo "error: CARBONYL_QA_CAPTURE_CORES must be 0 or 1" >&2; exit 2 ;;
+esac
+"${SSH_PREFIX[@]}" ssh "${SSH_OPTS[@]}" "agent@${VM_IP}" \
+    env CARBONYL_QA_CAPTURE_CORES="${CARBONYL_QA_CAPTURE_CORES:-0}" \
+    bash -s <<'REMOTE' \
     || remote_status=$?
 set -euo pipefail
 
@@ -143,6 +149,11 @@ reports=/tmp/carbonyl-qa-reports
 rm -rf -- "$acceptance_root" "$reports"
 mkdir -p "$acceptance_root/carbonyl" "$acceptance_root/agent" "$acceptance_root/qa" "$reports"
 
+if [[ "$CARBONYL_QA_CAPTURE_CORES" == 1 ]]; then
+    sudo -n sysctl -q -w kernel.core_pattern=/tmp/carbonyl-core.%e.%p
+    ulimit -c unlimited
+fi
+
 collect_failure_artifacts() {
     status=$?
     if (( status != 0 )); then
@@ -159,6 +170,13 @@ collect_failure_artifacts() {
                     "$reports/$(basename "$work_dir")-$(basename "$artifact")"
             done
         done
+        if [[ "$CARBONYL_QA_CAPTURE_CORES" == 1 ]]; then
+            for core_file in /tmp/carbonyl-core.*; do
+                [[ -f "$core_file" ]] || continue
+                gzip -1 -c -- "$core_file" \
+                    >"$reports/$(basename "$core_file").gz"
+            done
+        fi
     fi
     return "$status"
 }
