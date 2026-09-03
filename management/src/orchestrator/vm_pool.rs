@@ -469,7 +469,8 @@ mod tests {
                 commit: None,
                 subpath: None,
             },
-            claude: super::super::task::ClaudeConfig {
+            task: super::super::task::TaskConfig {
+                provider: "claude".to_string(),
                 prompt: "test".to_string(),
                 headless: true,
                 skip_permissions: true,

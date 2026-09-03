@@ -143,10 +143,10 @@ impl AsyncWrite for TonicVsockIo {
 }
 
 // Internal modules
-mod claude;
 mod credentials;
 mod health;
 mod metrics;
+mod provider;
 mod workload_identity;
 
 // =============================================================================
@@ -3536,15 +3536,15 @@ async fn execute_command_pty(
 // Claude Task Executor
 // =============================================================================
 
-/// Execute a Claude Code task using the ClaudeRunner
+/// Execute a task using the provider registry.
 ///
-/// This is invoked when the orchestrator sends a `__claude_task__` command.
+/// This is invoked for `__provider_task__` and the legacy `__claude_task__`.
 /// The command format is:
-/// - command: "__claude_task__"
-/// - args[0]: JSON-encoded ClaudeTaskConfig
+/// - command: "__provider_task__"
+/// - args[0]: JSON-encoded provider::TaskConfig
 ///
 /// Output is streamed back via gRPC OutputChunk messages.
-async fn execute_claude_task(
+async fn execute_provider_task(
     cmd: proto::CommandRequest,
     output_tx: mpsc::Sender<AgentMessage>,
     running_commands: RunningCommands,
@@ -3554,15 +3554,15 @@ async fn execute_claude_task(
     let (mission_id, fallback_task_id) = command_correlation(&cmd);
 
     // Parse task config from first argument
-    let mut config: claude::ClaudeTaskConfig =
+    let mut config: provider::TaskConfig =
         match cmd.args.first().and_then(|s| serde_json::from_str(s).ok()) {
             Some(c) => c,
             None => {
-                error!("[{}] Invalid Claude task config", command_id);
+                error!("[{}] Invalid provider task config", command_id);
                 let result = CommandResult {
                     command_id: command_id.clone(),
                     exit_code: -1,
-                    error: "Invalid Claude task config: expected JSON in first argument"
+                    error: "Invalid provider task config: expected JSON in first argument"
                         .to_string(),
                     duration_ms: 0,
                     success: false,
@@ -3588,23 +3588,15 @@ async fn execute_claude_task(
     }
 
     info!(
-        "[{}] Executing Claude task: {}",
-        command_id,
-        config.prompt.chars().take(80).collect::<String>()
-    );
-    info!(
         command_id = %command_id,
         mission_id = %mission_id,
         task_id = %task_id,
         working_dir = %config.working_dir,
-        "Executing Claude task"
+        provider = %config.provider,
+        "Executing provider task"
     );
 
-    // Create ClaudeRunner
-    let runner = claude::ClaudeRunner::new(config);
-
-    // Create output channel for ClaudeRunner
-    let (claude_tx, mut claude_rx) = mpsc::channel::<claude::OutputChunk>(256);
+    let (provider_tx, mut provider_rx) = mpsc::channel::<provider::OutputChunk>(256);
 
     // Set up stdin placeholder (Claude reads from prompt, not stdin)
     let (stdin_tx, _stdin_rx) = mpsc::channel::<StdinData>(1);
@@ -3619,12 +3611,12 @@ async fn execute_claude_task(
                 pty_control_tx: None,
                 pid: None,
                 session_name: Some(if cmd.session_name.is_empty() {
-                    "claude".to_string()
+                    config.provider.clone()
                 } else {
                     cmd.session_name.clone()
                 }),
                 session_id: (!cmd.session_id.is_empty()).then(|| cmd.session_id.clone()),
-                command: "__claude_task__".to_string(),
+                command: "__provider_task__".to_string(),
                 started_at: std::time::Instant::now(),
                 is_pty: false,
             },
@@ -3635,7 +3627,7 @@ async fn execute_claude_task(
     let cmd_id_fwd = command_id.clone();
     let tx_fwd = output_tx.clone();
     let forward_task = tokio::spawn(async move {
-        while let Some(chunk) = claude_rx.recv().await {
+        while let Some(chunk) = provider_rx.recv().await {
             let proto_chunk = OutputChunk {
                 stream_id: cmd_id_fwd.clone(),
                 data: chunk.data.into_bytes(),
@@ -3662,8 +3654,7 @@ async fn execute_claude_task(
         }
     });
 
-    // Run Claude Code
-    let exit_result = runner.run(claude_tx).await;
+    let exit_result = provider::run(&config, provider_tx).await;
 
     // Wait for output forwarding to complete
     let _ = forward_task.await;
@@ -3678,15 +3669,16 @@ async fn execute_claude_task(
                 mission_id = %mission_id,
                 task_id = %task_id,
                 error = %e,
-                "Claude execution failed"
+                provider = %config.provider,
+                "Provider execution failed"
             );
-            error!("[{}] Claude execution failed: {}", command_id, e);
+            error!("[{}] Provider execution failed: {}", command_id, e);
             (-1, e.to_string(), false)
         }
     };
 
     info!(
-        "[{}] Claude task completed: exit={}, duration={}ms",
+        "[{}] Provider task completed: exit={}, duration={}ms",
         command_id, exit_code, duration_ms
     );
     info!(
@@ -4573,10 +4565,10 @@ impl AgentClient {
                 let agentshare = self.agentshare.clone();
                 let running_commands = self.running_commands.clone();
 
-                // Check for special Claude task command
-                if cmd.command == "__claude_task__" {
-                    info!("Routing to Claude task executor");
-                    tokio::spawn(execute_claude_task(cmd, output_tx, running_commands));
+                // The legacy marker remains accepted for wire compatibility.
+                if cmd.command == "__provider_task__" || cmd.command == "__claude_task__" {
+                    info!("Routing to provider task executor");
+                    tokio::spawn(execute_provider_task(cmd, output_tx, running_commands));
                 } else if cmd.allocate_pty {
                     tokio::spawn(execute_command_pty(
                         cmd,

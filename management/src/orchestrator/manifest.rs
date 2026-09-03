@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use super::multi_agent::ChildrenConfig;
-use super::task::{ClaudeConfig, LifecycleConfig, RepositoryConfig, SecretRef, VmConfig};
+use super::task::{LifecycleConfig, RepositoryConfig, SecretRef, TaskConfig, VmConfig};
 
 /// Task manifest as loaded from YAML
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -17,7 +17,8 @@ pub struct TaskManifest {
     pub kind: String,
     pub metadata: ManifestMetadata,
     pub repository: RepositoryConfig,
-    pub claude: ClaudeConfig,
+    #[serde(rename = "task", alias = "claude")]
+    pub task: TaskConfig,
     #[serde(default)]
     pub vm: VmConfig,
     #[serde(default)]
@@ -86,8 +87,8 @@ impl TaskManifest {
             return Err(ManifestError::MissingField("repository.branch".to_string()));
         }
 
-        if self.claude.prompt.is_empty() {
-            return Err(ManifestError::MissingField("claude.prompt".to_string()));
+        if self.task.prompt.is_empty() {
+            return Err(ManifestError::MissingField("task.prompt".to_string()));
         }
 
         // Validate repository URL format
@@ -211,7 +212,28 @@ claude:
         let manifest = TaskManifest::from_yaml(yaml).unwrap();
         assert!(manifest.validate().is_ok());
         assert_eq!(manifest.metadata.id, "test-task-1");
-        assert_eq!(manifest.claude.headless, true);
+        assert_eq!(manifest.task.headless, true);
+        assert_eq!(manifest.task.provider, "claude");
+    }
+
+    #[test]
+    fn generic_task_block_selects_dsh_provider() {
+        let yaml = r#"
+version: "1"
+kind: Task
+metadata:
+  id: "dsh-task"
+  name: "DSH Task"
+repository:
+  url: "https://github.com/example/repo.git"
+  branch: "main"
+task:
+  provider: dsh
+  prompt: "Fix the tests"
+"#;
+        let manifest = TaskManifest::from_yaml(yaml).unwrap();
+        assert!(manifest.validate().is_ok());
+        assert_eq!(manifest.task.provider, "dsh");
     }
 
     #[test]

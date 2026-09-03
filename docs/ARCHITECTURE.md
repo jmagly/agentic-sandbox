@@ -373,14 +373,13 @@ async fn execute_command_pty(cmd: CommandRequest, ...) {
 }
 ```
 
-#### Claude Task Execution
+#### Provider Task Execution
 
 ```rust
-async fn execute_claude_task(cmd: CommandRequest, ...) {
-    let config: ClaudeTaskConfig = serde_json::from_str(&cmd.args[0])?;
+async fn execute_provider_task(cmd: CommandRequest, ...) {
+    let config: TaskConfig = serde_json::from_str(&cmd.args[0])?;
 
-    let runner = ClaudeRunner::new(config);
-    let exit_code = runner.run(output_tx).await?;
+    let exit_code = provider::run(&config, output_tx).await?;
     // Output streamed via gRPC OutputChunk messages
 }
 ```
@@ -906,7 +905,7 @@ CLI/API                 Management Server                 Agent VM
    │                           │◄────────────────────────────│
    │                           │                             │
    │                           │    CommandRequest           │
-   │                           │    (__claude_task__)        │
+   │                           │   (__provider_task__)       │
    │                           │────────────────────────────►│
    │                           │                             │
    │                           │    OutputChunk (stream)     │

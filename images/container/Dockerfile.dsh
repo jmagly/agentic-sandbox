@@ -1,0 +1,56 @@
+# DeepSeek Harness (DSH) agent image — layers the dsh CLI (@deepseek-ai/dsh)
+# on top of the shared dev toolchain (agent:dev). Operator session attaches
+# drive `dsh --profile <name>` (the launcher forwards inner args verbatim);
+# credential-aware launches go through agentic-dsh-automation.
+#
+# Model route: provider `openrouter` via pi-ai, model `stealth/ox-alpha`.
+# Auth = OPENROUTER_API_KEY env resolved from the credential lease
+# (AGENTIC_CREDENTIAL_DIR/openrouter_api_key). The baked read-only seed
+# (images/container/dsh-home/) declares the model catalog with NO embedded
+# credential — apiKeyEnv references the environment only.
+#
+# Build:
+#   cd <repo-root>
+#   docker build -f images/container/Dockerfile.base -t agentic/agent:base .
+#   docker build -f images/container/Dockerfile.dev  -t agentic/agent:dev  .
+#   docker build -f images/container/Dockerfile.dsh  -t agentic/dsh .
+#
+# (`build.sh` does the chain in order for you.)
+#
+FROM agentic/agent:dev
+
+LABEL org.agentic-sandbox.loadout="agentic-dev" \
+      org.agentic-sandbox.image="agentic/dsh:latest" \
+      org.agentic-sandbox.source="images/container/Dockerfile.dsh"
+
+# Node comes from agent:dev. Verify the pinned root tarball against the
+# independently recorded npm integrity before installation. --ignore-scripts
+# blocks lifecycle hooks; transitive package integrity remains enforced by npm.
+RUN archive="$(npm pack --ignore-scripts --silent @deepseek-ai/dsh@0.1.1-rc.2)" \
+ && printf '%s  %s\n' \
+      '50fd54221eaadc699eff25d19ff40bd8ff08b1596ff12869836d934492193ec09158b9b8081880d4c52f5e62407ec38411304c2c097ec563ed170e880ac377c2' \
+      "$archive" | sha512sum --check --strict - \
+ && npm install -g --ignore-scripts "./$archive" \
+ && rm -f "$archive" \
+ && ln -sf "$(npm prefix -g)/bin/dsh" /usr/local/bin/dsh \
+ && dsh --version \
+ && printf '%s\n' \
+        '{"loadout":"agentic-dev","source":"images/container/Dockerfile.dsh","image_ref":"agentic/dsh:latest","tools":["aiwg","dsh","claude","codex","opencode","aider","gh","python3","node","go","cargo"],"helpers":["agentic-provider-inventory","agentic-provider-readiness","agentic-dsh-automation"]}' \
+        > /etc/agentic-sandbox/loadout-manifest.json
+
+# Read-only worker seed: the workload-side launcher copies it into a writable
+# per-user DSH_HOME on first launch. No credentials are stored in this layer.
+COPY images/container/dsh-home/ /usr/share/agentic-sandbox/dsh-seed/
+ENV AGENTIC_DSH_SEED_HOME=/usr/share/agentic-sandbox/dsh-seed
+
+COPY images/common/automation-control/provider-inventory.sh /usr/local/bin/agentic-provider-inventory
+COPY images/common/automation-control/provider-readiness.sh /usr/local/bin/agentic-provider-readiness
+COPY images/common/automation-control/dsh-automation.sh /usr/local/bin/agentic-dsh-automation
+RUN chmod +x \
+        /usr/local/bin/agentic-provider-inventory \
+        /usr/local/bin/agentic-provider-readiness \
+        /usr/local/bin/agentic-dsh-automation \
+ && agentic-provider-inventory dsh | grep -F 'schema	agentic.provider_inventory.v1' \
+ && agentic-provider-readiness dsh | grep -F 'schema	agentic.provider_readiness.v1'
+
+# Entrypoint inherited from base (tini → agent-entrypoint.sh → agent-client).
