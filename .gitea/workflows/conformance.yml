@@ -367,6 +367,13 @@ jobs:
           AIWG_FLEET_SANDBOX_LIVE_REQUIRED: "1"
         run: |
           set -euo pipefail
+          # Keep Vite/esbuild package discovery inside the checked-out
+          # workspace. Host-home package.json files are outside the CI input
+          # contract and may be absent or intentionally empty.
+          workspace_package_json="${GITHUB_WORKSPACE}/package.json"
+          test ! -e "${workspace_package_json}"
+          printf '{"private":true}\n' > "${workspace_package_json}"
+          trap 'rm -f -- "${workspace_package_json}"' EXIT
           npm run uat:fleet-sandbox-live
 
       - name: Upload reports
