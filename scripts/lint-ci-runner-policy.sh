@@ -87,6 +87,17 @@ fi
 
 echo "✓ lint-ci-runner-policy: portable jobs use the shared build01/Titan pool"
 
+if ! grep -F 'workspace_package_json="${GITHUB_WORKSPACE}/package.json"' \
+    .gitea/workflows/conformance.yml >/dev/null \
+  || ! grep -F "trap 'rm -f -- \"\${workspace_package_json}\"' EXIT" \
+    .gitea/workflows/conformance.yml >/dev/null; then
+  echo "✗ lint-ci-runner-policy: nested conformance UAT must bound package discovery to the workspace"
+  echo "Host-home package metadata is outside the portable runner contract."
+  exit 1
+fi
+
+echo "✓ lint-ci-runner-policy: nested conformance UAT has a temporary workspace package boundary"
+
 integration_runner="$(
   awk '
     /^jobs:$/ { in_jobs=1; next }
