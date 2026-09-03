@@ -8,14 +8,50 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+## [2026.9.0] — 2026-09-03
+
+September release adding provider-neutral task execution and the agentic/dsh
+platform image, moving the QEMU baseline to Ubuntu 26.04 LTS, and expanding
+browser-runtime qualification and CI isolation.
+
 ### Added
 
-- **agentic/dsh platform image** — DeepSeek Harness CLI (`@deepseek-ai/dsh`,
-  version and npm integrity pinned) layered on `agent:dev`: provider
-  inventory/readiness validation, a credential-free OpenRouter worker seed,
-  and a workload-side `agentic-dsh-automation` launcher that resolves the
-  `openrouter_api_key` lease after identity separation. Design:
-  `docs/proposals/dsh-platform-integration.md`.
+- Added a provider executor registry so task execution can select supported
+  providers without coupling the task service to a single harness.
+- Added the `agentic/dsh` platform image with a pinned DeepSeek Harness CLI,
+  readiness checks, a credential-free OpenRouter worker seed, and
+  workload-scoped secret resolution after identity separation.
+- Added disposable Ubuntu 26.04 browser-acceptance coverage for Chromium and
+  Manifest V3 extensions, including operator actions, runtime failure capture,
+  bounded core collection, and retained evidence.
+
+### Changed
+
+- Adopted Ubuntu 26.04 LTS as the QEMU guest baseline with pinned image
+  metadata, signed baseline baking, staged root-owned image promotion, and
+  protected ephemeral SSH keys.
+- Updated the Gitea runner generation to 3.3.2 and pinned VM-backed E2E work to
+  the qualified Titan runner.
+
+### Fixed
+
+- Resolved provider credentials only after the workload identity drop and
+  preserved browser sandboxing in provisioned guests.
+- Corrected graph-task restart and cancellation behavior so evidence
+  availability is explicit and failed-closed across restarts.
+- Isolated conformance package discovery from unrelated host-level
+  `package.json` files, eliminating environment-dependent CI failures (#817).
+
+### Documentation
+
+- Published the August project report hero and the agentic/dsh design,
+  conformance, security, and live mission findings.
+
+### Operator notes
+
+- The QEMU baseline change requires rebuilding or replacing older guest
+  images before running the new browser qualification path.
+- Celld remains experimental, disabled by default, and production `NO-GO`.
 
 ## [2026.8.10] — 2026-08-31
 
@@ -3406,7 +3442,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.8.10...HEAD
+[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.9.0...HEAD
+[2026.9.0]: https://github.com/jmagly/agentic-sandbox/compare/v2026.8.10...v2026.9.0
 [2026.8.10]: https://github.com/jmagly/agentic-sandbox/compare/v2026.8.9...v2026.8.10
 [2026.8.9]: https://github.com/jmagly/agentic-sandbox/compare/v2026.8.8...v2026.8.9
 [2026.8.8]: https://github.com/jmagly/agentic-sandbox/compare/v2026.8.7...v2026.8.8
