@@ -12,6 +12,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+const MAX_CREDENTIAL_LEASE_TTL_SECONDS: i64 = 3600;
+
 #[derive(Debug, thiserror::Error)]
 pub enum CredentialError {
     #[error("credential id is required")]
@@ -439,6 +441,11 @@ impl CredentialBroker {
             return Err(CredentialError::LeaseDenied(
                 "ttl_seconds must be greater than zero".to_string(),
             ));
+        }
+        if request.ttl_seconds > MAX_CREDENTIAL_LEASE_TTL_SECONDS {
+            return Err(CredentialError::LeaseDenied(format!(
+                "ttl_seconds must not exceed {MAX_CREDENTIAL_LEASE_TTL_SECONDS}"
+            )));
         }
 
         let now = Utc::now();
@@ -927,6 +934,22 @@ mod tests {
         assert!(matches!(
             broker.issue_lease("cred_openai_test", lease_request("readiness.probe")),
             Err(CredentialError::LeaseDenied(_))
+        ));
+    }
+
+    #[test]
+    fn lease_issuance_denies_ttl_above_management_bound() {
+        let broker = CredentialBroker::new_in_memory();
+        broker
+            .create(request_with_secret("sk-bounded-secret"))
+            .unwrap();
+
+        let mut request = lease_request("session.launch");
+        request.ttl_seconds = MAX_CREDENTIAL_LEASE_TTL_SECONDS + 1;
+        assert!(matches!(
+            broker.issue_lease("cred_openai_test", request),
+            Err(CredentialError::LeaseDenied(message))
+                if message.contains("must not exceed")
         ));
     }
 

@@ -6,6 +6,12 @@ session** protocol that powers `sandboxctl session attach`
 (`management/src/session/`). The older **legacy agent-scoped** protocol is
 compatibility-only for trusted dashboards.
 
+The dashboard discovers this endpoint from
+`GET /api/v2/admin/bootstrap/readiness`. Direct deployments advertise
+`ws://{host}:8121/`; reverse proxies should set
+`AGENTIC_MANAGEMENT_WS_PUBLIC_URL` to their public `wss:` URL. A dashboard
+served over HTTPS rejects a plaintext advertised endpoint.
+
 This doc is the operator/integrator reference. The Rust source of truth
 is [`management/src/ws/connection.rs`](https://github.com/jmagly/agentic-sandbox/blob/main/management/src/ws/connection.rs);
 when adding a new message type here, update both.
@@ -21,12 +27,17 @@ when adding a new message type here, update both.
 
 ```js
 const ws = new WebSocket("ws://localhost:8121/");
-ws.onopen = () => {
-  // For terminal sessions, use join_session with a stable session_id.
-  ws.send(JSON.stringify({ type: "join_session", session_id: "sess-01", role: "observer" }));
-};
 ws.onmessage = (e) => {
   const msg = JSON.parse(e.data);
+  if (msg.type === "server_hello") {
+    if (!msg.supported_client_messages.includes("join_session")) {
+      ws.close(1002, "join_session unsupported");
+      return;
+    }
+    // Send nothing before this validated capability advertisement.
+    ws.send(JSON.stringify({ type: "join_session", session_id: "sess-01", role: "observer" }));
+    return;
+  }
   if (msg.type === "session_frame" && msg.kind === "output") console.log(atob(msg.data));
 };
 ```

@@ -253,6 +253,7 @@ mod tests {
             v1_counter: None,
             idempotency_store: Arc::new(crate::http::idempotency::IdempotencyStore::new()),
             mcp_config: None,
+            management_ws_endpoint: None,
         }
     }
 

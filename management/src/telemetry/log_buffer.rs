@@ -18,6 +18,8 @@ const DEFAULT_CAPACITY: usize = 2000;
 /// One captured tracing event, in a form suitable for JSON serialization.
 #[derive(Debug, Clone, Serialize)]
 pub struct LogEntry {
+    /// Monotonic hot-buffer identifier used for snapshot and SSE resume.
+    pub id: u64,
     pub timestamp: DateTime<Utc>,
     pub level: &'static str,
     pub target: String,
@@ -27,6 +29,7 @@ pub struct LogEntry {
 struct Buffer {
     entries: VecDeque<LogEntry>,
     capacity: usize,
+    last_id: u64,
 }
 
 static BUFFER: OnceLock<RwLock<Buffer>> = OnceLock::new();
@@ -36,6 +39,7 @@ fn buffer() -> &'static RwLock<Buffer> {
         RwLock::new(Buffer {
             entries: VecDeque::with_capacity(DEFAULT_CAPACITY),
             capacity: DEFAULT_CAPACITY,
+            last_id: 0,
         })
     })
 }
@@ -58,8 +62,33 @@ pub fn snapshot_since(since: DateTime<Utc>, limit: usize) -> Vec<LogEntry> {
         .collect()
 }
 
-fn push(entry: LogEntry) {
+/// Snapshot retained entries after a cursor, oldest first. The boolean reports
+/// that the requested cursor predates the bounded ring and some entries are no
+/// longer available. The final value is the latest assigned cursor.
+pub fn snapshot_after(cursor: u64, limit: usize) -> (Vec<LogEntry>, bool, u64) {
+    let buf = buffer().read().expect("log buffer poisoned");
+    let oldest = buf.entries.front().map(|entry| entry.id);
+    let gap = oldest
+        .map(|oldest_id| cursor.saturating_add(1) < oldest_id)
+        .unwrap_or(false);
+    let entries = buf
+        .entries
+        .iter()
+        .filter(|entry| entry.id > cursor)
+        .take(limit)
+        .cloned()
+        .collect();
+    (entries, gap, buf.last_id)
+}
+
+pub fn last_id() -> u64 {
+    buffer().read().expect("log buffer poisoned").last_id
+}
+
+fn push(mut entry: LogEntry) {
     if let Ok(mut buf) = buffer().write() {
+        buf.last_id += 1;
+        entry.id = buf.last_id;
         if buf.entries.len() == buf.capacity {
             buf.entries.pop_front();
         }
@@ -77,6 +106,7 @@ impl<S: Subscriber> Layer<S> for MemoryLayer {
         event.record(&mut visitor);
 
         push(LogEntry {
+            id: 0,
             timestamp: Utc::now(),
             level: metadata.level().as_str(),
             target: metadata.target().to_string(),

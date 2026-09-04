@@ -6,6 +6,7 @@ use axum::{
     body::Body,
     extract::{Path, Query, State},
     http::{header, StatusCode, Uri},
+    middleware,
     response::{IntoResponse, Response},
     routing::{delete, get, post},
     Json, Router,
@@ -199,6 +200,9 @@ pub struct AppState {
     /// Client-safe MCP discovery metadata source. The `/mcp` endpoint itself
     /// keeps its separate bearer-principal auth boundary.
     pub mcp_config: Option<Arc<super::mcp::McpConfig>>,
+    /// Public management WebSocket endpoint advertised to the dashboard.
+    /// May contain the literal `{host}` placeholder for direct deployments.
+    pub management_ws_endpoint: Option<String>,
 }
 
 impl AppState {
@@ -241,6 +245,7 @@ impl AppState {
             v1_counter: None,
             idempotency_store: Arc::new(IdempotencyStore::new()),
             mcp_config: None,
+            management_ws_endpoint: None,
         }
     }
 }
@@ -355,6 +360,11 @@ impl HttpServer {
     /// Enable the separately-authenticated Streamable HTTP MCP adapter.
     pub fn with_mcp_config(mut self, cfg: Option<Arc<super::mcp::McpConfig>>) -> Self {
         self.mcp_config = cfg;
+        self
+    }
+
+    pub fn with_management_ws_endpoint(mut self, endpoint: String) -> Self {
+        self.state.management_ws_endpoint = Some(endpoint);
         self
     }
 
@@ -482,6 +492,19 @@ impl HttpServer {
             });
         }
         let auth_state = self.state.clone();
+        let admin_router = admin_v2::router().layer(middleware::from_fn_with_state(
+            self.state.idempotency_store.clone(),
+            admin_v2::enforce_idempotency,
+        ));
+        let fleet_router = fleet::router().layer(middleware::from_fn_with_state(
+            self.state.idempotency_store.clone(),
+            admin_v2::enforce_idempotency,
+        ));
+        let startup_profile_router =
+            startup_profiles::router().layer(middleware::from_fn_with_state(
+                self.state.idempotency_store.clone(),
+                admin_v2::enforce_idempotency,
+            ));
         let app = Router::new()
             // API endpoints
             // Health check endpoints (new standardized endpoints)
@@ -498,10 +521,10 @@ impl HttpServer {
             .route("/api/v1/health/live", get(liveness_handler))
             .nest("/api/v2/credentials", credentials::router())
             .nest("/api/v2/credential-proxy", credential_proxy::router())
-            .nest("/api/v2/startup-profiles", startup_profiles::router())
+            .nest("/api/v2/startup-profiles", startup_profile_router)
             .nest("/api/v2/gateway/ssh", ssh_gateway::router())
             .nest("/api/v2/activity", activity::router())
-            .nest("/api/v2/fleet", fleet::router())
+            .nest("/api/v2/fleet", fleet_router)
             .route("/api/v1/agents", get(agents_handler))
             .route("/api/v1/agents/{id}", get(agent_detail_handler))
             .route("/api/v1/agents/{id}/start", post(agent_start_handler))
@@ -668,7 +691,7 @@ impl HttpServer {
             // v2 Admin/Fleet API (Surface 1, ADR-022) — #215.
             // Mounted under /api/v2/admin/...; v1 routes above remain
             // operational. #216 wires a compat shim from v1 → v2.
-            .nest("/api/v2/admin", admin_v2::router())
+            .nest("/api/v2/admin", admin_router)
             .merge(super::mcp::discovery_router());
 
         let app = app

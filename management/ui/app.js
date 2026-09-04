@@ -3,6 +3,17 @@
  * Per-agent pane dashboard with independent output tracking
  */
 
+// Build-free modular boundary (#804). New contract-driven work imports this
+// promise instead of adding transport/state/view responsibilities to this
+// legacy compatibility entry point. Keeping the promise on `window` lets the
+// existing classic-script self-tests continue to load without a bundler.
+if (typeof window !== 'undefined') {
+    window.ManagementUIReady = import('./modules/index.mjs').then((boundary) => {
+        window.ManagementUI = Object.freeze(boundary);
+        return window.ManagementUI;
+    });
+}
+
 // ============================================================================
 // ApiClient (#244) — v1→v2 admin migration wrapper with Sunset-fallback.
 // Tries the v2 admin path first; on 404, falls back to v1 and surfaces the
@@ -532,7 +543,7 @@ function openChatViewer(viewer, url, name) {
     viewer.innerHTML = `
         <div class="viewer-head">
             <span class="viewer-title">Chat — ${escAttr(name)}</span>
-            <button class="viewer-close" title="Close stream">✕</button>
+            <button class="viewer-close" title="Close stream" aria-label="Close chat stream">✕</button>
         </div>
         <div class="chat-log" aria-live="polite"></div>
     `;
@@ -612,7 +623,7 @@ async function openTranscript(viewer, sessionId, name) {
     viewer.innerHTML = `
         <div class="viewer-head">
             <span class="viewer-title">Transcript — ${escAttr(name)}</span>
-            <button class="viewer-close" title="Close">✕</button>
+            <button class="viewer-close" title="Close" aria-label="Close transcript">✕</button>
         </div>
         <div class="transcript-log">Loading…</div>
     `;
@@ -647,7 +658,7 @@ async function openScreen(viewer, sessionId, name) {
     viewer.innerHTML = `
         <div class="viewer-head">
             <span class="viewer-title">Screen — ${escAttr(name)}</span>
-            <button class="viewer-close" title="Close">✕</button>
+            <button class="viewer-close" title="Close" aria-label="Close screen view">✕</button>
         </div>
         <div class="screen-meta"></div>
         <div class="transcript-log screen-log">Loading…</div>
@@ -712,10 +723,14 @@ class AgenticDashboard {
         this.reconnectDelay = 1000;
         this.maxReconnectDelay = 30000;
         this.reconnectTimer = null;
+        this.connectionAttempt = 0;
         this.helloTimer = null;
         this.intentionalWsClose = false;
+        this.terminalWsFailure = null;
         this.connectionState = 'disconnected';
         this.serverCapabilities = null;
+        this.advertisedManagementWsUrl = null;
+        this.maxWsBufferedAmount = 512 * 1024;
         this.currentOAuthPrompt = null;
 
         // Log sidebar state
@@ -731,11 +746,44 @@ class AgenticDashboard {
         this._knownTargets = new Set();     // observed log targets for dropdown
         this.autoScroll = true;
         this.lastEventId = 0;  // For change detection
+        this.eventStreamState = 'unknown';
+        this.lastSystemLogId = 0;
+        this.activityNextCursor = null;
+        this.activityQuery = null;
+        this.activityScope = null;
 
-        // VM list state
-        this.vms = new Map();  // vm_name -> VM info
-        this.containers = new Map();  // container_name -> container info (#178)
+        // Canonical resource state is owned by the build-free module boundary.
+        this.resourceState = new window.ManagementUI.ResourceState();
+        this.resourceState.resources.set('instances', new Map());
+        this.instances = this.resourceState.resources.get('instances');
+        this.operations = this.resourceState.operations;
+        this.instanceInventoryObservedAt = null;
+        this.instanceMutationIntents = new Map();
+        this.fleetWorkloads = new Map();
+        this.fleetInventoryRevision = null;
+        this.reviewedFleetReconcile = null;
+        this.celldCapabilities = new Set();
+        this.reviewedCelldCommand = null;
+        this.reviewedCelldReconcile = null;
+        this.celldHistory = [];
+        this.startupProfiles = new Map();
+        this.selectedStartupProfileId = null;
+        this.reviewedStartupProfile = null;
+        this.configLoadouts = [];
+        this.reviewedConfigLoadout = null;
+        this.storageObjectExists = false;
+        this.reviewedStorageWrite = null;
+        this.accelerationProviders = new Map();
+        this.reviewedAcceleration = null;
+        this.accessAuthority = null;
+        this.accessCredentials = new Map();
+        this.accessCredentialLeases = new Map();
+        this.accessSshLeases = new Map();
+        this.accessAuditEvents = new Map();
+        this.reviewedCredentialLease = null;
+        this.reviewedSshLease = null;
         this.runtimeAvailability = new Map(); // runtime id -> additive discovery descriptor
+        this.bootstrapReadiness = null;
 
         // Selected agent for single-pane display
         this.selectedAgent = null;
@@ -764,18 +812,20 @@ class AgenticDashboard {
     }
 
     init() {
+        this.setupModalAccessibility();
         this.setupGlobalListeners();
         this.setupLogSidebar();
         this.setupBladeNav();
+        this.setupManagementWorkspaces();
         this.connect();
         this.fetchAgents();
         this.fetchEvents().then(() => this.startEventStream());
-        this.fetchVms();
-        this.fetchContainers();
+        this.restoreTrackedOperations();
+        this.fetchInstances();
         this.fetchRuntimeAvailability();
         this.fetchLoadouts();
         this.fetchLoadoutRegistry();
-        this.fetchSystemLogs();
+        this.fetchSystemLogs().then(() => this.startSystemLogStream());
 
         // Refresh session thumbnails every second
         setInterval(() => this.updateSessionThumbs(), 1000);
@@ -786,6 +836,13 @@ class AgenticDashboard {
 
         // Reconnect button
         document.getElementById('aiwg-reconnect-btn')?.addEventListener('click', () => this.triggerAiwgReconnect());
+        document.getElementById('connection-retry')?.addEventListener('click', () => this.retryManagementConnection());
+        document.getElementById('reconcile-operations')?.addEventListener('click', () => this.reconcileInstancesAndOperations());
+        window.addEventListener('online', () => this.resumeManagementConnection());
+        window.addEventListener('offline', () => {
+            if (!this.intentionalWsClose && !this.terminalWsFailure) this.setConnectionState('degraded');
+        });
+        document.addEventListener('visibilitychange', () => this.resumeManagementConnection());
     }
 
     // =========================================================================
@@ -794,43 +851,64 @@ class AgenticDashboard {
 
     managementWsUrl() {
         const configured = (typeof window !== 'undefined' && window.AGENTIC_MANAGEMENT_WS_URL)
-            || document.querySelector('meta[name="agentic-management-ws-url"]')?.content;
-        if (configured) return configured;
+            || document.querySelector('meta[name="agentic-management-ws-url"]')?.content
+            || this.advertisedManagementWsUrl;
+        return window.ManagementUI.resolveWebSocketUrl(window.location.href, configured);
+    }
 
-        const url = new URL('/', window.location.href);
-        url.protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        // The local development listeners retain the documented 8122/8121
-        // split. Standard TLS/proxy ports stay same-origin and need no brittle
-        // arithmetic.
-        if (url.port === '8122') url.port = '8121';
-        return url.toString();
+    async discoverManagementWsUrl() {
+        if ((typeof window !== 'undefined' && window.AGENTIC_MANAGEMENT_WS_URL)
+            || document.querySelector('meta[name="agentic-management-ws-url"]')?.content
+            || this.advertisedManagementWsUrl) return;
+        try {
+            const readiness = await this.managementJson('/api/v2/admin/bootstrap/readiness', {
+                owner: 'management-ws-discovery',
+            });
+            const endpoint = readiness?.management_websocket?.endpoint;
+            if (typeof endpoint === 'string' && endpoint.trim()) {
+                this.advertisedManagementWsUrl = endpoint;
+            }
+        } catch (error) {
+            console.warn('Management WebSocket discovery unavailable; using same-origin endpoint', error);
+        }
     }
 
     setConnectionState(state) {
         this.connectionState = state;
         this.updateConnectionStatus(state);
+        for (const terminal of document.querySelectorAll('.xterm-wrapper:not([data-transport="pty-v2"])')) {
+            terminal.dataset.connection = state;
+            _ptyV2RefreshTerminalLabel(terminal);
+        }
     }
 
-    connect() {
+    async connect() {
+        const attempt = ++this.connectionAttempt;
         if (this.reconnectTimer) {
             clearTimeout(this.reconnectTimer);
             this.reconnectTimer = null;
         }
-        const wsUrl = this.managementWsUrl();
-        console.log(`Connecting to WebSocket at ${wsUrl}`);
         this.intentionalWsClose = false;
+        this.terminalWsFailure = null;
         this.serverCapabilities = null;
         this.setConnectionState('connecting');
 
         try {
+            await this.discoverManagementWsUrl();
+            if (attempt !== this.connectionAttempt || this.intentionalWsClose) return;
+            const wsUrl = this.managementWsUrl();
+            console.log(`Connecting to WebSocket at ${wsUrl}`);
             this.ws = new WebSocket(wsUrl);
             this.ws.onopen = () => this.onOpen();
             this.ws.onmessage = (e) => this.onMessage(e);
             this.ws.onclose = (e) => this.onClose(e);
             this.ws.onerror = (e) => console.error('WebSocket error:', e);
         } catch (error) {
+            if (attempt !== this.connectionAttempt) return;
             console.error('WebSocket connection failed:', error);
-            this.scheduleReconnect();
+            this.terminalWsFailure = `Management WebSocket configuration is invalid: ${error.message}`;
+            this.setConnectionState('terminal');
+            this.showToast(this.terminalWsFailure, 'error');
         }
     }
 
@@ -846,8 +924,10 @@ class AgenticDashboard {
         clearTimeout(this.helloTimer);
         this.helloTimer = setTimeout(() => {
             if (this.connectionState !== 'negotiating') return;
-            this.showToast('Management connection did not negotiate capabilities.', 'error');
-            try { this.ws?.close(4002, 'server_hello timeout'); } catch (_) {}
+            this.failManagementProtocol(
+                'Management connection did not negotiate capabilities. Verify server protocol support, then retry.',
+                'server_hello timeout',
+            );
         }, 5000);
     }
 
@@ -857,20 +937,42 @@ class AgenticDashboard {
             this.handleMessage(msg);
         } catch (e) {
             console.error('Failed to parse message:', e);
+            if (this.connectionState === 'negotiating') {
+                this.failManagementProtocol(
+                    'Management connection sent an invalid capability frame. Update the dashboard or server, then retry.',
+                    'invalid server_hello',
+                );
+            }
         }
     }
 
     onClose(event) {
-        console.log('WebSocket closed:', event.code);
+        console.log('WebSocket closed:', event.code, event.reason || '');
         clearTimeout(this.helloTimer);
         this.helloTimer = null;
         this.serverCapabilities = null;
+        if (this.terminalWsFailure || [1002, 1008].includes(event.code)) {
+            const detail = this.terminalWsFailure || this.describeWsClose(event);
+            this.terminalWsFailure = detail;
+            this.setConnectionState('terminal');
+            this.showToast(detail, 'error');
+            return;
+        }
         this.setConnectionState(this.intentionalWsClose ? 'disconnected' : 'reconnecting');
-        if (!this.intentionalWsClose) this.scheduleReconnect();
+        if (!this.intentionalWsClose) {
+            const detail = this.describeWsClose(event);
+            if (event.code && event.code !== 1000) this.showToast(detail, 'error');
+            this.scheduleReconnect();
+        }
     }
 
     scheduleReconnect() {
-        if (this.reconnectTimer || this.intentionalWsClose) return;
+        if (this.reconnectTimer || this.intentionalWsClose || this.terminalWsFailure) return;
+        if ((typeof navigator !== 'undefined' && navigator.onLine === false)
+            || (typeof document !== 'undefined' && document.hidden)) {
+            this.setConnectionState('degraded');
+            return;
+        }
         const base = Math.min(
             this.maxReconnectDelay,
             this.reconnectDelay * Math.pow(2, this.reconnectAttempts)
@@ -880,7 +982,8 @@ class AgenticDashboard {
         console.log(`Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts})`);
         this.reconnectTimer = setTimeout(() => {
             this.reconnectTimer = null;
-            if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+            if ((typeof navigator !== 'undefined' && navigator.onLine === false)
+                || (typeof document !== 'undefined' && document.hidden)) {
                 this.scheduleReconnect();
                 return;
             }
@@ -896,8 +999,58 @@ class AgenticDashboard {
             this.showToast(`Server does not advertise WebSocket operation: ${msg.type}`, 'error');
             return false;
         }
+        if (this.ws.bufferedAmount > this.maxWsBufferedAmount) {
+            this.setConnectionState('degraded');
+            this.showToast('Management connection is congested; command was not sent.', 'error');
+            return false;
+        }
         this.ws.send(JSON.stringify(msg));
         return true;
+    }
+
+    describeWsClose(event) {
+        const labels = {
+            1000: 'Management connection closed normally.',
+            1001: 'Management server is going away; reconnecting.',
+            1002: 'Management protocol mismatch. Update the dashboard or server, then retry.',
+            1008: 'Management connection was rejected by policy. Verify operator authority before retrying.',
+            1011: 'Management server encountered an internal error; reconnecting.',
+            1013: 'Management server is temporarily overloaded; reconnecting.',
+        };
+        return event?.reason || labels[event?.code]
+            || `Management transport closed (${event?.code || 'no close code'}); reconnecting.`;
+    }
+
+    failManagementProtocol(message, reason) {
+        this.terminalWsFailure = message;
+        this.setConnectionState('terminal');
+        this.showToast(message, 'error');
+        try { this.ws?.close(4002, reason); } catch (_) {}
+    }
+
+    retryManagementConnection() {
+        const previous = this.ws;
+        if (previous) {
+            previous.onopen = null;
+            previous.onmessage = null;
+            previous.onerror = null;
+            previous.onclose = null;
+            try { previous.close(1000, 'manual retry'); } catch (_) {}
+        }
+        this.ws = null;
+        this.terminalWsFailure = null;
+        this.intentionalWsClose = false;
+        this.reconnectAttempts = 0;
+        this.connect();
+    }
+
+    resumeManagementConnection() {
+        if (this.intentionalWsClose || this.terminalWsFailure) return;
+        if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
+        if (typeof document !== 'undefined' && document.hidden) return;
+        if (['degraded', 'reconnecting', 'disconnected'].includes(this.connectionState)) {
+            this.scheduleReconnect();
+        }
     }
 
     // =========================================================================
@@ -905,6 +1058,13 @@ class AgenticDashboard {
     // =========================================================================
 
     handleMessage(msg) {
+        if (this.connectionState !== 'ready' && msg?.type !== 'server_hello') {
+            this.failManagementProtocol(
+                'Management connection sent data before capability negotiation completed.',
+                'frame before server_hello',
+            );
+            return;
+        }
         switch (msg.type) {
             case 'server_hello':
                 this.handleServerHello(msg);
@@ -990,8 +1150,10 @@ class AgenticDashboard {
 
     handleServerHello(msg) {
         if (this.connectionState !== 'negotiating') {
-            this.showToast('Unexpected management capability frame; reconnecting.', 'error');
-            try { this.ws?.close(4002, 'unexpected server_hello'); } catch (_) {}
+            this.failManagementProtocol(
+                'Unexpected management capability frame. Update the dashboard or server, then retry.',
+                'unexpected server_hello',
+            );
             return;
         }
         const messages = Array.isArray(msg.supported_client_messages)
@@ -1000,15 +1162,19 @@ class AgenticDashboard {
         const features = Array.isArray(msg.features)
             ? msg.features.filter(value => typeof value === 'string')
             : null;
-        if (!messages || !features || !messages.includes('list_agents')) {
-            this.showToast('Management server capability advertisement is incompatible.', 'error');
-            try { this.ws?.close(4002, 'incompatible server_hello'); } catch (_) {}
+        const protocolMajor = String(msg.protocol_version || '').split('.')[0];
+        if (protocolMajor !== '1' || !messages || !features || !messages.includes('list_agents')) {
+            this.failManagementProtocol(
+                `Management capability advertisement is incompatible (protocol ${msg.protocol_version || 'missing'}).`,
+                'incompatible server_hello',
+            );
             return;
         }
         clearTimeout(this.helloTimer);
         this.helloTimer = null;
         this.serverCapabilities = {
             serverVersion: msg.server_version || null,
+            protocolVersion: msg.protocol_version,
             supportedClientMessages: new Set(messages),
             features: new Set(features),
         };
@@ -1282,16 +1448,16 @@ class AgenticDashboard {
                     <span class="stat stat-disk" title="Disk"><span class="stat-label">DSK</span> <span class="stat-value">--</span></span>
                 </div>
                 <div class="pane-controls">
-                    <button class="pane-vm-btn pane-vm-restart" title="Restart VM (graceful reboot)" data-action="restart">&#10227;</button>
-                    <button class="pane-vm-btn pane-vm-stop" title="Stop VM (graceful shutdown — restart from VM list)" data-action="stop">&#9208;</button>
-                    <button class="pane-vm-btn pane-vm-kill" title="Force off (hard power off — VM stays defined)" data-action="force-off">&#9211;</button>
-                    <button class="pane-shell-btn pane-resync-btn" title="Resync terminal — reset xterm state and re-attach (#180 escape hatch)" data-action="resync">⟳</button>
+                    <button class="pane-vm-btn pane-vm-restart" title="Restart VM (graceful reboot)" aria-label="Restart ${this.esc(agent.id)}" data-action="restart">&#10227;</button>
+                    <button class="pane-vm-btn pane-vm-stop" title="Stop VM (graceful shutdown — restart from VM list)" aria-label="Stop ${this.esc(agent.id)}" data-action="stop">&#9208;</button>
+                    <button class="pane-vm-btn pane-vm-kill" title="Force off (hard power off — VM stays defined)" aria-label="Force off ${this.esc(agent.id)}" data-action="force-off">&#9211;</button>
+                    <button class="pane-shell-btn pane-resync-btn" title="Resync terminal — reset xterm state and re-attach (#180 escape hatch)" aria-label="Resync ${this.esc(agent.id)} terminal" data-action="resync">⟳</button>
                     <button class="pane-shell-btn" title="Reconnect to tmux session">Reconnect</button>
                 </div>
             </div>
             <div class="pane-setup-progress" style="display:none">
                 <div class="setup-progress-header">
-                    <span class="setup-progress-icon">&#9881;</span>
+                    <button type="button" class="setup-progress-icon" aria-label="Toggle provisioning terminal">&#9881;</button>
                     <span class="setup-progress-title">provisioning...</span>
                     <button class="peek-terminal-btn" title="Watch terminal during setup">&#9654; terminal</button>
                 </div>
@@ -1385,8 +1551,27 @@ class AgenticDashboard {
         // more columns than visually fit inside the padded region.
         const xtermWrapper = document.createElement('div');
         xtermWrapper.className = 'xterm-wrapper';
+        xtermWrapper.setAttribute('role', 'region');
+        xtermWrapper.setAttribute('aria-label', `${agent.id} terminal; connection connecting; role controller; interactive`);
+        xtermWrapper.dataset.agentLabel = agent.id;
+        xtermWrapper.dataset.transport = 'legacy';
+        xtermWrapper.dataset.connection = 'connecting';
+        xtermWrapper.dataset.role = 'controller';
+        xtermWrapper.dataset.readonly = 'false';
         outputEl.appendChild(xtermWrapper);
         term.open(xtermWrapper);
+        const terminalInput = xtermWrapper.querySelector('.xterm-helper-textarea');
+        if (terminalInput) {
+            terminalInput.setAttribute('aria-label', `${agent.id} terminal input`);
+            terminalInput.setAttribute('aria-readonly', 'false');
+        }
+        const terminalExit = document.createElement('button');
+        terminalExit.type = 'button';
+        terminalExit.className = 'terminal-focus-exit';
+        terminalExit.textContent = 'Leave terminal focus';
+        terminalExit.setAttribute('aria-label', `Leave ${agent.id} terminal focus`);
+        terminalExit.addEventListener('click', () => (resyncBtn || shellBtn).focus());
+        outputEl.appendChild(terminalExit);
 
         // Fit after DOM insertion, then discover existing sessions or start shell
         const self = this;
@@ -1411,6 +1596,10 @@ class AgenticDashboard {
         // Exception: allow browser Ctrl+C (copy) when text is selected.
         term.attachCustomKeyEventHandler((ev) => {
             if (ev.type !== 'keydown') return true;
+            if (ev.ctrlKey && ev.shiftKey && ev.key === 'Escape') {
+                terminalExit.focus();
+                return false;
+            }
             if (ev.ctrlKey && ev.key === 'c' && term.hasSelection()) {
                 return false; // let browser copy selection
             }
@@ -1681,268 +1870,41 @@ class AgenticDashboard {
     }
 
     handleVmControl(agentId, action) {
-        // Find VM name from agent ID (convention: agent ID matches VM name)
-        const vmName = agentId;
+        const instance = [...this.instances.values()].find((candidate) =>
+            candidate.id === agentId || candidate.name === agentId);
+        if (!instance) {
+            this.showToast(
+                `Canonical instance state is unavailable for ${agentId}; lifecycle controls are disabled until inventory reconciles.`,
+                'error',
+            );
+            return;
+        }
 
         if (action === 'force-off') {
+            this.showToast(
+                `${instance.name} does not advertise a distinct force-off operation. Use the reviewed destroy action from Instances if permanent removal is intended.`,
+                'error',
+            );
+            return;
+        }
+        if (action === 'deploy') {
+            this.showToast(
+                `${instance.name} does not advertise a standalone deploy-agent operation. Use reprovision when that capability is available.`,
+                'error',
+            );
+            return;
+        }
+        if (action === 'delete') {
             this.showConfirmDialog({
-                title: 'Force off VM?',
-                message: `Hard power off ${vmName}. Any unsaved work will be lost. The VM stays defined and can be restarted.`,
-                confirmText: 'Force off',
+                title: `Destroy ${instance.name}?`,
+                message: 'This permanently removes the runtime instance. Terminal evidence remains in the operation record.',
+                confirmText: 'Destroy instance',
                 confirmClass: 'danger',
-                onConfirm: () => this.forceOffVm(vmName)
+                onConfirm: () => this.requestInstanceAction(instance, 'destroy'),
             });
-        } else if (action === 'delete') {
-            this.confirmDeleteVm(vmName, /*running=*/true);
-        } else if (action === 'restart') {
-            this.restartVm(vmName);
-        } else if (action === 'stop') {
-            this.stopVm(vmName);
-        } else if (action === 'start') {
-            this.startVm(vmName);
-        } else if (action === 'deploy') {
-            this.deployAgent(vmName);
+            return;
         }
-    }
-
-    async startVm(name) {
-        this.showToast(`Starting ${name}...`, 'info');
-        this.setVmButtonsDisabled(name, true);
-
-        try {
-            // === call-sites migrated to ApiClient.request() per #244 ===
-            const resp = (await ApiClient.request(`/api/v1/vms/${name}/start`, { method: 'POST' })).response;
-            if (resp.ok) {
-                this.showToast(`${name} started successfully`, 'success');
-                setTimeout(() => this.fetchVms(), 1000);
-            } else {
-                const data = await resp.json().catch(() => ({ error: 'Unknown error' }));
-                this.showToast(`Failed to start ${name}: ${data.error || resp.statusText}`, 'error');
-            }
-        } catch (e) {
-            console.error('Start VM error:', e);
-            if (!(await this.reconcileUnknownInstanceMutation(name, e))) {
-                this.showToast(`Failed to start ${name}: ${e.message}`, 'error');
-            }
-        } finally {
-            this.setVmButtonsDisabled(name, false);
-        }
-    }
-
-    async stopVm(name) {
-        this.showToast(`Shutting down ${name}...`, 'info');
-        this.setVmButtonsDisabled(name, true);
-
-        try {
-            const stopResp = (await ApiClient.request(`/api/v1/vms/${name}/stop`, { method: 'POST' })).response;
-            if (stopResp.ok) {
-                this.showToast(`${name} stopped`, 'success');
-                setTimeout(() => this.fetchVms(), 500);
-            } else {
-                const data = await stopResp.json().catch(() => ({ error: 'Unknown error' }));
-                this.showToast(`Failed to stop ${name}: ${data.error || stopResp.statusText}`, 'error');
-            }
-        } catch (e) {
-            console.error('Stop VM error:', e);
-            if (!(await this.reconcileUnknownInstanceMutation(name, e))) {
-                this.showToast(`Failed to stop ${name}: ${e.message}`, 'error');
-            }
-        } finally {
-            this.setVmButtonsDisabled(name, false);
-        }
-    }
-
-    async forceOffVm(name) {
-        this.showToast(`Forcing off ${name}...`, 'info');
-        this.setVmButtonsDisabled(name, true);
-
-        try {
-            const resp = (await ApiClient.request(`/api/v1/vms/${name}/destroy`, { method: 'POST' })).response;
-            if (resp.ok) {
-                this.showToast(`${name} powered off`, 'success');
-                setTimeout(() => this.fetchVms(), 500);
-            } else {
-                const data = await resp.json().catch(() => ({ error: 'Unknown error' }));
-                this.showToast(`Failed to force off ${name}: ${data.error || resp.statusText}`, 'error');
-            }
-        } catch (e) {
-            console.error('Force off VM error:', e);
-            if (!(await this.reconcileUnknownInstanceMutation(name, e))) {
-                this.showToast(`Failed to force off ${name}: ${e.message}`, 'error');
-            }
-        } finally {
-            this.setVmButtonsDisabled(name, false);
-        }
-    }
-
-    confirmDeleteVm(name, isRunning) {
-        const runningWarn = isRunning
-            ? `${name} is currently running and will be force-killed first. `
-            : '';
-        this.showConfirmDialog({
-            title: 'Delete VM?',
-            message: `${runningWarn}This permanently undefines ${name} and deletes its disk. Inbox contents are archived to /srv/agentshare/archived/.`,
-            confirmText: 'Delete',
-            confirmClass: 'danger',
-            onConfirm: () => this.deleteVm(name, { force: isRunning, deleteDisk: true })
-        });
-    }
-
-    async restartVm(name, opts = {}) {
-        const { mode = 'graceful', timeoutSeconds = 60 } = opts;
-        this.showToast(`Restarting ${name}...`, 'info');
-        this.setVmButtonsDisabled(name, true);
-
-        try {
-            const resp = (await ApiClient.request(`/api/v1/vms/${name}/restart`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ mode, timeout_seconds: timeoutSeconds })
-            })).response;
-            if (resp.ok) {
-                this.showToast(`${name} restarted`, 'success');
-                setTimeout(() => this.fetchVms(), 1000);
-            } else {
-                const data = await resp.json().catch(() => ({ error: 'Unknown error' }));
-                this.showToast(`Failed to restart ${name}: ${data.error || resp.statusText}`, 'error');
-            }
-        } catch (e) {
-            console.error('Restart VM error:', e);
-            if (!(await this.reconcileUnknownInstanceMutation(name, e))) {
-                this.showToast(`Failed to restart ${name}: ${e.message}`, 'error');
-            }
-        } finally {
-            this.setVmButtonsDisabled(name, false);
-        }
-    }
-
-    setVmButtonsDisabled(vmName, disabled) {
-        // Disable buttons in agent pane
-        const entry = this.panes.get(vmName);
-        if (entry) {
-            const buttons = entry.pane.querySelectorAll('.pane-vm-btn');
-            buttons.forEach(btn => btn.disabled = disabled);
-        }
-
-        // Disable buttons in VM list
-        const vmEntry = document.querySelector(`[data-vm-name="${vmName}"]`);
-        if (vmEntry) {
-            const buttons = vmEntry.querySelectorAll('.vm-ctrl-btn');
-            buttons.forEach(btn => btn.disabled = disabled);
-        }
-    }
-
-    async reconcileUnknownInstanceMutation(name, error) {
-        if (!error?.outcomeUnknown) return false;
-        const intent = error.idempotencyKey ? ` Intent: ${error.idempotencyKey}.` : '';
-        this.showToast(
-            `Outcome unknown for ${name}; reconciling authoritative instance state before retry.${intent}`,
-            'warning'
-        );
-        try {
-            await this.fetchVms();
-            this.showToast(
-                `Reconciled ${name}. Review its current state before issuing another action.`,
-                'info'
-            );
-        } catch (reconcileError) {
-            console.error('Instance reconciliation failed:', reconcileError);
-            this.showToast(
-                `Outcome remains unknown for ${name}. Do not retry until the instance or operation can be refreshed.`,
-                'error'
-            );
-        }
-        return true;
-    }
-
-    async deleteVm(name, opts = {}) {
-        const { force = false, deleteDisk = true } = opts;
-        const params = new URLSearchParams();
-        if (force) params.set('force', 'true');
-        if (deleteDisk) params.set('delete_disk', 'true');
-
-        this.showToast(`Deleting ${name}...`, 'info');
-        this.setVmButtonsDisabled(name, true);
-
-        try {
-            const resp = (await ApiClient.request(`/api/v1/vms/${name}?${params.toString()}`, { method: 'DELETE' })).response;
-            if (resp.ok) {
-                this.showToast(`${name} deleted`, 'success');
-                setTimeout(() => this.fetchVms(), 500);
-            } else {
-                const data = await resp.json().catch(() => ({ error: 'Unknown error' }));
-                this.showToast(`Failed to delete ${name}: ${data.error || resp.statusText}`, 'error');
-            }
-        } catch (e) {
-            console.error('Delete VM error:', e);
-            if (!(await this.reconcileUnknownInstanceMutation(name, e))) {
-                this.showToast(`Failed to delete ${name}: ${e.message}`, 'error');
-            }
-        } finally {
-            this.setVmButtonsDisabled(name, false);
-        }
-    }
-
-    async deployAgent(name) {
-        this.showToast(`Deploying agent to ${name}...`, 'info');
-        this.setVmButtonsDisabled(name, true);
-
-        try {
-            const resp = (await ApiClient.request(`/api/v1/vms/${name}/deploy-agent`, { method: 'POST' })).response;
-            if (resp.ok || resp.status === 202) {
-                const data = await resp.json();
-                if (data.operation) {
-                    this.showToast(`Agent deployment started on ${name}`, 'success');
-                    this.pollDeployOperation(data.operation.id, name);
-                } else {
-                    this.showToast(`Agent deployed to ${name}`, 'success');
-                    setTimeout(() => this.fetchAgents(), 2000);
-                }
-            } else {
-                const data = await resp.json().catch(() => ({ error: 'Unknown error' }));
-                this.showToast(`Failed to deploy agent: ${data.error || resp.statusText}`, 'error');
-            }
-        } catch (e) {
-            console.error('Deploy agent error:', e);
-            if (!(await this.reconcileUnknownInstanceMutation(name, e))) {
-                this.showToast(`Failed to deploy agent: ${e.message}`, 'error');
-            }
-        } finally {
-            this.setVmButtonsDisabled(name, false);
-        }
-    }
-
-    async pollDeployOperation(opId, vmName) {
-        const maxAttempts = 60; // 5 minutes at 5s intervals
-        let attempts = 0;
-
-        const poll = async () => {
-            try {
-                const resp = (await ApiClient.request(`/api/v1/operations/${opId}`)).response;
-                if (!resp.ok) return;
-
-                const op = await resp.json();
-                if (op.state === 'completed') {
-                    this.showToast(`Agent deployed to ${vmName}!`, 'success');
-                    this.fetchAgents();
-                    return;
-                } else if (op.state === 'failed') {
-                    this.showToast(`Agent deployment failed: ${op.error || 'Unknown'}`, 'error');
-                    return;
-                }
-
-                attempts++;
-                if (attempts < maxAttempts) {
-                    setTimeout(poll, 5000);
-                } else {
-                    this.showToast(`Deployment timed out. Check logs.`, 'warning');
-                }
-            } catch (e) {
-                console.error('Poll deploy operation error:', e);
-            }
-        };
-
-        setTimeout(poll, 3000);
+        this.requestInstanceAction(instance, action);
     }
 
     // =========================================================================
@@ -2259,6 +2221,9 @@ class AgenticDashboard {
             else this.onLoadoutSelected();
             // Lazy-load container images on first open.
             if (!this._containerImagesLoaded) this.fetchContainerImages();
+            this.fetchRuntimeAvailability();
+            this.fetchBootstrapReadiness();
+            this.fetchStartupProfiles().catch((error) => console.debug('Startup profile discovery unavailable:', error));
             this._applyRuntimeVisibility();
             document.getElementById('vm-name').focus();
         }
@@ -2284,10 +2249,11 @@ class AgenticDashboard {
     async fetchRuntimeAvailability() {
         const note = document.getElementById('runtime-availability');
         try {
-            const resp = (await ApiClient.request('/api/v2/admin/runtime/providers')).response;
-            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-            const data = await resp.json();
+            const data = await this.managementJson('/api/v2/admin/runtime/providers', {
+                owner: 'runtime-provider-readiness',
+            });
             const runtimes = Array.isArray(data.runtimes) ? data.runtimes : [];
+            this.defaultVmProvider = data.default_vm_provider || null;
             this.runtimeAvailability.clear();
             for (const runtime of runtimes) {
                 if (!runtime || typeof runtime.id !== 'string') continue;
@@ -2316,7 +2282,10 @@ class AgenticDashboard {
                     ? runtimes.map(runtime => {
                         const status = runtime.available ? 'available' : 'unavailable';
                         const isolation = runtime.isolation_tier ? `, ${runtime.isolation_tier}` : '';
-                        return `${runtime.id}: ${status}${isolation}`;
+                        const reason = !runtime.available
+                            ? ` — ${runtime.unavailable_reason || runtime.unavailable_code || 'provider did not report remediation'}`
+                            : '';
+                        return `${runtime.id}: ${status}${isolation}${reason}`;
                     }).join(' · ')
                     : 'Runtime-kind discovery is not available from this server.';
             }
@@ -2325,6 +2294,33 @@ class AgenticDashboard {
             // existing choices usable and degrade to a neutral status note.
             if (note) note.textContent = 'Runtime availability is not reported by this server.';
             console.debug('Runtime availability discovery unavailable:', error);
+        }
+    }
+
+    async fetchBootstrapReadiness() {
+        const note = document.getElementById('bootstrap-readiness');
+        try {
+            const data = await this.managementJson('/api/v2/admin/bootstrap/readiness', {
+                owner: 'bootstrap-readiness',
+            });
+            this.bootstrapReadiness = data;
+            const managementEndpoint = data.management_websocket?.endpoint;
+            if (typeof managementEndpoint === 'string' && managementEndpoint.trim()) {
+                this.advertisedManagementWsUrl = managementEndpoint;
+            }
+            const ca = data.ca_provider || {};
+            const bootstrap = data.bootstrap || {};
+            const reason = bootstrap.reason || ca.reason;
+            if (note) {
+                note.textContent = `Secure bootstrap: ${data.status || 'unknown'}; CA ${ca.status || 'unknown'}; enrollment ${bootstrap.status || 'unknown'}${reason ? ` — ${reason}` : ''}`;
+                note.dataset.state = data.status || 'unknown';
+            }
+        } catch (error) {
+            this.bootstrapReadiness = null;
+            if (note) {
+                note.textContent = `Secure bootstrap readiness unavailable — ${error.message}`;
+                note.dataset.state = 'unavailable';
+            }
         }
     }
 
@@ -2374,6 +2370,12 @@ class AgenticDashboard {
 
     async handleCreateInstance() {
         const runtime = document.getElementById('instance-runtime')?.value || 'vm';
+        try {
+            window.ManagementUI.requireAvailableRuntime(this.runtimeAvailability, runtime);
+        } catch (error) {
+            this.showToast(error.message, 'error');
+            return;
+        }
         if (runtime === 'container') return this.handleCreateContainer();
         if (runtime === 'host') return this.handleCreateHost();
         return this.handleCreateVm();
@@ -2402,62 +2404,14 @@ class AgenticDashboard {
             agentshare: false,
             start: document.getElementById('host-autostart')?.checked !== false,
         };
+        const startupProfileId = document.getElementById('instance-startup-profile')?.value;
+        if (startupProfileId) body.startup_profile_id = startupProfileId;
         if (workingDir) body.working_dir = workingDir;
 
         document.getElementById('create-vm-modal').classList.add('hidden');
         document.getElementById('create-vm-form').reset();
         this._applyRuntimeVisibility();
-        this.showToast(`Creating host instance ${name} with full host access…`, 'warning');
-
-        try {
-            const resp = (await ApiClient.request('/api/v2/admin/instances', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(body),
-            })).response;
-            const data = await resp.json().catch(() => ({}));
-            if (resp.ok || resp.status === 202) {
-                const operationId = data.id || data.operation_id || data.operation?.id;
-                if (operationId) {
-                    this.pollAdminV2Operation(operationId, name);
-                } else {
-                    this.showToast(`${name} host provisioning accepted`, 'success');
-                }
-            } else {
-                const message = data.error?.detail || data.error?.message || data.error || resp.statusText;
-                this.showToast(`Failed to create ${name}: ${message}`, 'error');
-            }
-        } catch (error) {
-            console.error('Create host instance error:', error);
-            if (!(await this.reconcileUnknownInstanceMutation(name, error))) {
-                this.showToast(`Failed to create ${name}: ${error.message}`, 'error');
-            }
-        }
-    }
-
-    async pollAdminV2Operation(operationId, name) {
-        for (let attempt = 0; attempt < 120; attempt += 1) {
-            try {
-                const resp = (await ApiClient.request(
-                    `/api/v2/admin/operations/${encodeURIComponent(operationId)}`
-                )).response;
-                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-                const operation = await resp.json();
-                if (operation.state === 'succeeded') {
-                    this.showToast(`${name} host instance is ready with full host access`, 'success');
-                    return;
-                }
-                if (operation.state === 'failed') {
-                    const message = operation.error?.detail || operation.error || 'Unknown error';
-                    this.showToast(`${name} host provisioning failed: ${message}`, 'error');
-                    return;
-                }
-            } catch (error) {
-                console.error('Host operation poll error:', error);
-            }
-            await new Promise(resolve => setTimeout(resolve, 500));
-        }
-        this.showToast(`${name} host provisioning timed out; inspect the operation log`, 'warning');
+        await this.createCanonicalInstance(body);
     }
 
     async handleCreateContainer() {
@@ -2482,42 +2436,19 @@ class AgenticDashboard {
             return;
         }
 
+        const startupProfileId = document.getElementById('instance-startup-profile')?.value;
         document.getElementById('create-vm-modal').classList.add('hidden');
         document.getElementById('create-vm-form').reset();
         this._applyRuntimeVisibility();
 
-        this.showToast(`Creating container ${name}…`, 'info');
-        try {
-            const resp = (await ApiClient.request('/api/v1/containers', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ name, image }),
-            })).response;
-            if (resp.ok || resp.status === 201) {
-                this.showToast(`${name} created`, 'success');
-                setTimeout(() => this.fetchContainers(), 500);
-            } else {
-                const data = await resp.json().catch(() => ({}));
-                this.showToast(`Failed to create ${name}: ${data.error || resp.statusText}`, 'error');
-            }
-        } catch (e) {
-            console.error('Create container error:', e);
-            this.showToast(`Failed to create ${name}: ${e.message}`, 'error');
-        }
-    }
-
-    async fetchContainers() {
-        try {
-            const resp = (await ApiClient.request('/api/v1/containers')).response;
-            if (!resp.ok) return;
-            const data = await resp.json();
-            const list = data.containers || data || [];
-            // Stash on instance and re-render the merged list.
-            this.containers = new Map(list.map(c => [c.name || c.id, c]));
-            this.renderVmList();
-        } catch (e) {
-            console.error('fetchContainers error:', e);
-        }
+        const body = {
+            name,
+            runtime: 'docker',
+            image,
+            start: true,
+        };
+        if (startupProfileId) body.startup_profile_id = startupProfileId;
+        await this.createCanonicalInstance(body);
     }
 
     async handleCreateVm() {
@@ -2545,459 +2476,671 @@ class AgenticDashboard {
 
         let body;
         if (mode === 'custom') {
-            const init = document.getElementById('vm-init')?.value || 'ubuntu';
             const frameworks = this.getSelectedChips('vm-frameworks');
             const providers = this.getSelectedChips('vm-providers');
-            if (!providers.length) {
-                this.showToast('Select at least one provider', 'error');
-                return;
-            }
-            body = { name, profile: '', loadout: '', composition: { init, aiwg: { frameworks, providers } }, vcpus, memory_mb, disk_gb, agentshare, start };
+            this.showToast(
+                `Save custom composition (${frameworks.length} frameworks, ${providers.length} providers) as a schema-valid loadout before provisioning.`,
+                'error',
+            );
+            return;
         } else {
             const loadout = document.getElementById('vm-loadout').value;
             if (!loadout) {
                 this.showToast('Please select a loadout', 'error');
                 return;
             }
-            body = { name, profile: '', loadout, vcpus, memory_mb, disk_gb, agentshare, start };
+            body = {
+                name,
+                runtime: 'qemu',
+                provider: this.defaultVmProvider || undefined,
+                loadout,
+                vcpus,
+                memory_mb,
+                disk_gb,
+                agentshare,
+                start,
+            };
+            const startupProfileId = document.getElementById('instance-startup-profile')?.value;
+            if (startupProfileId) body.startup_profile_id = startupProfileId;
         }
 
         // Close modal
         document.getElementById('create-vm-modal').classList.add('hidden');
         document.getElementById('create-vm-form').reset();
 
-        // Show progress toast
-        this.showToast(`Creating ${name}... This may take several minutes.`, 'info');
+        await this.createCanonicalInstance(body);
+    }
 
-        try {
-            const resp = (await ApiClient.request('/api/v1/vms', {
+    async createCanonicalInstance(body) {
+        const name = body.name;
+        const intentKey = ApiClient.newIntentId();
+        const intentId = `create:${name}`;
+        const baselineInstance = this.instances.get(name);
+        const reconciliationBefore = {
+            checked_at: this.instanceInventoryObservedAt,
+            authoritative: Boolean(this.instanceInventoryObservedAt),
+            instance_present: Boolean(baselineInstance),
+            instance_id: baselineInstance?.id || null,
+            observed_state: baselineInstance?.observed_state || baselineInstance?.state || null,
+        };
+        if (this.instanceMutationIntents.has(intentId)
+            || this.hasBlockingOperation(name, 'instance.provision')) {
+            this.showToast(`Provisioning is already in flight for ${name}`, 'info');
+            return;
+        }
+        this.instanceMutationIntents.set(intentId, intentKey);
+        const pendingIntentId = this.trackPendingMutationIntent({
+            intentKey,
+            target: name,
+            kind: 'instance.provision',
+            reconciliationBefore,
+            retryRequest: {
+                path: '/api/v2/admin/instances',
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(body)
-            })).response;
-
-            if (resp.ok || resp.status === 202) {
-                const data = await resp.json();
-                if (data.operation) {
-                    this.showToast(`${name} provisioning started. Operation: ${data.operation.id}`, 'success');
-                    // Poll for operation status
-                    this.pollOperation(data.operation.id, name);
-                } else {
-                    this.showToast(`${name} created successfully`, 'success');
-                    setTimeout(() => this.fetchVms(), 2000);
-                }
+                body: JSON.stringify(body),
+            },
+        });
+        this.showToast(`Creating ${body.runtime} instance ${name}…`, 'info');
+        try {
+            const outcome = await this.managementRequest('/api/v2/admin/instances', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+                idempotencyKey: intentKey,
+                owner: intentId,
+            });
+            if (outcome.kind === 'accepted') {
+                this.trackCanonicalOperation({
+                    ...(outcome.body || {}),
+                    trace_id: outcome.traceId,
+                    request_id: outcome.requestId,
+                    operation_id: outcome.operationId,
+                    idempotency_replayed: outcome.idempotencyReplayed,
+                }, {
+                    target: name,
+                    kind: 'instance.provision',
+                    intentKey,
+                    reconciliationBefore,
+                    retryRequest: {
+                        path: '/api/v2/admin/instances',
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(body),
+                    },
+                });
+                this.clearPendingMutationIntent(pendingIntentId);
+                this.showToast(`${name} provisioning accepted`, 'success');
             } else {
-                const data = await resp.json().catch(() => ({}));
-                const msg = data.error?.message || data.error || resp.statusText;
-                this.showToast(`Failed to create ${name}: ${msg}`, 'error');
+                await this.fetchInstances();
+                this.clearPendingMutationIntent(pendingIntentId);
             }
-        } catch (e) {
-            console.error('Create VM error:', e);
-            if (!(await this.reconcileUnknownInstanceMutation(name, e))) {
-                this.showToast(`Failed to create ${name}: ${e.message}`, 'error');
+        } catch (error) {
+            if (error instanceof UnknownMutationOutcomeError) {
+                this.promotePendingMutationIntent(pendingIntentId, error);
+                await this.fetchInstances();
+            } else {
+                this.clearPendingMutationIntent(pendingIntentId);
+                this.showToast(`Failed to create ${name}: ${error.message}`, 'error');
+            }
+        } finally {
+            this.instanceMutationIntents.delete(intentId);
+        }
+    }
+
+    async fetchInstances() {
+        const list = document.getElementById('vm-list');
+        try {
+            const data = await this.managementJson('/api/v2/admin/instances', { owner: 'instance-inventory' });
+            const items = window.ManagementUI.parseInstanceCollection(data);
+            this.instances.clear();
+            for (const instance of items) {
+                if (!instance || typeof instance.name !== 'string') continue;
+                this.instances.set(instance.name, instance);
+            }
+            this.instanceInventoryObservedAt = new Date().toISOString();
+            this.instanceInventoryError = null;
+            this.degradedProviders = Array.isArray(data.degraded_providers) ? data.degraded_providers : [];
+            this.reconcileUnknownOperationsFromInventory();
+            this.restoreDeepLinkSelection();
+            this.renderVmList();
+            this.renderOperations();
+        } catch (error) {
+            if (error.code === 'stale_response' || error.code === 'request_aborted') return;
+            this.instanceInventoryError = error;
+            if (list) {
+                list.replaceChildren();
+                const message = document.createElement('div');
+                message.className = 'vm-degraded-banner';
+                message.textContent = `Instance inventory unavailable: ${error.message}`;
+                list.append(message);
+            }
+            console.error('Failed to fetch canonical instances:', error);
+        }
+    }
+
+    // Compatibility alias for older call-sites while the view migrates from
+    // VM-shaped naming to the canonical runtime-neutral inventory.
+    async fetchVms() {
+        return this.fetchInstances();
+    }
+
+    restoreDeepLinkSelection() {
+        const params = new URLSearchParams(window.location.search);
+        const instanceName = params.get('instance');
+        const operationId = params.get('operation');
+        if (instanceName && this.instances.has(instanceName)) {
+            this.selectedAgent = instanceName;
+            this.resourceState.select('instance', instanceName);
+        }
+        if (operationId && this.operations.has(operationId)) {
+            this.selectedOperation = operationId;
+            this.resourceState.select('operation', operationId);
+        }
+    }
+
+    updateManagementDeepLink({ instance, operation } = {}) {
+        const url = new URL(window.location.href);
+        if (instance === null) url.searchParams.delete('instance');
+        else if (instance) url.searchParams.set('instance', instance);
+        if (operation === null) url.searchParams.delete('operation');
+        else if (operation) url.searchParams.set('operation', operation);
+        if (instance !== undefined) this.resourceState.select('instance', instance);
+        if (operation !== undefined) this.resourceState.select('operation', operation);
+        history.replaceState(null, '', url);
+    }
+
+    async requestInstanceAction(instance, action) {
+        const capability = `instance.${action}`;
+        const capabilities = new Set(instance.capabilities || []);
+        if (!capabilities.has(capability)) {
+            this.showToast(`${instance.name} does not advertise ${capability}`, 'error');
+            return;
+        }
+        const intentKey = ApiClient.newIntentId();
+        const intentId = `${instance.id}:${action}`;
+        const reconciliationBefore = {
+            checked_at: this.instanceInventoryObservedAt,
+            authoritative: Boolean(this.instanceInventoryObservedAt),
+            instance_present: true,
+            instance_id: instance.id,
+            observed_state: instance.observed_state || instance.state || null,
+        };
+        if (this.instanceMutationIntents.has(intentId)
+            || this.hasBlockingOperation(instance.id, capability)) {
+            this.showToast(`${action} is already in flight for ${instance.name}`, 'info');
+            return;
+        }
+        this.instanceMutationIntents.set(intentId, intentKey);
+        const retryRequest = {
+            path: `/api/v2/admin/instances/${encodeURIComponent(instance.id)}/${action}`,
+            method: 'POST',
+        };
+        const pendingIntentId = this.trackPendingMutationIntent({
+            intentKey,
+            target: instance.name,
+            targetId: instance.id,
+            kind: capability,
+            reconciliationBefore,
+            retryRequest,
+        });
+        try {
+            const outcome = await this.managementRequest(
+                `/api/v2/admin/instances/${encodeURIComponent(instance.id)}/${action}`,
+                { method: 'POST', idempotencyKey: intentKey, owner: intentId },
+            );
+            if (outcome.kind === 'accepted') {
+                this.trackCanonicalOperation({
+                    ...(outcome.body || {}),
+                    trace_id: outcome.traceId,
+                    request_id: outcome.requestId,
+                    operation_id: outcome.operationId,
+                    idempotency_replayed: outcome.idempotencyReplayed,
+                }, {
+                    target: instance.name,
+                    targetId: instance.id,
+                    kind: capability,
+                    intentKey,
+                    reconciliationBefore,
+                    retryRequest,
+                });
+                this.clearPendingMutationIntent(pendingIntentId);
+            }
+            await this.fetchInstances();
+            if (outcome.kind !== 'accepted') this.clearPendingMutationIntent(pendingIntentId);
+        } catch (error) {
+            if (error instanceof UnknownMutationOutcomeError) {
+                this.promotePendingMutationIntent(pendingIntentId, error);
+                await this.fetchInstances();
+            } else {
+                this.clearPendingMutationIntent(pendingIntentId);
+                this.showToast(`${action} failed for ${instance.name}: ${error.message}`, 'error');
+            }
+        } finally {
+            this.instanceMutationIntents.delete(intentId);
+            this.renderVmList();
+        }
+    }
+
+    trackCanonicalOperation(operation, metadata = {}) {
+        const id = operation.id || operation.operation_id || operation.operation?.id;
+        if (!id) throw new TypeError('accepted mutation response is missing an operation id');
+        const value = {
+            ...(operation.operation || operation),
+            id,
+            target: operation.target || metadata.target || null,
+            target_id: operation.target_id || metadata.targetId || null,
+            kind: operation.kind || metadata.kind || 'unknown',
+            intent_key: metadata.intentKey || operation.intent_key || null,
+            trace_id: operation.trace_id || operation.error?.trace_id || null,
+            request_id: operation.request_id || operation.error?.request_id || null,
+            idempotency_replayed: operation.idempotency_replayed === true,
+            retry_request: metadata.retryRequest || operation.retry_request || null,
+            reconciliation_before: metadata.reconciliationBefore || operation.reconciliation_before || null,
+            pollable: metadata.pollable ?? operation.pollable ?? true,
+        };
+        this.operations.set(id, value);
+        this.persistTrackedOperations();
+        this.renderOperations();
+        const instanceTarget = String(value.kind || '').startsWith('instance.')
+            ? value.target
+            : null;
+        this.updateManagementDeepLink({ instance: instanceTarget, operation: id });
+        if (value.pollable !== false && value.state !== 'unknown' && !this.isTerminalOperation(value)) {
+            this.pollCanonicalOperation(id);
+        }
+        return value;
+    }
+
+    trackPendingMutationIntent({
+        intentKey, target, targetId = null, kind, reconciliationBefore = null,
+        retryRequest, pollable = true,
+    }) {
+        const id = `intent:${intentKey}`;
+        this.operations.set(id, {
+            id,
+            target,
+            target_id: targetId,
+            kind,
+            intent_key: intentKey,
+            state: 'dispatching',
+            created_at: new Date().toISOString(),
+            reconciliation_before: reconciliationBefore,
+            retry_request: retryRequest,
+            pollable,
+            progress: { percent: 0, phase: 'request dispatch in progress' },
+        });
+        this.persistTrackedOperations();
+        this.renderOperations();
+        return id;
+    }
+
+    clearPendingMutationIntent(id) {
+        if (!id || !this.operations.delete(id)) return;
+        this.persistTrackedOperations();
+        this.renderOperations();
+    }
+
+    promotePendingMutationIntent(id, error) {
+        const pending = this.operations.get(id);
+        if (!pending) return null;
+        this.operations.delete(id);
+        return this.trackCanonicalOperation({
+            ...pending,
+            id: `unknown:${pending.intent_key}`,
+            state: 'unknown',
+            progress: null,
+            error: { detail: error.message, code: error.code },
+        });
+    }
+
+    persistTrackedOperations() {
+        try {
+            const records = [...this.operations.values()].map((operation) => ({
+                id: operation.id,
+                target: operation.target,
+                target_id: operation.target_id,
+                kind: operation.kind,
+                intent_key: operation.intent_key,
+                state: operation.state,
+                created_at: operation.created_at,
+                completed_at: operation.completed_at,
+                progress: operation.progress,
+                error: operation.error,
+                result: operation.result,
+                trace_id: operation.trace_id,
+                request_id: operation.request_id,
+                idempotency_replayed: operation.idempotency_replayed,
+                reconciliation_error: operation.reconciliation_error,
+                reconciliation_evidence: operation.reconciliation_evidence,
+                reconciliation_before: operation.reconciliation_before,
+                retry_request: operation.retry_request,
+                pollable: operation.pollable,
+            }));
+            localStorage.setItem('management-ui-operations-v1', JSON.stringify(records.slice(-100)));
+        } catch (_) {}
+    }
+
+    restoreTrackedOperations() {
+        let records = [];
+        try { records = JSON.parse(localStorage.getItem('management-ui-operations-v1') || '[]'); } catch (_) {}
+        let convertedInterruptedIntent = false;
+        for (const record of Array.isArray(records) ? records : []) {
+            if (!record?.id) continue;
+            const interrupted = String(record.id).startsWith('intent:');
+            convertedInterruptedIntent ||= interrupted;
+            const unknown = interrupted || String(record.id).startsWith('unknown:');
+            const id = interrupted ? `unknown:${record.intent_key || String(record.id).slice(7)}` : record.id;
+            this.operations.set(id, {
+                ...record,
+                id,
+                state: unknown ? 'unknown' : (record.state || 'reconciling'),
+                progress: interrupted ? null : record.progress,
+                error: interrupted ? {
+                    code: 'mutation_outcome_unknown',
+                    detail: 'The dashboard reloaded while this request was in flight; reconcile or replay the exact stored intent key.',
+                } : record.error,
+            });
+            if (!unknown && record.pollable !== false && !this.isTerminalOperation(record)) {
+                this.pollCanonicalOperation(record.id);
+            }
+        }
+        if (convertedInterruptedIntent) this.persistTrackedOperations();
+        this.renderOperations();
+    }
+
+    async pollCanonicalOperation(operationId) {
+        try {
+            const body = await this.managementJson(
+                `/api/v2/admin/operations/${encodeURIComponent(operationId)}`,
+                { owner: `operation:${operationId}` },
+            );
+            const previous = this.operations.get(operationId) || {};
+            const operation = { ...previous, ...body, id: operationId };
+            this.operations.set(operationId, operation);
+            this.persistTrackedOperations();
+            this.renderOperations();
+            if (!this.isTerminalOperation(operation)) {
+                setTimeout(() => this.pollCanonicalOperation(operationId), 2000);
+            } else {
+                await this.fetchInstances();
+            }
+        } catch (error) {
+            const previous = this.operations.get(operationId);
+            if (previous) {
+                this.operations.set(operationId, { ...previous, state: 'unknown', reconciliation_error: error.message });
+                this.persistTrackedOperations();
+                this.renderOperations();
             }
         }
     }
 
-    async pollOperation(opId, vmName, verb = 'created') {
-        const maxAttempts = 120; // 10 minutes at 5s intervals
-        let attempts = 0;
-
-        const poll = async () => {
-            try {
-                const resp = (await ApiClient.request(`/api/v1/operations/${opId}`)).response;
-                if (!resp.ok) {
-                    console.error('Failed to poll operation:', resp.status);
-                    return;
-                }
-
-                const op = await resp.json();
-
-                if (op.state === 'completed') {
-                    this.showToast(`${vmName} ${verb} successfully!`, 'success');
-                    this.fetchVms();
-                    return;
-                } else if (op.state === 'failed') {
-                    this.showToast(`${vmName} ${verb} failed: ${op.error || 'Unknown error'}`, 'error');
-                    return;
-                }
-
-                // Still running, poll again
-                attempts++;
-                if (attempts < maxAttempts) {
-                    setTimeout(poll, 5000);
-                } else {
-                    this.showToast(`${vmName} ${verb} timed out. Check logs.`, 'warning');
-                }
-            } catch (e) {
-                console.error('Poll operation error:', e);
-            }
-        };
-
-        // Start polling after 5 seconds
-        setTimeout(poll, 5000);
+    async reconcileInstancesAndOperations() {
+        await this.fetchInstances();
+        await Promise.all([...this.operations.entries()]
+            .filter(([id, operation]) => operation.pollable !== false
+                && !this.isTerminalOperation(operation)
+                && !String(id).startsWith('unknown:') && !String(id).startsWith('intent:'))
+            .map(([id]) => this.pollCanonicalOperation(id)));
     }
 
-    // #631: operator-triggered VM reprovision (re-runs reprovision-vm.sh).
-    // Admin-gated, destructive-ish (rebuilds the VM in place), so it is
-    // confirmation-guarded and tracked as an async operation.
-    async reprovisionAgent(name) {
-        this.showConfirmDialog({
-            title: `Reprovision ${name}?`,
-            message: `This re-runs provisioning for VM "${name}" in place. The agent will be redeployed and running work in the VM may be interrupted. Continue?`,
-            confirmText: 'Reprovision',
-            confirmClass: 'danger',
-            onConfirm: async () => {
-                this.showToast(`Reprovisioning ${name}...`, 'info');
-                try {
-                    const resp = (await ApiClient.request(
-                        `/api/v1/agents/${encodeURIComponent(name)}/reprovision`,
-                        { method: 'POST' })).response;
-                    if (resp.ok || resp.status === 202) {
-                        const data = await resp.json().catch(() => ({}));
-                        const opId = data.operation_id || (data.operation && data.operation.id);
-                        if (opId) {
-                            this.showToast(`Reprovision started on ${name}`, 'success');
-                            this.pollOperation(opId, name, 'reprovisioned');
-                        } else {
-                            this.showToast(`Reprovision requested for ${name}`, 'success');
-                            setTimeout(() => this.fetchVms(), 2000);
-                        }
-                    } else {
-                        const data = await resp.json().catch(() => ({}));
-                        this.showToast(`Failed to reprovision ${name}: ${data.error || resp.statusText}`, 'error');
-                    }
-                } catch (e) {
-                    console.error('Reprovision error:', e);
-                    this.showToast(`Failed to reprovision ${name}: ${e.message}`, 'error');
+    isTerminalOperation(operation) {
+        return window.ManagementUI.isTerminalOperation(operation);
+    }
+
+    hasBlockingOperation(target, kind) {
+        return [...this.operations.values()].some((operation) =>
+            !this.isTerminalOperation(operation)
+            && operation.kind === kind
+            && (operation.target_id === target || operation.target === target));
+    }
+
+    reconcileUnknownOperationsFromInventory() {
+        const now = new Date().toISOString();
+        let changed = false;
+        for (const [id, operation] of this.operations) {
+            if (!String(id).startsWith('unknown:') || operation.state !== 'unknown') continue;
+            if (!String(operation.kind || '').startsWith('instance.')) continue;
+            const resolution = window.ManagementUI.reconcileUnknownInstanceOperation(
+                operation, this.instances, now,
+            );
+            this.operations.set(id, {
+                ...operation,
+                state: resolution.reconciled ? 'succeeded' : 'unknown',
+                completed_at: resolution.reconciled ? now : operation.completed_at,
+                progress: resolution.reconciled
+                    ? { percent: 100, phase: 'authoritative inventory reconciled' }
+                    : operation.progress,
+                result: resolution.result || operation.result,
+                reconciliation_evidence: resolution.evidence,
+            });
+            changed = true;
+        }
+        if (changed) {
+            this.persistTrackedOperations();
+            this.renderOperations();
+        }
+    }
+
+    async retryUnknownOperation(operation) {
+        if (!String(operation.id).startsWith('unknown:')
+            || operation.state !== 'unknown' || !operation.intent_key || !operation.retry_request) return;
+        const request = operation.retry_request;
+        try {
+            const outcome = await this.managementRequest(request.path, {
+                method: request.method,
+                headers: request.headers,
+                body: request.body,
+                idempotencyKey: operation.intent_key,
+                owner: `retry:${operation.id}`,
+            });
+            if (outcome.kind === 'accepted') {
+                const recoveredOperation = this.trackCanonicalOperation({
+                    ...(outcome.body || {}),
+                    operation_id: outcome.operationId,
+                    trace_id: outcome.traceId,
+                    request_id: outcome.requestId,
+                    idempotency_replayed: outcome.idempotencyReplayed,
+                }, {
+                    target: operation.target,
+                    targetId: operation.target_id,
+                    kind: operation.kind,
+                    intentKey: operation.intent_key,
+                    retryRequest: request,
+                });
+                this.operations.delete(operation.id);
+                this.selectedOperation = recoveredOperation.id;
+                this.persistTrackedOperations();
+                this.renderOperations();
+            } else {
+                if (operation.kind === 'celld.command') {
+                    this.reconcileCelldCommandOperations(outcome.body);
+                    this.recordCelldResult('command replay reconciliation', {
+                        operation_id: operation.intent_key,
+                        cell: outcome.body,
+                    }, 'celld-cell-result');
+                    return;
                 }
+                this.operations.set(operation.id, {
+                    ...operation,
+                    state: 'succeeded',
+                    completed_at: new Date().toISOString(),
+                    progress: { percent: 100, phase: 'recovered by exact idempotent replay' },
+                    result: {
+                        recovered_from: 'exact idempotent replay',
+                        response: outcome.body ?? null,
+                    },
+                });
+                this.persistTrackedOperations();
+                this.renderOperations();
+                await this.reconcileRecoveredMutation(operation);
+            }
+        } catch (error) {
+            this.showToast(`Intent replay did not reconcile: ${error.message}`, 'error');
+            await this.reconcileRecoveredMutation(operation);
+        }
+    }
+
+    async reconcileRecoveredMutation(operation) {
+        const kind = String(operation?.kind || '');
+        if (kind.startsWith('config.startup.')) return this.fetchStartupProfiles();
+        if (kind.startsWith('config.loadout.')) return this.fetchConfigLoadouts();
+        if (kind.startsWith('config.storage.')) {
+            try {
+                if (this.storageUrl() === operation.target) return this.readStoragePath();
+            } catch (_) {}
+            return;
+        }
+        if (kind === 'fleet.reconcile') return this.fetchFleetInventory();
+        if (kind.startsWith('acceleration.')) return this.fetchInstances();
+        if (kind.startsWith('instance.')) return this.fetchInstances();
+    }
+
+    renderOperations() {
+        const list = document.getElementById('operation-list');
+        if (!list) return;
+        window.ManagementUI.renderOperationList(list, this.operations.values(), {
+            selectedOperation: this.selectedOperation,
+            onEvidence: (operation) => this.openActivityEvidence({
+                instanceId: operation.target_id,
+                agentId: operation.target_id,
+                traceId: operation.trace_id,
+            }),
+            onReconcile: (operation) => {
+                const kind = String(operation.kind || '');
+                if (kind.startsWith('celld.')) return this.reconcileCelldOperation(operation);
+                if (kind.startsWith('config.') || kind === 'fleet.reconcile'
+                    || kind.startsWith('acceleration.')) {
+                    return this.reconcileRecoveredMutation(operation);
+                }
+                return this.reconcileInstancesAndOperations();
+            },
+            onRetry: (operation) => this.retryUnknownOperation(operation),
+            onSelect: (operation) => {
+                this.selectedOperation = operation.id;
+                this.updateManagementDeepLink({
+                    instance: String(operation.kind || '').startsWith('instance.') ? operation.target : null,
+                    operation: operation.id,
+                });
             },
         });
     }
 
-    async fetchVms() {
-        try {
-            // Only fetch agent-* VMs (default prefix filter)
-            const resp = (await ApiClient.request('/api/v1/vms')).response;
-            if (!resp.ok) {
-                // API not implemented yet
-                if (resp.status === 404) {
-                    console.log('VM list API not yet implemented');
-                    return;
-                }
-                // 408/503 → libvirt is degraded; fall back to agent-derived rows (#189)
-                if (resp.status === 408 || resp.status === 503) {
-                    this.vmsDegraded = true;
-                    this.renderVmList();
-                    return;
-                }
-                throw new Error(`HTTP ${resp.status}`);
-            }
-            const data = await resp.json();
-            this.vmsDegraded = false;
-            if (data.vms) {
-                this.updateVmList(data.vms);
-            }
-        } catch (e) {
-            // Network error / fetch threw — treat as libvirt-degraded so the
-            // sidebar still shows agent rows instead of going blank (#189).
-            this.vmsDegraded = true;
-            this.renderVmList();
-            console.error('Failed to fetch VMs:', e);
-        }
-    }
-
-    updateVmList(vms) {
-        // Update internal state then defer to renderVmList for the merged
-        // VM + container view (#178).
-        this.vms.clear();
-        vms.forEach(vm => this.vms.set(vm.name, vm));
-        this.renderVmList();
-    }
-
-    // Render the merged Instances list (VMs + containers). Called both by
-    // updateVmList (after a VM poll) and fetchContainers (after a container poll).
     renderVmList() {
         const list = document.getElementById('vm-list');
         if (!list) return;
 
-        const vmEntries = Array.from(this.vms.values()).map(vm => ({
-            name: vm.name,
-            runtime: 'vm',
-            state: vm.state,
-            raw: vm,
-        }));
-        const containerEntries = Array.from((this.containers || new Map()).values()).map(c => ({
-            name: c.name || c.id,
-            runtime: 'container',
-            state: c.state || c.status || 'running',
-            raw: c,
-        }));
-
-        // Libvirt-degraded fallback (#189): when /api/v1/vms is unavailable
-        // (timeout / 5xx) the operator still needs to see agents that ARE
-        // gRPC-connected. Synthesize a VM row for each known agent that
-        // isn't already represented (and isn't a container). The synthesized
-        // rows carry `_degraded: true` so renderVmEntry can show a chip and
-        // disable lifecycle controls that need libvirt RPC.
-        if (this.vmsDegraded) {
-            const knownNames = new Set([
-                ...vmEntries.map(e => e.name),
-                ...containerEntries.map(e => e.name),
-            ]);
-            for (const [agentId, agentInfo] of this.agents.entries()) {
-                if (knownNames.has(agentId)) continue;
-                vmEntries.push({
-                    name: agentId,
-                    runtime: 'vm',
-                    state: 'running',
-                    raw: {
-                        name: agentId,
-                        state: 'running',
-                        _degraded: true,
-                        _agentInfo: agentInfo,
-                    },
-                });
-            }
-        }
-
-        const all = [...vmEntries, ...containerEntries].sort((a, b) => a.name.localeCompare(b.name));
-
-        if (all.length === 0) {
-            list.innerHTML = '<div class="vm-placeholder">No instances found</div>';
-            this.updateVmCount();
+        if (this.instanceInventoryError) {
+            list.replaceChildren();
+            const banner = document.createElement('div');
+            banner.className = 'vm-degraded-banner';
+            banner.textContent = `Canonical instance inventory unavailable: ${this.instanceInventoryError.message}. Lifecycle controls are disabled until authoritative state is restored.`;
+            list.append(banner);
+            const count = document.getElementById('vm-count');
+            if (count) count.textContent = 'instances unavailable';
             return;
         }
 
-        // Top-of-sidebar banner when libvirt is degraded.
-        const degradedBanner = this.vmsDegraded
-            ? `<div class="vm-degraded-banner" title="GET /api/v1/vms is unavailable. Lifecycle controls disabled until libvirt recovers.">⚠ libvirt unresponsive — VM lifecycle controls unavailable</div>`
-            : '';
+        this.renderCanonicalInstanceList(list);
+    }
 
-        list.innerHTML = degradedBanner + all.map(e => e.runtime === 'container'
-            ? this.renderContainerEntry(e.raw)
-            : this.renderVmEntry(e.raw)).join('');
-
-        list.querySelectorAll('.blade-item').forEach(item => {
-            const name = item.dataset.vmName;
-            const runtime = item.dataset.runtime || 'vm';
-            const entry = runtime === 'container'
-                ? (this.containers && this.containers.get(name))
-                : this.vms.get(name);
-            if (!entry) return;
-
-            item.addEventListener('click', (e) => {
-                if (e.target.closest('.vm-controls')) return;
-                if (this.panes.has(name)) {
-                    this.openSessionsBlade(name);
-                } else if (runtime === 'vm' && entry.state !== 'running') {
-                    this.showToast(`${name} is not running`, 'info');
-                } else {
-                    this.showToast(`${name} agent not connected`, 'info');
-                }
+    renderCanonicalInstanceList(list) {
+        const instances = [...this.instances.values()].sort((a, b) => a.name.localeCompare(b.name));
+        list.replaceChildren();
+        for (const degraded of this.degradedProviders || []) {
+            const banner = document.createElement('div');
+            banner.className = 'vm-degraded-banner';
+            banner.textContent = `${degraded.runtime || 'provider'} degraded: ${degraded.detail || degraded.code}`;
+            list.append(banner);
+        }
+        if (!instances.length) {
+            const empty = document.createElement('div');
+            empty.className = 'vm-placeholder';
+            empty.textContent = 'No instances found';
+            list.append(empty);
+            this.updateVmCount();
+            return;
+        }
+        for (const instance of instances) {
+            const wrapper = document.createElement('div');
+            wrapper.innerHTML = this.renderCanonicalInstanceEntry(instance);
+            const item = wrapper.firstElementChild;
+            item.addEventListener('click', (event) => {
+                if (event.target.closest('.vm-controls')) return;
+                this.selectedAgent = instance.name;
+                this.updateManagementDeepLink({ instance: instance.name });
+                if (this.panes.has(instance.name)) this.openSessionsBlade(instance.name);
+                else this.showToast(`${instance.name} has no authorized connected session`, 'info');
             });
-
-            // Shared controls
-            item.querySelector('.vm-stop')?.addEventListener('click', (e) => {
-                e.stopPropagation();
-                if (runtime === 'container') return this.stopContainer(name);
-                this.stopVm(name);
-            });
-            item.querySelector('.vm-delete')?.addEventListener('click', (e) => {
-                e.stopPropagation();
-                if (runtime === 'container') return this.confirmDeleteContainer(name);
-                this.confirmDeleteVm(name, entry.state === 'running');
-            });
-
-            // VM-only controls
-            if (runtime === 'vm') {
-                item.querySelector('.vm-start')?.addEventListener('click', (e) => {
-                    e.stopPropagation();
-                    this.startVm(name);
-                });
-                item.querySelector('.vm-restart')?.addEventListener('click', (e) => {
-                    e.stopPropagation();
-                    this.restartVm(name);
-                });
-                item.querySelector('.vm-force-off')?.addEventListener('click', (e) => {
-                    e.stopPropagation();
+            item.querySelectorAll('[data-instance-action]').forEach((button) => {
+                button.addEventListener('click', (event) => {
+                    event.stopPropagation();
+                    const action = button.dataset.instanceAction;
+                    const destructive = ['destroy', 'reprovision'].includes(action);
+                    if (!destructive) return this.requestInstanceAction(instance, action);
                     this.showConfirmDialog({
-                        title: 'Force off VM?',
-                        message: `Hard power off ${name}. Any unsaved work will be lost. The VM stays defined and can be restarted.`,
-                        confirmText: 'Force off',
+                        title: `${action === 'destroy' ? 'Destroy' : 'Reprovision'} ${instance.name}?`,
+                        message: action === 'destroy'
+                            ? 'This permanently removes the runtime instance. Terminal evidence remains in the operation record.'
+                            : 'This rebuilds runtime state and may interrupt active work. Persistent scoped storage is preserved by contract.',
+                        confirmText: action === 'destroy' ? 'Destroy instance' : 'Reprovision',
                         confirmClass: 'danger',
-                        onConfirm: () => this.forceOffVm(name)
+                        onConfirm: () => this.requestInstanceAction(instance, action),
                     });
                 });
-                item.querySelector('.vm-deploy')?.addEventListener('click', (e) => {
-                    e.stopPropagation();
-                    this.deployAgent(name);
-                });
-                item.querySelector('.vm-reprovision')?.addEventListener('click', (e) => {
-                    e.stopPropagation();
-                    this.reprovisionAgent(name);
-                });
-            }
-        });
-
+            });
+            item.querySelector('.instance-evidence')?.addEventListener('click', (event) => {
+                event.stopPropagation();
+                this.openActivityEvidence({ instanceId: instance.id, agentId: instance.id });
+            });
+            list.append(item);
+        }
         this.updateVmCount();
     }
 
-    renderVmEntry(vm) {
-        const stateClass = vm.state.toLowerCase().replace(' ', '-');
-        const isRunning = vm.state === 'running';
-        const isStopped = vm.state === 'shut off' || vm.state === 'stopped';
-        const hasAgent = this.panes.has(vm.name);
-        const sessionCount = this.vmSessions.get(vm.name)?.length || 0;
-        const selected = vm.name === this.selectedAgent ? 'selected' : '';
-
-        // Status icon
-        const statusIcon = isRunning ? (hasAgent ? '●' : '○') : '○';
-        const statusClass = isRunning ? (hasAgent ? 'running' : '') : 'stopped';
-
-        // Session badge
-        const badgeStyle = sessionCount > 0 ? '' : 'display:none';
-        const badge = hasAgent ? `<span class="blade-item-badge" style="${badgeStyle}">${sessionCount}</span>` : '';
-
-        // Libvirt-degraded marker (#189): when this row was synthesized from
-        // /api/v1/agents because /api/v1/vms is unavailable, lifecycle buttons
-        // that require libvirt RPC are disabled with a tooltip explaining why.
-        // Reconnect/Deploy stay live since they don't need libvirt.
-        const degraded = vm._degraded === true;
-        const degradedAttr = degraded ? 'disabled title="libvirt unresponsive"' : '';
-        const degradedChip = degraded
-            ? `<span class="runtime-badge runtime-degraded" title="libvirt unresponsive — agent visible via gRPC heartbeat">⚠</span>`
+    renderCanonicalInstanceEntry(instance) {
+        const state = String(instance.state || 'unknown');
+        const stateClass = state.toLowerCase().replace(/[^a-z0-9_-]+/g, '-');
+        const capabilities = new Set(instance.capabilities || []);
+        const inFlight = [...this.instanceMutationIntents.keys()].some((key) => key.startsWith(`${instance.id}:`))
+            || [...this.operations.values()].some((operation) =>
+                !this.isTerminalOperation(operation)
+                && (operation.target_id === instance.id || operation.target === instance.name));
+        const action = (name, label, title) => capabilities.has(`instance.${name}`)
+            ? `<button class="vm-ctrl-btn instance-action" data-instance-action="${name}" title="${this.esc(title)}" aria-label="${this.esc(title)} ${this.esc(instance.name)}" ${inFlight ? 'disabled' : ''}>${label}</button>`
             : '';
-
-        // VM control buttons based on state
-        let vmControls = '';
-        if (isRunning) {
-            const deployBtn = !hasAgent
-                ? `<button class="vm-ctrl-btn vm-deploy" title="Deploy Agent">⚡</button>`
-                : '';
-            vmControls = `
-                <div class="vm-controls">
-                    ${deployBtn}
-                    <button class="vm-ctrl-btn vm-reprovision" title="Reprovision VM (re-run provisioning in place)" ${degradedAttr}>⟲</button>
-                    <button class="vm-ctrl-btn vm-restart" title="Restart VM (graceful reboot)" ${degradedAttr}>↻</button>
-                    <button class="vm-ctrl-btn vm-stop" title="Stop VM (graceful shutdown)" ${degradedAttr}>■</button>
-                    <button class="vm-ctrl-btn vm-force-off" title="Force off (hard power off — VM stays defined)" ${degradedAttr}>⏻</button>
-                    <button class="vm-ctrl-btn vm-delete" title="Delete VM (permanent — wipes disk)" ${degradedAttr}>✕</button>
-                </div>
-            `;
-        } else if (isStopped) {
-            vmControls = `
-                <div class="vm-controls">
-                    <button class="vm-ctrl-btn vm-start" title="Start VM" ${degradedAttr}>▶</button>
-                    <button class="vm-ctrl-btn vm-delete" title="Delete VM (permanent — wipes disk)" ${degradedAttr}>🗑</button>
-                </div>
-            `;
-        }
-
-        // Loadout label from agent data
-        const agentData = this.agents.get(vm.name);
-        const loadoutLabel = agentData?.loadout ? `<span class="blade-item-loadout">${this.esc(agentData.loadout)}</span>` : '';
-
+        const provider = instance.provider || instance.runtime || 'unknown';
+        const availability = instance.agent_ready ? 'ready'
+            : (instance.agent_registered ? 'registered' : (instance.operation_status || 'not ready'));
+        const transport = instance.transport_posture || instance.transport || 'unknown transport';
+        const identity = instance.security_posture?.label || instance.security_posture?.posture || 'identity posture unknown';
+        const desired = instance.desired_state || 'not reported';
+        const observed = instance.observed_state || state;
+        const constraints = (instance.capability_constraints || []).map((value) => value.reason).filter(Boolean);
+        const degraded = constraints.length ? `<span class="runtime-badge runtime-degraded" title="${this.esc(constraints.join(' · '))}">limited</span>` : '';
+        const controls = [
+            `<button class="vm-ctrl-btn instance-evidence" title="Open correlated activity evidence" aria-label="Open correlated activity evidence for ${this.esc(instance.name)}">◎</button>`,
+            state === 'stopped' ? action('start', '▶', 'Start instance') : '',
+            state === 'running' ? action('stop', '■', 'Stop instance gracefully') : '',
+            state === 'running' ? action('restart', '↻', 'Restart instance') : '',
+            action('reprovision', '⟲', 'Reprovision instance'),
+            action('destroy', '✕', 'Destroy instance permanently'),
+        ].join('');
         return `
-            <div class="blade-item ${statusClass} ${selected}" data-vm-name="${escAttr(vm.name)}" data-runtime="vm">
-                <span class="blade-item-icon">${statusIcon}</span>
+            <div class="blade-item ${this.esc(stateClass)} ${instance.name === this.selectedAgent ? 'selected' : ''}"
+                 data-vm-name="${escAttr(instance.name)}" data-instance-id="${escAttr(instance.id)}"
+                 data-runtime="${escAttr(instance.runtime)}">
+                <span class="blade-item-icon">${state === 'running' ? '●' : '○'}</span>
                 <div class="blade-item-info">
-                    <span class="blade-item-name">${this.esc(vm.name)}<span class="runtime-badge runtime-vm" title="VM (libvirt)">VM</span>${degradedChip}${badge}</span>
-                    ${loadoutLabel}
+                    <span class="blade-item-name">${this.esc(instance.name)}
+                        <span class="runtime-badge" title="${this.esc(provider)}">${this.esc(instance.runtime || '?')}</span>${degraded}
+                    </span>
+                    <span class="instance-posture">desired ${this.esc(desired)} · observed ${this.esc(observed)}</span>
+                    <span class="instance-posture">${this.esc(availability)} · ${this.esc(transport)} · ${this.esc(identity)}</span>
+                    <span class="instance-posture">${capabilities.size} capabilities${instance.image_ref ? ` · ${this.esc(instance.image_ref)}` : ''}</span>
                 </div>
-                ${vmControls}
-            </div>
-        `;
-    }
-
-    renderContainerEntry(c) {
-        const name = c.name || c.id;
-        const isRunning = (c.state || c.status || '').toLowerCase().startsWith('running');
-        const hasAgent = this.panes.has(name);
-        const sessionCount = this.vmSessions.get(name)?.length || 0;
-        const selected = name === this.selectedAgent ? 'selected' : '';
-        const statusIcon = isRunning ? (hasAgent ? '●' : '○') : '○';
-        const statusClass = isRunning ? (hasAgent ? 'running' : '') : 'stopped';
-        const badgeStyle = sessionCount > 0 ? '' : 'display:none';
-        const badge = hasAgent ? `<span class="blade-item-badge" style="${badgeStyle}">${sessionCount}</span>` : '';
-        const imageLabel = c.image ? `<span class="blade-item-loadout">${this.esc(c.image)}</span>` : '';
-
-        // Containers expose Stop + Delete only. No Force off (use Delete with running),
-        // no Restart yet (no /containers/{name}/restart route), no Deploy (image is baked).
-        const controls = isRunning
-            ? `<div class="vm-controls">
-                 <button class="vm-ctrl-btn vm-stop" title="Stop container (graceful)">■</button>
-                 <button class="vm-ctrl-btn vm-delete" title="Delete container (force-removes if running)">✕</button>
-               </div>`
-            : `<div class="vm-controls">
-                 <button class="vm-ctrl-btn vm-delete" title="Delete container">🗑</button>
-               </div>`;
-
-        return `
-            <div class="blade-item ${statusClass} ${selected}" data-vm-name="${escAttr(name)}" data-runtime="container">
-                <span class="blade-item-icon">${statusIcon}</span>
-                <div class="blade-item-info">
-                    <span class="blade-item-name">${this.esc(name)}<span class="runtime-badge runtime-ct" title="Container (Docker)">CT</span>${badge}</span>
-                    ${imageLabel}
-                </div>
-                ${controls}
-            </div>
-        `;
-    }
-
-    async stopContainer(name) {
-        this.showToast(`Stopping ${name}…`, 'info');
-        try {
-            const resp = (await ApiClient.request(`/api/v1/containers/${name}/stop`, { method: 'POST' })).response;
-            if (resp.ok) {
-                this.showToast(`${name} stopped`, 'success');
-                setTimeout(() => this.fetchContainers(), 500);
-            } else {
-                const data = await resp.json().catch(() => ({}));
-                this.showToast(`Failed to stop ${name}: ${data.error || resp.statusText}`, 'error');
-            }
-        } catch (e) {
-            console.error('Stop container error:', e);
-            this.showToast(`Failed to stop ${name}: ${e.message}`, 'error');
-        }
-    }
-
-    confirmDeleteContainer(name) {
-        this.showConfirmDialog({
-            title: 'Delete container?',
-            message: `Force-remove container ${name}. Any unsaved data inside the container will be lost.`,
-            confirmText: 'Delete',
-            confirmClass: 'danger',
-            onConfirm: () => this.deleteContainer(name),
-        });
-    }
-
-    async deleteContainer(name) {
-        this.showToast(`Deleting ${name}…`, 'info');
-        try {
-            const resp = (await ApiClient.request(`/api/v1/containers/${name}`, { method: 'DELETE' })).response;
-            if (resp.ok) {
-                this.showToast(`${name} deleted`, 'success');
-                setTimeout(() => this.fetchContainers(), 500);
-            } else {
-                const data = await resp.json().catch(() => ({}));
-                this.showToast(`Failed to delete ${name}: ${data.error || resp.statusText}`, 'error');
-            }
-        } catch (e) {
-            console.error('Delete container error:', e);
-            this.showToast(`Failed to delete ${name}: ${e.message}`, 'error');
-        }
-    }
-
-    getVmStateIcon(state) {
-        switch (state.toLowerCase()) {
-            case 'running': return '&#9679;'; // filled circle
-            case 'shut off':
-            case 'stopped': return '&#9675;'; // empty circle
-            case 'crashed':
-            case 'paused': return '&#9888;'; // warning triangle
-            default: return '&#9676;'; // dotted circle
-        }
+                <div class="vm-controls">${controls}</div>
+            </div>`;
     }
 
     focusAgentPane(agentId) {
@@ -3113,7 +3256,7 @@ class AgenticDashboard {
                     <div class="detail-label">Agent ID</div><div class="detail-value">${this.esc(agent.id)}</div>
                     <div class="detail-label">Hostname</div><div class="detail-value">${this.esc(agent.hostname)}</div>
                     <div class="detail-label">IP Address</div><div class="detail-value">${this.esc(agent.ip_address)}</div>
-                    <div class="detail-label">Status</div><div class="detail-value"><span class="detail-status-badge ${agent.status.toLowerCase()}">${this.esc(agent.status)}</span></div>
+                    <div class="detail-label">Status</div><div class="detail-value"><span class="detail-status-badge ${cssToken(agent.status)}">${this.esc(agent.status)}</span></div>
                 </div>
             </div>
         `);
@@ -3283,10 +3426,18 @@ class AgenticDashboard {
         } else if (normalized === 'reconnecting') {
             el.className = 'status-connecting';
             text.textContent = 'Reconnecting';
+        } else if (normalized === 'degraded') {
+            el.className = 'status-degraded';
+            text.textContent = 'Paused';
+        } else if (normalized === 'terminal') {
+            el.className = 'status-terminal';
+            text.textContent = 'Action required';
         } else {
             el.className = 'status-disconnected';
             text.textContent = 'Disconnected';
         }
+        const retry = document.getElementById('connection-retry');
+        if (retry) retry.hidden = normalized !== 'terminal';
     }
 
     updateAgentCount() {
@@ -3297,13 +3448,14 @@ class AgenticDashboard {
     updateVmCount() {
         const vmCountEl = document.getElementById('vm-count');
         if (vmCountEl) {
-            const total = this.vms.size;
-            const running = Array.from(this.vms.values()).filter(vm =>
-                vm.state === 'running' || vm.state === 'Running'
+            const source = this.instances;
+            const total = source.size;
+            const running = Array.from(source.values()).filter(instance =>
+                String(instance.state).toLowerCase() === 'running'
             ).length;
             vmCountEl.textContent = running === total
-                ? `${total} VM${total !== 1 ? 's' : ''}`
-                : `${running}/${total} VMs`;
+                ? `${total} instance${total !== 1 ? 's' : ''}`
+                : `${running}/${total} instances`;
         }
     }
 
@@ -3758,7 +3910,8 @@ class AgenticDashboard {
                         <span class="session-card-type ${typeClass}">${this.esc(typeClass.slice(0, 3))}</span>
                         <span class="session-card-meta">${this.esc(leaseText)}</span>
                         <span class="session-card-meta">${this.esc(String(observers.length))} observers · ${this.esc(replaySeq)}</span>
-                        <button class="session-card-kill" title="Kill">✕</button>
+                        <button class="session-card-activity" title="Open correlated activity evidence" aria-label="Open activity evidence for ${this.esc(name)}">◎</button>
+                        <button class="session-card-kill" title="Kill" aria-label="Kill ${this.esc(name)} session">✕</button>
                     </div>
                 </div>
             `;
@@ -3770,8 +3923,18 @@ class AgenticDashboard {
             const sessionId = card.dataset.sessionId;
 
             card.addEventListener('click', (e) => {
-                if (e.target.classList.contains('session-card-kill')) return;
+                if (e.target.closest('.session-card-kill, .session-card-activity')) return;
                 this.connectToSession(vmName, sessionId);
+            });
+
+            card.querySelector('.session-card-activity')?.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const instance = this.instances.get(vmName);
+                this.openActivityEvidence({
+                    instanceId: instance?.id || vmName,
+                    agentId: this.agents.get(vmName)?.id || instance?.id || vmName,
+                    sessionId,
+                });
             });
 
             card.querySelector('.session-card-kill')?.addEventListener('click', (e) => {
@@ -4114,6 +4277,1555 @@ class AgenticDashboard {
     }
 
     // =========================================================================
+    // Fleet and Celld workspaces (#808)
+    // =========================================================================
+
+    setupManagementWorkspaces() {
+        document.querySelectorAll('[data-workspace]').forEach((button) => {
+            button.addEventListener('click', () => this.switchManagementWorkspace(button.dataset.workspace));
+        });
+        document.getElementById('fleet-refresh')?.addEventListener('click', () => this.fetchFleetInventory());
+        document.getElementById('fleet-preview-reconcile')?.addEventListener('click', () => this.previewFleetReconcile());
+        document.getElementById('fleet-apply-reconcile')?.addEventListener('click', () => this.applyFleetReconcile());
+        document.getElementById('celld-refresh')?.addEventListener('click', () => this.fetchCelldStatus());
+        document.getElementById('celld-get-cell')?.addEventListener('click', () => this.fetchCelldCell());
+        document.getElementById('celld-preview-reconcile')?.addEventListener('click', () => this.previewCelldReconcile());
+        document.getElementById('celld-apply-reconcile')?.addEventListener('click', () => this.applyCelldReconcile());
+        document.getElementById('celld-preview-command')?.addEventListener('click', () => this.previewCelldCommand());
+        document.getElementById('celld-apply-command')?.addEventListener('click', () => this.applyCelldCommand());
+        document.querySelectorAll('.celld-review-action').forEach((button) => {
+            button.addEventListener('click', () => this.runCelldReview(button.dataset.celldReview));
+        });
+        document.getElementById('celld-plan-upgrade')?.addEventListener('click', () => this.planCelldUpgrade());
+        document.getElementById('celld-cancel-plan')?.addEventListener('click', () => this.cancelCelldPlan());
+        document.getElementById('config-refresh')?.addEventListener('click', () => this.fetchConfigurationWorkspace());
+        document.getElementById('startup-profile-new')?.addEventListener('click', () => this.newStartupProfile());
+        document.getElementById('startup-profile-review')?.addEventListener('click', () => this.reviewStartupProfile());
+        document.getElementById('startup-profile-apply')?.addEventListener('click', () => this.applyStartupProfile());
+        document.getElementById('startup-profile-delete')?.addEventListener('click', () => this.deleteStartupProfile());
+        document.getElementById('config-loadout-review')?.addEventListener('click', () => this.reviewConfigLoadout());
+        document.getElementById('config-loadout-apply')?.addEventListener('click', () => this.applyConfigLoadout());
+        document.getElementById('storage-scope')?.addEventListener('change', () => this.updateStorageAuthority());
+        document.getElementById('storage-path')?.addEventListener('input', () => this.renderStorageBreadcrumbs());
+        document.getElementById('storage-read')?.addEventListener('click', () => this.readStoragePath());
+        document.getElementById('storage-review-write')?.addEventListener('click', () => this.reviewStorageWrite());
+        document.getElementById('storage-apply-write')?.addEventListener('click', () => this.applyStorageWrite());
+        document.getElementById('storage-delete')?.addEventListener('click', () => this.deleteStorageObject());
+        document.getElementById('acceleration-provider')?.addEventListener('change', () => this.renderAccelerationActions());
+        document.getElementById('acceleration-review')?.addEventListener('click', () => this.reviewAcceleration());
+        document.getElementById('acceleration-apply')?.addEventListener('click', () => this.applyAcceleration());
+        document.getElementById('mcp-refresh')?.addEventListener('click', () => this.fetchMcpDiscovery());
+        document.getElementById('access-refresh')?.addEventListener('click', () => this.fetchAccessWorkspace());
+        document.getElementById('credential-lease-credential')?.addEventListener('change', () => this.updateCredentialLeaseUses());
+        document.getElementById('credential-lease-review')?.addEventListener('click', () => this.reviewCredentialLease());
+        document.getElementById('credential-lease-apply')?.addEventListener('click', () => this.applyCredentialLease());
+        document.getElementById('ssh-lease-review')?.addEventListener('click', () => this.reviewSshLease());
+        document.getElementById('ssh-lease-apply')?.addEventListener('click', () => this.applySshLease());
+        document.getElementById('access-audit-refresh')?.addEventListener('click', () => this.fetchAccessAudit());
+        for (const id of [
+            'credential-lease-credential', 'credential-lease-agent', 'credential-lease-instance',
+            'credential-lease-session', 'credential-lease-use', 'credential-lease-ttl',
+        ]) document.getElementById(id)?.addEventListener('input', () => this.discardCredentialLeaseReview());
+        for (const id of [
+            'ssh-lease-instance', 'ssh-lease-principal', 'ssh-lease-mode',
+            'ssh-lease-public-key', 'ssh-lease-ttl',
+        ]) document.getElementById(id)?.addEventListener('input', () => this.discardSshLeaseReview(false));
+        const requested = new URLSearchParams(window.location.search).get('workspace');
+        if (['fleet', 'celld', 'config', 'access'].includes(requested)) this.switchManagementWorkspace(requested);
+    }
+
+    switchManagementWorkspace(workspace = 'console') {
+        const selected = ['fleet', 'celld', 'config', 'access'].includes(workspace) ? workspace : 'console';
+        document.body.classList.toggle('workspace-fleet', selected === 'fleet');
+        document.body.classList.toggle('workspace-celld', selected === 'celld');
+        document.body.classList.toggle('workspace-config', selected === 'config');
+        document.body.classList.toggle('workspace-access', selected === 'access');
+        document.getElementById('fleet-workspace')?.classList.toggle('hidden', selected !== 'fleet');
+        document.getElementById('celld-workspace')?.classList.toggle('hidden', selected !== 'celld');
+        document.getElementById('config-workspace')?.classList.toggle('hidden', selected !== 'config');
+        document.getElementById('access-workspace')?.classList.toggle('hidden', selected !== 'access');
+        document.querySelectorAll('[data-workspace]').forEach((button) => {
+            button.classList.toggle('active', button.dataset.workspace === selected);
+        });
+        const url = new URL(window.location.href);
+        if (selected === 'console') url.searchParams.delete('workspace');
+        else url.searchParams.set('workspace', selected);
+        history.replaceState(null, '', url);
+        if (selected === 'fleet') this.fetchFleetInventory();
+        if (selected === 'celld') this.fetchCelldStatus();
+        if (selected === 'config') this.fetchConfigurationWorkspace();
+        if (selected === 'access') this.fetchAccessWorkspace();
+        else this.discardSshLeaseReview(true);
+    }
+
+    async managementRequest(path, options = {}) {
+        const boundary = await window.ManagementUIReady;
+        if (!this.managementTransport) this.managementTransport = new boundary.HttpTransport();
+        try {
+            return await this.managementTransport.request(path, ApiClient.withMutationIntent(options));
+        } catch (error) {
+            // Preserve the existing dashboard recovery contract while sharing
+            // normalized transport outcomes with the modular domain clients.
+            if (error instanceof boundary.UnknownMutationOutcomeError) {
+                throw new UnknownMutationOutcomeError({
+                    method: error.method, path: error.url,
+                    idempotencyKey: error.idempotencyKey, cause: error,
+                });
+            }
+            if (error instanceof boundary.HttpOutcomeError) {
+                error.status = error.outcome.status;
+                error.retryAfter = error.outcome.retryAfterMs == null ? null : String(error.outcome.retryAfterMs / 1000);
+            }
+            throw error;
+        }
+    }
+
+    async managementJson(path, options = {}) {
+        const outcome = await this.managementRequest(path, { ...options, expectJson: true });
+        return outcome.body;
+    }
+
+    async trackedMutation(path, options, metadata) {
+        const intentKey = metadata.intentKey || ApiClient.newIntentId();
+        const retryRequest = {
+            path,
+            method: options.method || 'POST',
+            headers: options.headers,
+            body: options.body,
+        };
+        const pendingIntentId = this.trackPendingMutationIntent({
+            intentKey,
+            target: metadata.target,
+            targetId: metadata.targetId,
+            kind: metadata.kind,
+            reconciliationBefore: metadata.reconciliationBefore,
+            retryRequest,
+        });
+        try {
+            const outcome = await this.managementRequest(path, {
+                ...options,
+                idempotencyKey: intentKey,
+                owner: metadata.owner || `mutation:${metadata.kind}:${metadata.target}`,
+            });
+            let operation = null;
+            if (outcome.kind === 'accepted') {
+                operation = this.trackCanonicalOperation({
+                    ...(outcome.body || {}),
+                    operation_id: outcome.operationId,
+                    trace_id: outcome.traceId,
+                    request_id: outcome.requestId,
+                    idempotency_replayed: outcome.idempotencyReplayed,
+                }, {
+                    ...metadata,
+                    intentKey,
+                    retryRequest,
+                });
+            }
+            this.clearPendingMutationIntent(pendingIntentId);
+            return { outcome, operation };
+        } catch (error) {
+            if (error instanceof UnknownMutationOutcomeError) {
+                this.promotePendingMutationIntent(pendingIntentId, error);
+            } else {
+                this.clearPendingMutationIntent(pendingIntentId);
+            }
+            throw error;
+        }
+    }
+
+    async fetchConfigurationWorkspace() {
+        this.setWorkspaceStatus('config-status', 'loading', 'Loading configuration capabilities…');
+        const results = await Promise.allSettled([
+            this.fetchStartupProfiles(), this.fetchConfigLoadouts(),
+            this.fetchAccelerationProviders(), this.fetchMcpDiscovery(),
+        ]);
+        const failures = results.filter((result) => result.status === 'rejected');
+        this.updateStorageAuthority();
+        this.setWorkspaceStatus(
+            'config-status', failures.length ? 'degraded' : 'ready',
+            failures.length ? `${failures.length} configuration domains unavailable; available panels remain usable.` : 'Configuration domains loaded.',
+        );
+    }
+
+    startupProfileRequest(profile) {
+        const body = {
+            description: profile.description ?? null,
+            trigger: profile.trigger || 'on_instance_ready',
+            target: profile.target || {},
+            session: profile.session,
+            credential_refs: profile.credential_refs || [],
+            readiness_probes: profile.readiness_probes || [],
+            observation: profile.observation || {},
+            control: profile.control || {},
+            restart: profile.restart || {},
+        };
+        if (!body.session?.command) throw new Error('session.command is required');
+        return body;
+    }
+
+    async fetchStartupProfiles() {
+        const data = await this.managementJson('/api/v2/startup-profiles/');
+        this.startupProfiles.clear();
+        for (const profile of (data.startup_profiles || [])) this.startupProfiles.set(profile.id, profile);
+        const list = document.getElementById('startup-profile-list');
+        list.replaceChildren();
+        if (!this.startupProfiles.size) list.textContent = 'No startup profiles.';
+        for (const profile of this.startupProfiles.values()) {
+            const button = document.createElement('button');
+            button.type = 'button';
+            const bindings = Number(profile.active_instance_bindings || 0);
+            button.textContent = `${profile.id} · ${profile.status?.state || 'unknown'} · ${profile.trigger} · ${bindings} active binding${bindings === 1 ? '' : 's'}`;
+            button.addEventListener('click', () => this.selectStartupProfile(profile.id));
+            list.append(button);
+        }
+        const selector = document.getElementById('instance-startup-profile');
+        if (selector) {
+            const selected = selector.value;
+            selector.replaceChildren();
+            const none = document.createElement('option'); none.value = ''; none.textContent = 'None'; selector.append(none);
+            for (const profile of this.startupProfiles.values()) {
+                const option = document.createElement('option'); option.value = profile.id;
+                option.textContent = `${profile.id} · ${profile.status?.state || 'unknown'}`;
+                selector.append(option);
+            }
+            if ([...selector.options].some((option) => option.value === selected)) selector.value = selected;
+        }
+    }
+
+    selectStartupProfile(id) {
+        const profile = this.startupProfiles.get(id);
+        if (!profile) return;
+        const activeBindings = Number(profile.active_instance_bindings || 0);
+        const activeExecution = ['launching', 'running'].includes(profile.status?.state);
+        this.selectedStartupProfileId = id;
+        document.getElementById('startup-profile-document').value = JSON.stringify({ id, ...this.startupProfileRequest(profile) }, null, 2);
+        document.getElementById('startup-profile-delete').disabled = activeBindings > 0 || activeExecution;
+        this.reviewedStartupProfile = null;
+        document.getElementById('startup-profile-apply').disabled = true;
+        document.getElementById('startup-profile-preview').textContent = JSON.stringify({
+            selected: id,
+            active_instance_bindings: activeBindings,
+            active_execution: activeExecution,
+            safe_delete: activeBindings === 0 && !activeExecution,
+            instruction: 'Review changes before applying.',
+        }, null, 2);
+    }
+
+    newStartupProfile() {
+        this.selectedStartupProfileId = null;
+        this.reviewedStartupProfile = null;
+        document.getElementById('startup-profile-delete').disabled = true;
+        document.getElementById('startup-profile-apply').disabled = true;
+        document.getElementById('startup-profile-document').value = JSON.stringify({
+            id: '', description: '', trigger: 'on_instance_ready', target: {},
+            session: { command: '', workdir: '/workspace', backend: 'tmux', class: 'managed', cols: 120, rows: 40 },
+            credential_refs: [], readiness_probes: [],
+            observation: { transcript_enabled: true, retention_class: 'standard', redaction_profile: 'default' },
+            control: { default_role: 'observer', controller_allowed: false },
+            restart: { mode: 'never', max_attempts: 0 },
+        }, null, 2);
+        document.getElementById('startup-profile-preview').textContent = 'New profile draft; review before applying.';
+    }
+
+    reviewStartupProfile() {
+        try {
+            const documentValue = JSON.parse(document.getElementById('startup-profile-document').value);
+            const id = String(documentValue.id || '').trim();
+            if (!id && !this.selectedStartupProfileId) throw new Error('id is required for a new profile');
+            const body = this.startupProfileRequest(documentValue);
+            if (!this.selectedStartupProfileId) body.id = id;
+            this.reviewedStartupProfile = {
+                id: this.selectedStartupProfileId || id,
+                body,
+                update: Boolean(this.selectedStartupProfileId),
+                intentKey: ApiClient.newIntentId(),
+            };
+            document.getElementById('startup-profile-preview').textContent = JSON.stringify({
+                id: this.reviewedStartupProfile.id,
+                body: this.reviewedStartupProfile.body,
+                update: this.reviewedStartupProfile.update,
+            }, null, 2);
+            document.getElementById('startup-profile-apply').disabled = false;
+        } catch (error) {
+            this.reviewedStartupProfile = null;
+            document.getElementById('startup-profile-apply').disabled = true;
+            this.showToast(`Profile review failed: ${error.message}`, 'error');
+        }
+    }
+
+    async applyStartupProfile() {
+        const reviewed = this.reviewedStartupProfile;
+        if (!reviewed) return;
+        const path = reviewed.update ? `/api/v2/startup-profiles/${encodeURIComponent(reviewed.id)}` : '/api/v2/startup-profiles/';
+        document.getElementById('startup-profile-apply').disabled = true;
+        await this.trackedMutation(path, {
+            method: reviewed.update ? 'PUT' : 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(reviewed.body),
+            expectJson: true,
+        }, {
+            target: reviewed.id,
+            kind: reviewed.update ? 'config.startup.update' : 'config.startup.create',
+            intentKey: reviewed.intentKey,
+        });
+        this.reviewedStartupProfile = null;
+        await this.fetchStartupProfiles();
+        this.selectStartupProfile(reviewed.id);
+        this.showToast(`Startup profile ${reviewed.id} saved`, 'success');
+    }
+
+    async deleteStartupProfile() {
+        const id = this.selectedStartupProfileId;
+        const profile = this.startupProfiles.get(id);
+        if (!id || !profile) return;
+        if (['launching', 'running'].includes(profile.status?.state)) {
+            this.showToast('A launching or running profile cannot be deleted.', 'error');
+            return;
+        }
+        if (!confirm(`Delete startup profile ${id}? The server will refuse active references.`)) return;
+        await this.trackedMutation(
+            `/api/v2/startup-profiles/${encodeURIComponent(id)}`,
+            { method: 'DELETE' },
+            { target: id, kind: 'config.startup.delete' },
+        );
+        this.newStartupProfile();
+        await this.fetchStartupProfiles();
+    }
+
+    async fetchConfigLoadouts() {
+        const data = await this.managementJson('/api/v2/admin/loadouts');
+        this.configLoadouts = data.items || [];
+        const list = document.getElementById('config-loadout-list');
+        list.replaceChildren();
+        if (!this.configLoadouts.length) list.textContent = 'No loadouts available.';
+        for (const loadout of this.configLoadouts) {
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.textContent = `${loadout.name} · ${loadout.runtime || 'runtime unspecified'}`;
+            button.addEventListener('click', () => {
+                document.getElementById('config-loadout-detail').textContent = JSON.stringify({
+                    description: loadout.description, runtime: loadout.runtime,
+                    runtime_options: loadout.runtime_options, compatibility: loadout.compatibility || [],
+                }, null, 2);
+            });
+            list.append(button);
+        }
+    }
+
+    reviewConfigLoadout() {
+        const name = document.getElementById('config-loadout-name').value.trim();
+        const manifest = document.getElementById('config-loadout-manifest').value;
+        if (!/^[a-z0-9][a-z0-9_-]{0,79}$/.test(name) || !manifest.trim()) {
+            this.showToast('Loadout name and YAML manifest are required.', 'error'); return;
+        }
+        this.reviewedConfigLoadout = { name, manifest, intentKey: ApiClient.newIntentId() };
+        document.getElementById('config-loadout-preview').textContent = JSON.stringify({ name, manifest_bytes: new TextEncoder().encode(manifest).length, effect: 'create catalog entry' }, null, 2);
+        document.getElementById('config-loadout-apply').disabled = false;
+    }
+
+    async applyConfigLoadout() {
+        if (!this.reviewedConfigLoadout) return;
+        const reviewed = this.reviewedConfigLoadout;
+        document.getElementById('config-loadout-apply').disabled = true;
+        await this.trackedMutation('/api/v2/admin/loadouts', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: reviewed.name, manifest: reviewed.manifest }),
+            expectJson: true,
+        }, {
+            target: reviewed.name,
+            kind: 'config.loadout.create',
+            intentKey: reviewed.intentKey,
+        });
+        this.reviewedConfigLoadout = null;
+        await this.fetchConfigLoadouts();
+    }
+
+    normalizedStoragePath() {
+        const path = document.getElementById('storage-path').value.replace(/^\/+|\/+$/g, '');
+        const segments = path.split('/').filter(Boolean);
+        if (!segments.length || segments.some((segment) => segment === '.' || segment === '..')) throw new Error('A bounded path without . or .. segments is required');
+        return segments;
+    }
+
+    storageUrl() {
+        const scope = document.getElementById('storage-scope').value;
+        return `/api/v2/admin/storage/${encodeURIComponent(scope)}/${this.normalizedStoragePath().map(encodeURIComponent).join('/')}`;
+    }
+
+    updateStorageAuthority() {
+        const readOnly = document.getElementById('storage-scope').value === 'global';
+        document.getElementById('storage-authority').textContent = readOnly ? 'Authority: read-only shared storage.' : 'Authority: scoped read/write storage; mutations require review or confirmation.';
+        document.getElementById('storage-review-write').disabled = readOnly;
+        document.getElementById('storage-delete').disabled = readOnly;
+        document.getElementById('storage-apply-write').disabled = readOnly || !this.reviewedStorageWrite;
+        this.renderStorageBreadcrumbs();
+    }
+
+    renderStorageBreadcrumbs() {
+        const holder = document.getElementById('storage-breadcrumbs');
+        holder.replaceChildren();
+        let segments;
+        try { segments = this.normalizedStoragePath(); } catch (_) { return; }
+        segments.forEach((segment, index) => {
+            const button = document.createElement('button');
+            button.type = 'button'; button.className = 'btn'; button.textContent = segment;
+            button.addEventListener('click', () => {
+                document.getElementById('storage-path').value = segments.slice(0, index + 1).join('/');
+                this.readStoragePath();
+            });
+            holder.append(button);
+        });
+    }
+
+    async readStoragePath() {
+        try {
+            const data = await this.managementJson(this.storageUrl());
+            this.storageObjectExists = data.kind !== 'directory';
+            this.reviewedStorageWrite = null;
+            document.getElementById('storage-apply-write').disabled = true;
+            const list = document.getElementById('storage-list'); list.replaceChildren();
+            if (data.kind === 'directory') {
+                for (const item of (data.items || [])) {
+                    const button = document.createElement('button');
+                    button.type = 'button'; button.textContent = `${item.kind === 'directory' ? 'dir' : 'object'} · ${item.name}${item.size_bytes == null ? '' : ` · ${item.size_bytes} B`}`;
+                    button.addEventListener('click', () => {
+                        const base = document.getElementById('storage-path').value.replace(/\/+$/, '');
+                        document.getElementById('storage-path').value = `${base}/${item.name}`;
+                        this.readStoragePath();
+                    });
+                    list.append(button);
+                }
+                if (data.truncated) list.append(`Showing the first ${data.limit} entries.`);
+                document.getElementById('storage-content').value = '';
+            } else {
+                list.textContent = `${data.media_type} · ${data.size_bytes} B · sha256 ${data.sha256}`;
+                document.getElementById('storage-content').value = data.content ?? '[binary content is not editable in this panel]';
+            }
+            this.renderStorageBreadcrumbs();
+        } catch (error) {
+            this.storageObjectExists = false;
+            this.showToast(`Storage read failed: ${error.message}`, 'error');
+        }
+    }
+
+    reviewStorageWrite() {
+        try {
+            const url = this.storageUrl();
+            const content = document.getElementById('storage-content').value;
+            const size = new TextEncoder().encode(content).length;
+            if (size > 1024 * 1024) throw new Error('content exceeds the 1 MiB management limit');
+            this.reviewedStorageWrite = {
+                url,
+                body: { media_type: 'text/plain; charset=utf-8', content },
+                replaces_existing: this.storageObjectExists,
+                size_bytes: size,
+                intentKey: ApiClient.newIntentId(),
+            };
+            document.getElementById('storage-preview').textContent = JSON.stringify({ path: url, size_bytes: size, replaces_existing: this.storageObjectExists }, null, 2);
+            document.getElementById('storage-apply-write').disabled = false;
+        } catch (error) { this.showToast(`Storage review failed: ${error.message}`, 'error'); }
+    }
+
+    async applyStorageWrite() {
+        const reviewed = this.reviewedStorageWrite;
+        if (!reviewed) return;
+        if (reviewed.replaces_existing && !confirm('Replace the existing storage object with the reviewed content?')) return;
+        document.getElementById('storage-apply-write').disabled = true;
+        await this.trackedMutation(reviewed.url, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(reviewed.body),
+            expectJson: true,
+        }, {
+            target: reviewed.url,
+            kind: 'config.storage.write',
+            intentKey: reviewed.intentKey,
+        });
+        this.reviewedStorageWrite = null;
+        await this.readStoragePath();
+    }
+
+    async deleteStorageObject() {
+        let url;
+        try { url = this.storageUrl(); } catch (error) { this.showToast(error.message, 'error'); return; }
+        if (!this.storageObjectExists) { this.showToast('Browse and select an object before deleting.', 'error'); return; }
+        if (!confirm(`Delete ${url}? This action cannot be undone.`)) return;
+        await this.trackedMutation(url, { method: 'DELETE' }, {
+            target: url,
+            kind: 'config.storage.delete',
+        });
+        this.storageObjectExists = false;
+        document.getElementById('storage-content').value = '';
+    }
+
+    async fetchAccelerationProviders() {
+        const data = await this.managementJson('/api/v2/admin/runtime/providers');
+        this.accelerationProviders.clear();
+        for (const provider of (data.providers || [])) this.accelerationProviders.set(provider.id, provider);
+        const select = document.getElementById('acceleration-provider'); select.replaceChildren();
+        for (const provider of this.accelerationProviders.values()) {
+            if (!provider.available) continue;
+            const option = document.createElement('option'); option.value = provider.id; option.textContent = provider.id; select.append(option);
+        }
+        this.renderAccelerationActions();
+    }
+
+    accelerationActions(provider) {
+        const caps = new Set(provider?.capabilities || []);
+        const actions = [];
+        if (caps.has('instance.checkpoint') || caps.has('instance.snapshot')) actions.push(['capture', provider.id === 'libvirt' ? 'Capture checkpoint' : 'Capture snapshot']);
+        if (caps.has('instance.restore')) actions.push(['restore', 'Restore']);
+        if (caps.has('instance.fork')) actions.push(['fork', 'Fork']);
+        if (caps.has('warm_pool.manage')) actions.push(['warm-init', 'Initialize warm pool'], ['warm-handoff', 'Handoff warm slot']);
+        return actions;
+    }
+
+    renderAccelerationActions() {
+        const provider = this.accelerationProviders.get(document.getElementById('acceleration-provider').value);
+        const holder = document.getElementById('acceleration-capabilities'); holder.replaceChildren();
+        for (const candidate of this.accelerationProviders.values()) {
+            if (candidate.available) continue;
+            const tag = document.createElement('span');
+            tag.textContent = `${candidate.id} unavailable · ${candidate.unavailable_reason || candidate.unavailable_code || 'provider readiness was not established'}`;
+            holder.append(tag);
+        }
+        for (const cap of (provider?.capabilities || [])) { const tag = document.createElement('span'); tag.textContent = cap; holder.append(tag); }
+        for (const reason of (provider?.constraints || [])) { const tag = document.createElement('span'); tag.textContent = typeof reason === 'string' ? reason : JSON.stringify(reason); holder.append(tag); }
+        const select = document.getElementById('acceleration-action'); select.replaceChildren();
+        const actions = this.accelerationActions(provider);
+        for (const [value, label] of actions) { const option = document.createElement('option'); option.value = value; option.textContent = label; select.append(option); }
+        this.reviewedAcceleration = null;
+        document.getElementById('acceleration-review').disabled = actions.length === 0;
+        document.getElementById('acceleration-apply').disabled = true;
+    }
+
+    reviewAcceleration() {
+        const provider = document.getElementById('acceleration-provider').value;
+        const action = document.getElementById('acceleration-action').value;
+        const asset = document.getElementById('acceleration-asset').value.trim();
+        const target = document.getElementById('acceleration-target').value.trim();
+        const capacity = Number(document.getElementById('acceleration-capacity').value);
+        if (!this.accelerationActions(this.accelerationProviders.get(provider)).some(([name]) => name === action)) return;
+        if (!asset || !target || !Number.isInteger(capacity) || capacity < 1 || capacity > 64) { this.showToast('Identifier, target, and bounded capacity are required.', 'error'); return; }
+        let path; let body;
+        if (provider === 'cloud-hypervisor') {
+            if (action === 'capture') [path, body] = ['/api/v2/admin/cloud-hypervisor/snapshots', { vm: target, snapshot_id: asset, pre_enrollment: true, secret_bearing: false }];
+            if (action === 'restore') [path, body] = [`/api/v2/admin/cloud-hypervisor/snapshots/${encodeURIComponent(asset)}/restore`, { name: target }];
+            if (action === 'fork') [path, body] = [`/api/v2/admin/cloud-hypervisor/snapshots/${encodeURIComponent(asset)}/fork`, { prefix: target, count: capacity }];
+            if (action === 'warm-init') [path, body] = ['/api/v2/admin/cloud-hypervisor/warm-pools', { snapshot_id: asset, size: capacity, prefix: target }];
+            if (action === 'warm-handoff') [path, body] = [`/api/v2/admin/cloud-hypervisor/warm-pools/${encodeURIComponent(asset)}/handoff`, { name: target }];
+        } else if (provider === 'libvirt') {
+            if (action === 'capture') [path, body] = ['/api/v2/admin/libvirt/checkpoints', { vm: target, checkpoint_id: asset, pre_enrollment: true }];
+            if (action === 'restore') [path, body] = [`/api/v2/admin/libvirt/checkpoints/${encodeURIComponent(asset)}/restore`, { name: target }];
+            if (action === 'warm-init') [path, body] = ['/api/v2/admin/libvirt/warm-pools', { checkpoint_ids: asset.split(',').map((id) => id.trim()).filter(Boolean), pool: target }];
+            if (action === 'warm-handoff') [path, body] = [`/api/v2/admin/libvirt/warm-pools/${encodeURIComponent(asset)}/handoff`, {}];
+        }
+        if (!path) return;
+        const descriptor = this.accelerationProviders.get(provider);
+        const destructiveImplications = {
+            capture: 'Quiesces the selected source while creating a reusable state artifact.',
+            restore: 'Creates or replaces runtime state from the selected artifact; review the target identity.',
+            fork: 'Creates multiple runtime allocations and consumes the reviewed capacity.',
+            'warm-init': 'Allocates the reviewed warm-pool capacity and underlying runtime resources.',
+            'warm-handoff': 'Consumes a prepared slot and transfers it to the reviewed target.',
+        };
+        this.reviewedAcceleration = {
+            provider, action, path, body, capacity, intentKey: ApiClient.newIntentId(),
+            provenance: 'runtime provider capability discovery',
+            compatibility: {
+                available: descriptor?.available === true,
+                capabilities: descriptor?.capabilities || [],
+                constraints: descriptor?.constraints || [],
+            },
+            destructive_implications: destructiveImplications[action],
+        };
+        const { intentKey: _intentKey, ...reviewedForDisplay } = this.reviewedAcceleration;
+        document.getElementById('acceleration-preview').textContent = JSON.stringify(reviewedForDisplay, null, 2);
+        document.getElementById('acceleration-apply').disabled = false;
+    }
+
+    async applyAcceleration() {
+        const reviewed = this.reviewedAcceleration;
+        if (!reviewed || !confirm(`Apply reviewed ${reviewed.action} operation on ${reviewed.provider}?`)) return;
+        document.getElementById('acceleration-apply').disabled = true;
+        await this.trackedMutation(reviewed.path, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(reviewed.body),
+            expectJson: true,
+        }, {
+            kind: `acceleration.${reviewed.action}`,
+            target: reviewed.body.name || reviewed.body.vm || reviewed.body.pool || reviewed.body.prefix,
+            intentKey: reviewed.intentKey,
+        });
+        this.reviewedAcceleration = null;
+    }
+
+    async fetchMcpDiscovery() {
+        const holder = document.getElementById('mcp-discovery');
+        try {
+            const data = await this.managementJson('/api/v2/admin/mcp/discovery');
+            holder.textContent = JSON.stringify({
+                availability: { enabled: data.enabled, status: data.status, reason_code: data.reason_code },
+                endpoint: data.endpoint, protocol: data.protocol, auth_posture: data.auth,
+                capabilities: data.capabilities, tools: data.tools || [], resources: data.resources || [],
+                resource_templates: data.resource_templates || [], errors: data.errors || [], notes: data.notes || [],
+            }, null, 2);
+        } catch (error) { holder.textContent = `MCP discovery unavailable: ${error.message}`; }
+    }
+
+    hasAccessPermission(permission) {
+        return Boolean(this.accessAuthority?.permissions?.includes(permission));
+    }
+
+    accessErrorMessage(error) {
+        if (error.status === 401) return 'Authentication is required.';
+        if (error.status === 403) return 'The authenticated operator lacks authority.';
+        if (error.status === 409) return 'State changed; refresh before trying again.';
+        if (error.status === 429) return `Rate limited${error.retryAfter ? `; retry after ${error.retryAfter} seconds` : ''}.`;
+        if (!error.status) return 'Outcome unknown after a transport failure; inventory will be reconciled without replaying the mutation.';
+        return `Access request failed (HTTP ${error.status}${error.code ? `, ${error.code}` : ''}).`;
+    }
+
+    async fetchAccessAuthority() {
+        await window.ManagementUIReady;
+        const data = await this.managementJson('/api/v2/credentials/authority');
+        if (data.schema_version !== 'management.access-authority/v1' || !Array.isArray(data.permissions)) {
+            throw new Error('unsupported access authority contract');
+        }
+        this.accessAuthority = {
+            schema_version: data.schema_version,
+            mode: String(data.mode || 'unresolved'),
+            actor: data.actor == null ? null : String(data.actor),
+            role: data.role == null ? null : String(data.role),
+            permissions: data.permissions.map(String),
+        };
+        this.setWorkspaceStatus(
+            'access-authority',
+            this.accessAuthority.role ? 'ready' : 'degraded',
+            `Authority: ${this.accessAuthority.mode} · actor ${this.accessAuthority.actor || 'unresolved'} · role ${this.accessAuthority.role || 'none'}`,
+        );
+        this.updateAccessMutationControls();
+    }
+
+    updateAccessMutationControls() {
+        const credentialReview = document.getElementById('credential-lease-review');
+        const sshReview = document.getElementById('ssh-lease-review');
+        if (credentialReview) credentialReview.disabled = !this.hasAccessPermission('credential_lease.issue') || !this.accessCredentials.size;
+        if (sshReview) sshReview.disabled = !this.hasAccessPermission('ssh_lease.issue');
+        const credentialApply = document.getElementById('credential-lease-apply');
+        const sshApply = document.getElementById('ssh-lease-apply');
+        if (credentialApply) credentialApply.disabled = !this.reviewedCredentialLease || !this.hasAccessPermission('credential_lease.issue');
+        if (sshApply) sshApply.disabled = !this.reviewedSshLease || !this.hasAccessPermission('ssh_lease.issue');
+    }
+
+    discardCredentialLeaseReview() {
+        this.reviewedCredentialLease = null;
+        const preview = document.getElementById('credential-lease-preview');
+        if (preview) preview.textContent = 'No lease issuance reviewed.';
+        this.updateAccessMutationControls();
+    }
+
+    discardSshLeaseReview(clearInput = false) {
+        if (this.reviewedSshLease?.body) this.reviewedSshLease.body.public_key = '';
+        this.reviewedSshLease = null;
+        const input = document.getElementById('ssh-lease-public-key');
+        if (clearInput && input) input.value = '';
+        const preview = document.getElementById('ssh-lease-preview');
+        if (preview) preview.textContent = 'No SSH lease issuance reviewed.';
+        this.updateAccessMutationControls();
+    }
+
+    async fetchAccessWorkspace() {
+        this.discardSshLeaseReview(true);
+        this.discardCredentialLeaseReview();
+        this.accessAuthority = null;
+        this.accessCredentials.clear();
+        this.accessCredentialLeases.clear();
+        this.accessSshLeases.clear();
+        this.accessAuditEvents.clear();
+        document.getElementById('credential-list').textContent = 'Credential inventory unavailable until authority resolves.';
+        document.getElementById('credential-lease-list').textContent = 'Credential lease inventory unavailable until authority resolves.';
+        document.getElementById('ssh-lease-list').textContent = 'SSH lease inventory unavailable until authority resolves.';
+        document.getElementById('access-audit-list').textContent = 'Audit evidence unavailable until authority resolves.';
+        document.getElementById('credential-detail').textContent = 'Select a credential definition.';
+        document.getElementById('credential-lease-detail').textContent = 'Select a credential lease for scope and lifecycle metadata.';
+        document.getElementById('ssh-lease-detail').textContent = 'Select an SSH lease for actor, fingerprint, and lifecycle metadata.';
+        document.getElementById('access-audit-detail').textContent = 'Select an audit event.';
+        this.updateAccessMutationControls();
+        this.setWorkspaceStatus('access-authority', 'loading', 'Loading server authority evidence…');
+        try {
+            await this.fetchAccessAuthority();
+        } catch (error) {
+            this.setWorkspaceStatus('access-authority', 'degraded', `Access workspace unavailable: ${this.accessErrorMessage(error)}`);
+            return;
+        }
+        const tasks = [this.fetchAccessCredentials(), this.fetchCredentialLeases(), this.fetchAccessAudit()];
+        if (this.hasAccessPermission('ssh_lease.read')) tasks.push(this.fetchSshLeases());
+        else {
+            this.accessSshLeases.clear();
+            document.getElementById('ssh-lease-list').textContent = 'SSH lease inventory requires authenticated operator identity.';
+        }
+        const results = await Promise.allSettled(tasks);
+        const failures = results.filter((result) => result.status === 'rejected');
+        if (failures.length) {
+            this.setWorkspaceStatus('access-authority', 'degraded', `${this.accessAuthority.role} authority resolved; ${failures.length} metadata sources are unavailable.`);
+        }
+        this.updateAccessMutationControls();
+    }
+
+    credentialMetadata(value) {
+        return window.ManagementUI.projectCredentialMetadata(value);
+    }
+
+    workspaceListFocusKey(list) {
+        return list?.contains(document.activeElement) ? document.activeElement.dataset.focusKey || null : null;
+    }
+
+    restoreWorkspaceListFocus(list, key, fallbackId = 'access-refresh') {
+        if (!key) return;
+        const target = [...list.querySelectorAll('[data-focus-key]')]
+            .find((element) => element.dataset.focusKey === key);
+        (target || document.getElementById(fallbackId))?.focus();
+    }
+
+    credentialLeaseMetadata(value) {
+        return window.ManagementUI.projectCredentialLeaseMetadata(value);
+    }
+
+    sshLeaseMetadata(value) {
+        return window.ManagementUI.projectSshLeaseMetadata(value);
+    }
+
+    async fetchAccessCredentials() {
+        const data = await this.managementJson('/api/v2/credentials/');
+        this.accessCredentials.clear();
+        for (const raw of (data.credentials || [])) {
+            const credential = this.credentialMetadata(raw);
+            this.accessCredentials.set(credential.id, credential);
+        }
+        const list = document.getElementById('credential-list');
+        const focusKey = this.workspaceListFocusKey(list);
+        list.replaceChildren();
+        if (!this.accessCredentials.size) list.textContent = 'No credential definitions.';
+        for (const credential of this.accessCredentials.values()) {
+            const button = document.createElement('button'); button.type = 'button';
+            button.dataset.focusKey = `credential:${credential.id}`;
+            button.textContent = `${credential.id} · ${credential.provider}/${credential.type} · ${credential.configured ? 'configured' : 'not configured'}`;
+            button.addEventListener('click', () => {
+                document.getElementById('credential-detail').textContent = JSON.stringify(credential, null, 2);
+            });
+            list.append(button);
+        }
+        this.restoreWorkspaceListFocus(list, focusKey);
+        const selector = document.getElementById('credential-lease-credential'); selector.replaceChildren();
+        for (const credential of this.accessCredentials.values()) {
+            const option = document.createElement('option'); option.value = credential.id;
+            option.textContent = `${credential.id} · ${credential.provider}`; selector.append(option);
+        }
+        this.updateCredentialLeaseUses();
+        this.updateAccessMutationControls();
+    }
+
+    updateCredentialLeaseUses() {
+        const credential = this.accessCredentials.get(document.getElementById('credential-lease-credential').value);
+        const input = document.getElementById('credential-lease-use');
+        const options = document.getElementById('credential-lease-use-options');
+        options.replaceChildren();
+        for (const use of (credential?.allowed_uses || [])) {
+            const option = document.createElement('option'); option.value = use; options.append(option);
+        }
+        if (credential?.allowed_uses?.length && !credential.allowed_uses.includes(input.value)) {
+            input.value = credential.allowed_uses[0];
+        } else if (!credential?.allowed_uses?.length) {
+            input.value = '';
+        }
+    }
+
+    async fetchCredentialLeases() {
+        const data = await this.managementJson('/api/v2/credentials/leases');
+        this.accessCredentialLeases.clear();
+        for (const raw of (data.leases || [])) {
+            const lease = this.credentialLeaseMetadata(raw);
+            this.accessCredentialLeases.set(lease.id, lease);
+        }
+        const list = document.getElementById('credential-lease-list');
+        const focusKey = this.workspaceListFocusKey(list);
+        list.replaceChildren();
+        if (!this.accessCredentialLeases.size) list.textContent = 'No credential leases.';
+        for (const lease of this.accessCredentialLeases.values()) {
+            const row = document.createElement('div'); row.className = 'workspace-list-item';
+            const detail = document.createElement('button'); detail.type = 'button';
+            detail.dataset.focusKey = `credential-lease:${lease.id}`;
+            detail.textContent = `${lease.id} · ${lease.credential_id} · ${lease.state} · expires ${lease.expires_at}`;
+            detail.addEventListener('click', () => {
+                document.getElementById('credential-lease-detail').textContent = JSON.stringify(lease, null, 2);
+                this.showAccessAuditForResource(lease.id);
+            });
+            const revoke = document.createElement('button'); revoke.type = 'button'; revoke.textContent = 'Revoke';
+            revoke.dataset.focusKey = `credential-lease-revoke:${lease.id}`;
+            revoke.disabled = lease.state !== 'active' || !this.hasAccessPermission('credential_lease.revoke');
+            revoke.addEventListener('click', () => this.revokeCredentialLease(lease));
+            row.append(detail, revoke); list.append(row);
+        }
+        this.restoreWorkspaceListFocus(list, focusKey);
+    }
+
+    reviewCredentialLease() {
+        const credential = this.accessCredentials.get(document.getElementById('credential-lease-credential').value);
+        const ttl = Number(document.getElementById('credential-lease-ttl').value);
+        const body = {
+            agent_id: document.getElementById('credential-lease-agent').value.trim(),
+            instance_id: document.getElementById('credential-lease-instance').value.trim(),
+            session_id: document.getElementById('credential-lease-session').value.trim(),
+            provider: credential?.provider,
+            allowed_use: document.getElementById('credential-lease-use').value,
+            ttl_seconds: ttl,
+        };
+        if (!credential || Object.values(body).some((value) => value == null || value === '')
+            || (credential.allowed_uses.length > 0 && !credential.allowed_uses.includes(body.allowed_use))
+            || !Number.isInteger(ttl) || ttl < 1 || ttl > 3600) {
+            this.showToast('Credential, complete scope, allowed use, and TTL from 1 to 3600 seconds are required.', 'error'); return;
+        }
+        this.reviewedCredentialLease = {
+            credential_id: credential.id,
+            target: `${body.instance_id}/${body.session_id}`,
+            impact: `grants ${body.allowed_use} access through ${body.provider} for ${ttl} seconds`,
+            body,
+        };
+        document.getElementById('credential-lease-preview').textContent = JSON.stringify(this.reviewedCredentialLease, null, 2);
+        this.updateAccessMutationControls();
+    }
+
+    async applyCredentialLease() {
+        const reviewed = this.reviewedCredentialLease;
+        if (!reviewed) return;
+        try {
+            await this.managementJson(`/api/v2/credentials/${window.ManagementUI.encodedAccessPathSegment(reviewed.credential_id)}/leases`, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(reviewed.body),
+            });
+            this.showToast(`Credential lease issued for ${reviewed.body.instance_id}`, 'success');
+        } catch (error) {
+            this.setWorkspaceStatus('access-authority', 'degraded', this.accessErrorMessage(error));
+        } finally {
+            this.reviewedCredentialLease = null; this.updateAccessMutationControls();
+            await this.fetchCredentialLeases().catch(() => {});
+            await this.fetchAccessAudit().catch(() => {});
+        }
+    }
+
+    async revokeCredentialLease(lease) {
+        if (!confirm(`Revoke credential lease ${lease.id} for ${lease.instance_id}/${lease.session_id}?`)) return;
+        try {
+            await this.managementJson(`/api/v2/credentials/leases/${window.ManagementUI.encodedAccessPathSegment(lease.id)}`, { method: 'DELETE' });
+        } catch (error) {
+            this.setWorkspaceStatus('access-authority', 'degraded', this.accessErrorMessage(error));
+        } finally {
+            await this.fetchCredentialLeases().catch(() => {});
+            await this.fetchAccessAudit().catch(() => {});
+        }
+    }
+
+    async fetchSshLeases() {
+        const data = await this.managementJson('/api/v2/gateway/ssh/leases');
+        this.accessSshLeases.clear();
+        for (const raw of (data.leases || [])) {
+            const lease = this.sshLeaseMetadata(raw);
+            this.accessSshLeases.set(lease.id, lease);
+        }
+        const list = document.getElementById('ssh-lease-list');
+        const focusKey = this.workspaceListFocusKey(list);
+        list.replaceChildren();
+        if (!this.accessSshLeases.size) list.textContent = 'No gateway SSH leases.';
+        for (const lease of this.accessSshLeases.values()) {
+            const row = document.createElement('div'); row.className = 'workspace-list-item';
+            const detail = document.createElement('button'); detail.type = 'button';
+            detail.dataset.focusKey = `ssh-lease:${lease.id}`;
+            detail.textContent = `${lease.id} · ${lease.instance_id}/${lease.principal} · ${lease.state} · expires ${lease.expires_at}`;
+            detail.addEventListener('click', () => {
+                document.getElementById('ssh-lease-detail').textContent = JSON.stringify(lease, null, 2);
+                this.showAccessAuditForResource(lease.id);
+            });
+            const revoke = document.createElement('button'); revoke.type = 'button'; revoke.textContent = 'Revoke';
+            revoke.dataset.focusKey = `ssh-lease-revoke:${lease.id}`;
+            revoke.disabled = lease.state !== 'active' || !this.hasAccessPermission('ssh_lease.revoke');
+            revoke.addEventListener('click', () => this.revokeSshLease(lease));
+            row.append(detail, revoke); list.append(row);
+        }
+        this.restoreWorkspaceListFocus(list, focusKey);
+    }
+
+    reviewSshLease() {
+        const publicKey = document.getElementById('ssh-lease-public-key').value.trim();
+        const ttl = Number(document.getElementById('ssh-lease-ttl').value);
+        const body = {
+            actor: this.accessAuthority?.actor || '',
+            instance_id: document.getElementById('ssh-lease-instance').value.trim(),
+            principal: document.getElementById('ssh-lease-principal').value.trim(),
+            access_mode: document.getElementById('ssh-lease-mode').value,
+            public_key: publicKey,
+            ttl_seconds: ttl,
+        };
+        if (!body.instance_id || !/^[a-zA-Z0-9._-]{1,64}$/.test(body.principal)
+            || !publicKey.startsWith('ssh-') || publicKey.length > 16384
+            || !Number.isInteger(ttl) || ttl < 1 || ttl > 3600) {
+            this.showToast('Instance, valid principal, bounded OpenSSH public key, and TTL from 1 to 3600 seconds are required.', 'error'); return;
+        }
+        this.reviewedSshLease = { body };
+        document.getElementById('ssh-lease-preview').textContent = JSON.stringify({
+            actor: body.actor, instance_id: body.instance_id, principal: body.principal,
+            access_mode: body.access_mode, ttl_seconds: body.ttl_seconds,
+            target: `${body.principal}@${body.instance_id}`,
+            impact: `grants gateway SSH access for ${ttl} seconds; revocation cannot invalidate an already issued certificate before expiry`,
+            public_key_posture: `write-only request field (${publicKey.length} characters)`,
+        }, null, 2);
+        this.updateAccessMutationControls();
+    }
+
+    async applySshLease() {
+        const reviewed = this.reviewedSshLease;
+        if (!reviewed) return;
+        try {
+            const raw = await this.managementJson('/api/v2/gateway/ssh/leases', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(reviewed.body),
+            });
+            const safe = this.sshLeaseMetadata(raw);
+            this.showToast(`SSH lease ${safe.id} issued; certificate content is intentionally not displayed or retained.`, 'success');
+        } catch (error) {
+            this.setWorkspaceStatus('access-authority', 'degraded', this.accessErrorMessage(error));
+        } finally {
+            reviewed.body.public_key = '';
+            document.getElementById('ssh-lease-public-key').value = '';
+            this.reviewedSshLease = null; this.updateAccessMutationControls();
+            await this.fetchSshLeases().catch(() => {});
+            await this.fetchAccessAudit().catch(() => {});
+        }
+    }
+
+    async revokeSshLease(lease) {
+        if (!confirm(`Revoke SSH lease ${lease.id} for ${lease.instance_id}/${lease.principal}? Existing certificates remain valid until expiry.`)) return;
+        try {
+            await this.managementJson(`/api/v2/gateway/ssh/leases/${window.ManagementUI.encodedAccessPathSegment(lease.id)}`, { method: 'DELETE' });
+        } catch (error) {
+            this.setWorkspaceStatus('access-authority', 'degraded', this.accessErrorMessage(error));
+        } finally {
+            await this.fetchSshLeases().catch(() => {});
+            await this.fetchAccessAudit().catch(() => {});
+        }
+    }
+
+    async fetchAccessAudit() {
+        const dateInput = document.getElementById('access-audit-date');
+        if (!dateInput.value) dateInput.value = new Date().toISOString().slice(0, 10);
+        const data = await this.managementJson(`/api/v2/credentials/audit?date=${encodeURIComponent(dateInput.value)}`);
+        const list = document.getElementById('access-audit-list');
+        const focusKey = this.workspaceListFocusKey(list);
+        list.replaceChildren();
+        this.accessAuditEvents.clear();
+        if (!data.available) {
+            list.textContent = data.reason || 'Audit evidence unavailable.';
+            this.restoreWorkspaceListFocus(list, focusKey, 'access-audit-refresh');
+            return;
+        }
+        for (const raw of (data.events || [])) {
+            const event = window.ManagementUI.projectAccessAuditMetadata(raw);
+            this.accessAuditEvents.set(event.id, event);
+            const button = document.createElement('button'); button.type = 'button';
+            button.dataset.focusKey = `audit:${event.id}`;
+            button.textContent = `${event.timestamp} · ${event.action} · ${event.outcome} · ${event.resource}`;
+            button.addEventListener('click', () => { document.getElementById('access-audit-detail').textContent = JSON.stringify(event, null, 2); });
+            list.append(button);
+        }
+        this.restoreWorkspaceListFocus(list, focusKey, 'access-audit-refresh');
+        if (!this.accessAuditEvents.size) list.textContent = 'No access audit evidence for this date.';
+    }
+
+    showAccessAuditForResource(resource) {
+        const matches = [...this.accessAuditEvents.values()].filter((event) => event.resource === resource || event.correlation_id === resource);
+        document.getElementById('access-audit-detail').textContent = matches.length
+            ? JSON.stringify(matches, null, 2)
+            : `No loaded audit evidence for ${resource}; refresh the current date or inspect another date.`;
+    }
+
+    setWorkspaceStatus(id, state, message) {
+        const status = document.getElementById(id);
+        if (!status) return;
+        window.ManagementUI.renderWorkspaceStatus(status, state, message);
+    }
+
+    async fetchFleetInventory() {
+        this.setWorkspaceStatus('fleet-status', 'loading', 'Loading durable fleet inventory…');
+        try {
+            const response = (await ApiClient.request('/api/v2/fleet/workloads')).response;
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            const inventory = await response.json();
+            if (inventory.api_version !== 'agentic-orchestration/v1' || !Array.isArray(inventory.records)) {
+                throw new Error('unsupported fleet inventory contract');
+            }
+            this.fleetWorkloads.clear();
+            for (const record of inventory.records) {
+                const id = record?.lineage?.child_id;
+                if (id) this.fleetWorkloads.set(String(id), record);
+            }
+            this.fleetInventoryRevision = inventory.inventory_revision;
+            this.reviewedFleetReconcile = null;
+            const apply = document.getElementById('fleet-apply-reconcile');
+            if (apply) apply.disabled = true;
+            this.renderFleetInventory();
+            this.setWorkspaceStatus(
+                'fleet-status',
+                'ready',
+                `${this.fleetWorkloads.size} durable workloads · revision ${inventory.inventory_revision} · generated ${inventory.generated_at}`,
+            );
+        } catch (error) {
+            this.setWorkspaceStatus('fleet-status', 'degraded', `Fleet inventory unavailable (${error.message}).`);
+        }
+    }
+
+    renderFleetInventory() {
+        const list = document.getElementById('fleet-list');
+        if (!list) return;
+        list.replaceChildren();
+        if (!this.fleetWorkloads.size) {
+            const empty = document.createElement('p');
+            empty.textContent = 'No durable workloads are present.';
+            list.append(empty);
+            return;
+        }
+        for (const [id, record] of this.fleetWorkloads) {
+            const row = document.createElement('label');
+            row.className = 'workspace-list-item';
+            const selected = document.createElement('input');
+            selected.type = 'checkbox';
+            selected.dataset.fleetChild = id;
+            const summary = document.createElement('button');
+            summary.type = 'button';
+            summary.className = 'activity-link';
+            summary.textContent = `${id} · ${record.kind || 'unknown'} · ${record.status?.observed_state || 'unknown'} · r${record.status?.revision ?? '?'}`;
+            summary.addEventListener('click', () => this.renderFleetDetail(record));
+            row.append(selected, summary);
+            list.append(row);
+        }
+    }
+
+    appendDefinition(list, label, value) {
+        const term = document.createElement('dt');
+        term.textContent = label;
+        const detail = document.createElement('dd');
+        detail.textContent = value == null || value === ''
+            ? 'not reported'
+            : (typeof value === 'string' ? value : JSON.stringify(value));
+        list.append(term, detail);
+    }
+
+    renderFleetDetail(record) {
+        const detail = document.getElementById('fleet-detail');
+        if (!detail) return;
+        const lineage = record.lineage || {};
+        const status = record.status || {};
+        const spec = record.spec || {};
+        const values = document.createElement('dl');
+        for (const [label, value] of [
+            ['Child', lineage.child_id], ['Parent', lineage.parent_id], ['Mission', lineage.mission_id],
+            ['Dispatch', lineage.dispatch_id], ['Idempotency key', lineage.idempotency_key],
+            ['Idempotency outcome', 'durable admission recorded; replay outcome unavailable in inventory'],
+            ['Target', lineage.target_id], ['Executor', lineage.executor_id], ['Runtime', lineage.runtime_id],
+            ['Session', lineage.session_id], ['Task', lineage.task_id], ['Command', lineage.command_id],
+            ['Desired state', spec.desired_state], ['Observed state', status.observed_state],
+            ['Attested state', status.attested_state || 'not reported by the workload contract'],
+            ['Revision', status.revision], ['Last observation', status.last_seen], ['Health', status.health],
+            ['Backpressure', status.backpressure], ['Artifacts', status.artifacts],
+            ['Exit classification', status.exit_classification], ['Error code', status.error_code],
+        ]) this.appendDefinition(values, label, value);
+        const evidence = document.createElement('button');
+        evidence.type = 'button';
+        evidence.className = 'btn';
+        evidence.textContent = 'Open correlated activity evidence';
+        evidence.addEventListener('click', () => this.openActivityEvidence({
+            instanceId: lineage.target_id,
+            agentId: lineage.executor_id,
+            sessionId: lineage.session_id,
+        }));
+        detail.replaceChildren(values, evidence);
+    }
+
+    previewFleetReconcile() {
+        const childIds = [...document.querySelectorAll('[data-fleet-child]:checked')]
+            .map((input) => input.dataset.fleetChild);
+        if (!childIds.length || this.fleetInventoryRevision == null) {
+            this.showToast('Select at least one workload from a loaded inventory', 'error');
+            return;
+        }
+        this.reviewedFleetReconcile = {
+            before_revision: this.fleetInventoryRevision,
+            child_ids: childIds,
+        };
+        document.getElementById('fleet-reconcile-preview').textContent = JSON.stringify(this.reviewedFleetReconcile, null, 2);
+        document.getElementById('fleet-apply-reconcile').disabled = false;
+    }
+
+    async applyFleetReconcile() {
+        const plan = this.reviewedFleetReconcile;
+        if (!plan || plan.before_revision !== this.fleetInventoryRevision) {
+            this.showToast('The fleet reconciliation plan is missing or stale; preview it again', 'error');
+            return;
+        }
+        const apply = document.getElementById('fleet-apply-reconcile');
+        apply.disabled = true;
+        const intentKey = ApiClient.newIntentId();
+        const retryRequest = {
+            path: '/api/v2/fleet/reconcile',
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(plan),
+        };
+        const pendingIntentId = this.trackPendingMutationIntent({
+            intentKey,
+            target: 'fleet',
+            kind: 'fleet.reconcile',
+            retryRequest,
+        });
+        try {
+            const outcome = await this.managementRequest('/api/v2/fleet/reconcile', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: retryRequest.body,
+                idempotencyKey: intentKey,
+                owner: 'fleet-reconcile',
+            });
+            if (outcome.kind === 'accepted') {
+                const operation = this.trackCanonicalOperation({
+                    ...(outcome.body || {}),
+                    operation_id: outcome.operationId,
+                    trace_id: outcome.traceId,
+                    request_id: outcome.requestId,
+                    idempotency_replayed: outcome.idempotencyReplayed,
+                }, {
+                    target: 'fleet', kind: 'fleet.reconcile', intentKey,
+                    retryRequest,
+                });
+                this.clearPendingMutationIntent(pendingIntentId);
+                this.renderJsonResult('fleet-reconcile-result', {
+                    evidence_completeness: 'bounded to durable fleet inventory and operation result',
+                    operation,
+                });
+            } else {
+                this.clearPendingMutationIntent(pendingIntentId);
+                this.renderJsonResult('fleet-reconcile-result', {
+                    evidence_completeness: 'bounded to durable fleet inventory',
+                    operation_model: 'synchronous compatibility response',
+                    ...(outcome.body || {}),
+                });
+            }
+            await this.fetchFleetInventory();
+        } catch (error) {
+            const unknown = error instanceof UnknownMutationOutcomeError;
+            if (unknown) {
+                this.promotePendingMutationIntent(pendingIntentId, error);
+            } else {
+                this.clearPendingMutationIntent(pendingIntentId);
+            }
+            const currentRevision = error.outcome?.problem?.current_revision;
+            this.setWorkspaceStatus('fleet-status', 'degraded', unknown
+                ? 'Reconciliation response was lost. Outcome is unknown; refreshing inventory for scoped reconciliation.'
+                : error.status === 409
+                    ? `Reconciliation revision conflict; current revision is ${currentRevision ?? 'unknown'}. Refresh and review again.`
+                    : `Fleet reconciliation failed (${error.message}).`);
+            await this.fetchFleetInventory();
+        } finally {
+            this.reviewedFleetReconcile = null;
+        }
+    }
+
+    renderJsonResult(id, value) {
+        const target = document.getElementById(id);
+        if (target) target.textContent = JSON.stringify(value, null, 2);
+    }
+
+    async fetchCelldStatus() {
+        try {
+            const response = (await ApiClient.request('/api/v2/celld/status')).response;
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            const body = await response.json();
+            const status = body.status || {};
+            if (body.schema_version !== 'management.celld-capabilities/v1' || !Array.isArray(body.capabilities)) {
+                throw new Error('unsupported Celld capability discovery contract');
+            }
+            this.celldCapabilities = new Set(body.capabilities.map(String));
+            this.reviewedCelldCommand = null;
+            this.reviewedCelldReconcile = null;
+            document.getElementById('celld-apply-command').disabled = true;
+            document.getElementById('celld-apply-reconcile').disabled = true;
+            this.renderCelldCapabilities(status);
+            this.setWorkspaceStatus(
+                'celld-status',
+                status.enabled && status.configured ? 'ready' : 'degraded',
+                `${status.enabled ? 'enabled' : 'disabled'} · ${status.configured ? 'configured' : 'not configured'} · protocol ${status.protocol_version || 'unknown'} · ${status.security_posture || 'security posture unknown'}${body.configuration_error ? ` · ${body.configuration_error}` : ''}`,
+            );
+        } catch (error) {
+            this.celldCapabilities.clear();
+            this.renderCelldCapabilities({});
+            this.setWorkspaceStatus('celld-status', 'degraded', `Celld capability discovery unavailable (${error.message}).`);
+        }
+    }
+
+    renderCelldCapabilities(status) {
+        const list = document.getElementById('celld-capabilities');
+        if (!list) return;
+        list.replaceChildren();
+        for (const capability of this.celldCapabilities) {
+            const chip = document.createElement('span');
+            chip.textContent = capability;
+            list.append(chip);
+        }
+        if (!this.celldCapabilities.size) {
+            const chip = document.createElement('span');
+            chip.textContent = 'No capabilities discovered';
+            list.append(chip);
+        }
+        for (const [id, capability] of [
+            ['celld-get-cell', 'cell.read'],
+            ['celld-preview-command', 'cell.command'],
+            ['celld-preview-reconcile', 'cell.reconcile'],
+        ]) {
+            const button = document.getElementById(id);
+            if (button) {
+                button.disabled = !this.celldCapabilities.has(capability);
+                button.title = this.celldCapabilities.has(capability)
+                    ? ''
+                    : `Server did not advertise ${capability}`;
+            }
+        }
+    }
+
+    celldIdentity() {
+        return {
+            instance: document.getElementById('celld-instance')?.value.trim() || '',
+            generation: Number(document.getElementById('celld-generation')?.value),
+        };
+    }
+
+    async fetchCelldCell(identity = this.celldIdentity()) {
+        if (!identity.instance || !Number.isInteger(identity.generation) || identity.generation < 1) {
+            this.showToast('A valid instance and generation are required', 'error');
+            return;
+        }
+        try {
+            const response = (await ApiClient.request(`/api/v2/celld/cells/${encodeURIComponent(identity.instance)}?generation=${identity.generation}`)).response;
+            const body = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(body.error?.detail || `HTTP ${response.status}`);
+            this.reconcileCelldCommandOperations(body);
+            this.recordCelldResult('cell detail', {
+                evidence_completeness: body.effects || body.history ? 'provider-reported effect/history evidence' : 'effect and recovery history not reported',
+                ...body,
+            }, 'celld-cell-result');
+        } catch (error) {
+            this.recordCelldResult('cell detail failed', { error: error.message }, 'celld-cell-result');
+        }
+    }
+
+    celldEffectOperationState(status) {
+        if (status === 'succeeded') return 'succeeded';
+        if (['failed', 'rejected'].includes(status)) return 'failed';
+        if (['pending', 'dispatched'].includes(status)) return 'running';
+        return 'unknown';
+    }
+
+    reconcileCelldCommandOperations(cell) {
+        if (!Array.isArray(cell?.effects)) return;
+        let changed = false;
+        for (const [id, operation] of this.operations) {
+            if (operation.kind !== 'celld.command' || operation.target !== cell.instance_id) continue;
+            const effect = cell.effects.find((candidate) =>
+                candidate?.operation_id === operation.intent_key
+                || candidate?.operation_id === String(id).replace(/^(?:unknown:|celld-command:)/, ''));
+            if (!effect) continue;
+            const state = this.celldEffectOperationState(effect.status);
+            const terminal = ['succeeded', 'failed'].includes(state);
+            this.operations.set(id, {
+                ...operation,
+                state,
+                completed_at: terminal ? (effect.completed_at || cell.updated_at || new Date().toISOString()) : null,
+                progress: terminal
+                    ? { percent: 100, phase: `effect ledger ${effect.status}` }
+                    : { percent: effect.status === 'dispatched' ? 50 : 10, phase: `effect ledger ${effect.status}` },
+                result: terminal ? { effect, cell_updated_at: cell.updated_at } : operation.result,
+                reconciliation_evidence: {
+                    checked_at: new Date().toISOString(),
+                    source: 'scoped Celld cell detail',
+                    effect_status: effect.status,
+                    generation: cell.generation,
+                },
+            });
+            changed = true;
+        }
+        if (changed) {
+            this.persistTrackedOperations();
+            this.renderOperations();
+        }
+    }
+
+    async reconcileCelldOperation(operation) {
+        const instanceId = operation?.target;
+        let generation = Number(operation?.reconciliation_before?.generation);
+        if (!Number.isInteger(generation) && operation?.retry_request?.body) {
+            try { generation = Number(JSON.parse(operation.retry_request.body).generation); } catch (_) {}
+        }
+        if (!instanceId || !Number.isInteger(generation) || generation < 1) {
+            this.showToast('This Celld operation lacks a scoped generation for reconciliation.', 'error');
+            return;
+        }
+        try {
+            const outcome = await this.managementRequest(
+                `/api/v2/celld/cells/${encodeURIComponent(instanceId)}?generation=${generation}`,
+                { owner: `celld-operation:${operation.id}`, expectJson: true },
+            );
+            this.reconcileCelldCommandOperations(outcome.body);
+            this.recordCelldResult('operation reconciliation', {
+                operation_id: operation.id,
+                evidence_completeness: outcome.body?.effects || outcome.body?.history
+                    ? 'provider-reported effect/history evidence'
+                    : 'effect and recovery history not reported',
+                cell: outcome.body,
+            }, 'celld-cell-result');
+        } catch (error) {
+            this.showToast(`Celld operation reconciliation failed: ${error.message}`, 'error');
+        }
+    }
+
+    previewCelldReconcile() {
+        const identity = this.celldIdentity();
+        if (!identity.instance || !Number.isInteger(identity.generation) || identity.generation < 1) return;
+        this.reviewedCelldReconcile = {
+            management_generation: identity.generation,
+            instance_id: identity.instance,
+            intentKey: ApiClient.newIntentId(),
+        };
+        this.renderJsonResult('celld-cell-result', {
+            review_required: true,
+            action: 'reconcile',
+            management_generation: identity.generation,
+            instance_id: identity.instance,
+        });
+        document.getElementById('celld-apply-reconcile').disabled = false;
+    }
+
+    async applyCelldReconcile() {
+        const plan = this.reviewedCelldReconcile;
+        if (!plan || !this.celldCapabilities.has('cell.reconcile')) return;
+        document.getElementById('celld-apply-reconcile').disabled = true;
+        const path = `/api/v2/celld/cells/${encodeURIComponent(plan.instance_id)}/reconcile`;
+        const body = JSON.stringify({ management_generation: plan.management_generation });
+        const pendingIntentId = this.trackPendingMutationIntent({
+            intentKey: plan.intentKey,
+            target: plan.instance_id,
+            kind: 'celld.reconcile',
+            retryRequest: null,
+            pollable: false,
+            reconciliationBefore: { generation: plan.management_generation },
+        });
+        try {
+            const outcome = await this.managementRequest(path, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body,
+                expectJson: true,
+                idempotencyKey: plan.intentKey,
+                owner: `celld-reconcile:${plan.instance_id}`,
+            });
+            this.clearPendingMutationIntent(pendingIntentId);
+            this.trackCanonicalOperation({
+                id: `celld-reconcile:${plan.intentKey}`,
+                kind: 'celld.reconcile',
+                state: 'succeeded',
+                target: plan.instance_id,
+                created_at: new Date().toISOString(),
+                completed_at: new Date().toISOString(),
+                progress: { percent: 100, phase: 'provider reconciliation returned' },
+                result: outcome.body,
+                request_id: outcome.requestId,
+                trace_id: outcome.traceId,
+            }, {
+                pollable: false,
+                reconciliationBefore: { generation: plan.management_generation },
+            });
+            this.recordCelldResult('cell reconcile', outcome.body, 'celld-cell-result');
+        } catch (error) {
+            if (error instanceof UnknownMutationOutcomeError) {
+                this.promotePendingMutationIntent(pendingIntentId, error);
+            } else {
+                this.clearPendingMutationIntent(pendingIntentId);
+            }
+            this.recordCelldResult(
+                error instanceof UnknownMutationOutcomeError ? 'cell reconcile outcome unknown' : 'cell reconcile failed',
+                { error: error.message, retry_allowed: false },
+                'celld-cell-result',
+            );
+            await this.fetchCelldCell({
+                instance: plan.instance_id,
+                generation: plan.management_generation,
+            });
+        } finally {
+            this.reviewedCelldReconcile = null;
+        }
+    }
+
+    parseReviewDocument(id) {
+        const text = document.getElementById(id)?.value || '';
+        const value = JSON.parse(text);
+        if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('review document must be a JSON object');
+        return value;
+    }
+
+    previewCelldCommand() {
+        try {
+            const command = this.parseReviewDocument('celld-command');
+            const identity = this.celldIdentity();
+            const valid = command.document_type === 'instance-cell-command'
+                && command.schema_version === '1'
+                && command.instance_id === identity.instance
+                && command.generation === identity.generation
+                && command.operation_id && command.request_hash && command.action;
+            if (!valid) throw new Error('command identity/version fields do not bind the selected cell');
+            this.reviewedCelldCommand = command;
+            this.renderJsonResult('celld-cell-result', { review_required: true, command });
+            document.getElementById('celld-apply-command').disabled = false;
+        } catch (error) {
+            this.reviewedCelldCommand = null;
+            document.getElementById('celld-apply-command').disabled = true;
+            this.renderJsonResult('celld-cell-result', { valid: false, error: error.message });
+        }
+    }
+
+    async applyCelldCommand() {
+        const command = this.reviewedCelldCommand;
+        if (!command || !this.celldCapabilities.has('cell.command')) return;
+        document.getElementById('celld-apply-command').disabled = true;
+        const path = `/api/v2/celld/cells/${encodeURIComponent(command.instance_id)}/commands`;
+        const requestBody = JSON.stringify(command);
+        const pendingIntentId = this.trackPendingMutationIntent({
+            intentKey: command.operation_id,
+            target: command.instance_id,
+            kind: 'celld.command',
+            retryRequest: {
+                path,
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: requestBody,
+            },
+            pollable: false,
+            reconciliationBefore: { generation: command.generation },
+        });
+        try {
+            const outcome = await this.managementRequest(path, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: requestBody,
+                expectJson: true,
+                idempotencyKey: command.operation_id,
+                owner: `celld-command:${command.operation_id}`,
+            });
+            this.clearPendingMutationIntent(pendingIntentId);
+            const effect = (outcome.body?.effects || []).find((candidate) =>
+                candidate?.operation_id === command.operation_id);
+            const operationState = this.celldEffectOperationState(effect?.status);
+            const terminal = ['succeeded', 'failed'].includes(operationState);
+            this.trackCanonicalOperation({
+                id: `celld-command:${command.operation_id}`,
+                kind: 'celld.command',
+                state: operationState,
+                target: command.instance_id,
+                created_at: new Date().toISOString(),
+                completed_at: terminal ? new Date().toISOString() : null,
+                progress: terminal
+                    ? { percent: 100, phase: `effect ledger ${effect.status}` }
+                    : { percent: effect?.status === 'dispatched' ? 50 : 10, phase: `effect ledger ${effect?.status || 'not reported'}` },
+                result: terminal ? outcome.body : null,
+                request_id: outcome.requestId,
+                trace_id: outcome.traceId,
+            }, {
+                intentKey: command.operation_id,
+                pollable: false,
+                reconciliationBefore: { generation: command.generation },
+            });
+            this.recordCelldResult('cell command', outcome.body, 'celld-cell-result');
+        } catch (error) {
+            if (error instanceof UnknownMutationOutcomeError) {
+                this.promotePendingMutationIntent(pendingIntentId, error);
+            } else {
+                this.clearPendingMutationIntent(pendingIntentId);
+            }
+            this.recordCelldResult(
+                error instanceof UnknownMutationOutcomeError ? 'cell command outcome unknown' : 'cell command failed',
+                { error: error.message, retry_allowed: error instanceof UnknownMutationOutcomeError },
+                'celld-cell-result',
+            );
+            await this.fetchCelldCell({
+                instance: command.instance_id,
+                generation: command.generation,
+            });
+        } finally {
+            this.reviewedCelldCommand = null;
+        }
+    }
+
+    async runCelldReview(kind) {
+        const routes = {
+            bundle: '/api/v2/celld/bundles/validate', fleet: '/api/v2/celld/fleets/validate',
+            preflight: '/api/v2/celld/fleets/preflight', diagnose: '/api/v2/celld/fleets/diagnose',
+        };
+        const capabilities = {
+            bundle: 'bundle.validate', fleet: 'fleet.validate',
+            preflight: 'fleet.preflight', diagnose: 'fleet.diagnose',
+        };
+        if (!routes[kind] || !this.celldCapabilities.has(capabilities[kind])) return;
+        try {
+            const document = this.parseReviewDocument('celld-review-document');
+            const response = (await ApiClient.request(routes[kind], {
+                method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(document),
+            })).response;
+            const body = await response.json().catch(() => ({}));
+            this.recordCelldResult(`${kind} review`, {
+                mutating: false,
+                accepted: response.ok,
+                evidence_completeness: kind === 'diagnose' ? (body.live_qualification ? 'live' : 'fixture/local only') : 'contract validation only',
+                ...body,
+            }, 'celld-review-result');
+        } catch (error) {
+            this.recordCelldResult(`${kind} review failed`, { mutating: false, error: error.message }, 'celld-review-result');
+        }
+    }
+
+    async planCelldUpgrade() {
+        if (!this.celldCapabilities.has('fleet.plan-upgrade')) return;
+        try {
+            const manifest = this.parseReviewDocument('celld-review-document');
+            const from = document.getElementById('celld-upgrade-from')?.value.trim();
+            const to = document.getElementById('celld-upgrade-to')?.value.trim();
+            const response = (await ApiClient.request('/api/v2/celld/fleets/plan-upgrade', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ manifest, from, to }),
+            })).response;
+            const body = await response.json().catch(() => ({}));
+            this.recordCelldResult('upgrade plan review', { accepted: response.ok, ...body }, 'celld-review-result');
+            document.getElementById('celld-cancel-plan').disabled = !response.ok;
+        } catch (error) {
+            this.recordCelldResult('upgrade plan rejected', { error: error.message }, 'celld-review-result');
+        }
+    }
+
+    cancelCelldPlan() {
+        document.getElementById('celld-cancel-plan').disabled = true;
+        this.recordCelldResult('upgrade plan cancelled', { mutating: false, cancelled: true }, 'celld-review-result');
+    }
+
+    recordCelldResult(kind, evidence, target) {
+        this.celldHistory.unshift({ kind, observed_at: new Date().toISOString(), evidence });
+        this.celldHistory = this.celldHistory.slice(0, 25);
+        this.renderJsonResult(target, { latest: this.celldHistory[0], recovery_history: this.celldHistory });
+    }
+
+    // =========================================================================
     // Log Sidebar
     // =========================================================================
 
@@ -4123,17 +5835,24 @@ class AgenticDashboard {
         const tabs = sidebar.querySelectorAll('.tab-btn');
         const filterSelect = document.getElementById('event-filter');
         const clearBtn = document.getElementById('clear-events');
+        const reconcileEventsBtn = document.getElementById('reconcile-events');
         const autoScrollCheckbox = document.getElementById('auto-scroll');
 
         // Toggle sidebar
         toggle.addEventListener('click', () => {
             sidebar.classList.toggle('collapsed');
+            toggle.setAttribute('aria-expanded', sidebar.classList.contains('collapsed') ? 'false' : 'true');
         });
 
         // Tab switching
         tabs.forEach(tab => {
             tab.addEventListener('click', () => {
-                tabs.forEach(t => t.classList.remove('active'));
+                tabs.forEach(t => {
+                    const active = t === tab;
+                    t.classList.toggle('active', active);
+                    t.setAttribute('aria-selected', active ? 'true' : 'false');
+                    t.tabIndex = active ? 0 : -1;
+                });
                 tab.classList.add('active');
 
                 const panels = sidebar.querySelectorAll('.log-panel');
@@ -4141,6 +5860,19 @@ class AgenticDashboard {
 
                 const targetPanel = document.getElementById(`log-${tab.dataset.tab}`);
                 if (targetPanel) targetPanel.classList.add('active');
+                if (tab.dataset.tab === 'activity') this.hydrateActivityScope();
+            });
+            tab.addEventListener('keydown', (event) => {
+                const items = [...tabs];
+                let index = items.indexOf(tab);
+                if (event.key === 'ArrowRight') index = (index + 1) % items.length;
+                else if (event.key === 'ArrowLeft') index = (index - 1 + items.length) % items.length;
+                else if (event.key === 'Home') index = 0;
+                else if (event.key === 'End') index = items.length - 1;
+                else return;
+                event.preventDefault();
+                items[index].focus();
+                items[index].click();
             });
         });
 
@@ -4166,6 +5898,7 @@ class AgenticDashboard {
             this.systemTargetFilter = e.target.value;
             this.rebuildSystemLogsList();
         });
+        document.getElementById('reconcile-system-logs')?.addEventListener('click', () => this.reconcileSystemLogStream());
 
         // Clear events — wipe data, dedup set, and DOM.
         clearBtn.addEventListener('click', () => {
@@ -4173,6 +5906,7 @@ class AgenticDashboard {
             this._eventSeenKeys = new Set();
             this.rebuildEventList();
         });
+        reconcileEventsBtn?.addEventListener('click', () => this.reconcileEventStream());
 
         // Auto-scroll toggle
         autoScrollCheckbox.addEventListener('change', (e) => {
@@ -4188,9 +5922,61 @@ class AgenticDashboard {
             event.preventDefault();
             this.fetchActivityTimeline();
         });
+        document.getElementById('activity-next')?.addEventListener('click', () => {
+            if (this.activityNextCursor) this.fetchActivityTimeline({ cursor: this.activityNextCursor, append: true });
+        });
+        document.getElementById('activity-export')?.addEventListener('click', () => this.exportActivityTimeline());
+        this.hydrateActivityScope();
     }
 
-    async fetchActivityTimeline() {
+    hydrateActivityScope() {
+        const setIfEmpty = (id, value) => {
+            const input = document.getElementById(id);
+            if (input && !input.value && value) input.value = String(value);
+        };
+        try {
+            const saved = JSON.parse(sessionStorage.getItem('management-ui-activity-scope') || '{}');
+            setIfEmpty('activity-tenant', saved.tenant);
+            setIfEmpty('activity-host', saved.host);
+            setIfEmpty('activity-instance', saved.instance);
+            setIfEmpty('activity-agent', saved.agent);
+        } catch (_) {
+            // Invalid browser-local convenience state must not block querying.
+        }
+        const selected = this.instances.get(this.selectedAgent);
+        const agent = this.agents.get(this.selectedAgent);
+        setIfEmpty('activity-instance', selected?.id || this.selectedAgent);
+        setIfEmpty('activity-agent', agent?.id || selected?.id);
+        const params = new URLSearchParams(window.location.search);
+        setIfEmpty('activity-session', params.get('activity_session'));
+        const linkedFilters = {
+            activity_event_name: 'activity-event-name', activity_since: 'activity-since',
+            activity_until: 'activity-until', activity_plane: 'activity-plane',
+            activity_trust: 'activity-trust', activity_outcome: 'activity-outcome',
+            activity_mission: 'activity-mission', activity_task: 'activity-task',
+            activity_tool: 'activity-tool', activity_command: 'activity-command',
+            activity_process: 'activity-process', activity_trace: 'activity-trace',
+        };
+        for (const [name, id] of Object.entries(linkedFilters)) setIfEmpty(id, params.get(name));
+    }
+
+    openActivityEvidence({ instanceId, agentId, sessionId, traceId } = {}) {
+        const set = (id, value) => {
+            const input = document.getElementById(id);
+            if (input && value) input.value = String(value);
+        };
+        set('activity-instance', instanceId);
+        set('activity-agent', agentId);
+        set('activity-session', sessionId);
+        set('activity-trace', traceId);
+        this.switchManagementWorkspace('console');
+        document.querySelector('.tab-btn[data-tab="activity"]')?.click();
+        const request = this.activityRequest();
+        if (request && Object.values(request.scope).every(Boolean)) this.fetchActivityTimeline();
+        else this.showToast('Activity scope derived where possible; complete tenant and host to query.', 'info');
+    }
+
+    activityRequest() {
         const field = (id) => document.getElementById(id)?.value.trim() || '';
         const scope = {
             tenant: field('activity-tenant'),
@@ -4198,31 +5984,72 @@ class AgenticDashboard {
             instance: field('activity-instance'),
             agent: field('activity-agent'),
         };
-        if (Object.values(scope).some((value) => !value)) {
-            this.showToast('Tenant, host, instance, and agent are required', 'error');
-            return;
+        const query = {};
+        const fields = {
+            event_name: 'activity-event-name', session_id: 'activity-session',
+            mission_id: 'activity-mission', task_id: 'activity-task', tool_call_id: 'activity-tool',
+            command_id: 'activity-command', process_id: 'activity-process', trace_id: 'activity-trace',
+            plane: 'activity-plane', trust: 'activity-trust', outcome: 'activity-outcome',
+        };
+        for (const [name, id] of Object.entries(fields)) {
+            const value = field(id);
+            if (value) query[name] = value;
         }
-        const query = new URLSearchParams();
-        const session = field('activity-session');
-        if (session) query.set('session_id', session);
+        for (const [name, id] of [['since', 'activity-since'], ['until', 'activity-until']]) {
+            const value = field(id);
+            if (value) query[name] = new Date(value).toISOString();
+        }
+        query.limit = 200;
         const headers = {
             'x-agentic-tenant-id': scope.tenant,
             'x-agentic-host-id': scope.host,
             'x-agentic-instance-id': scope.instance,
             'x-agentic-agent-id': scope.agent,
         };
+        return { scope, query, headers };
+    }
+
+    async fetchActivityTimeline({ cursor = null, append = false } = {}) {
+        const request = this.activityRequest();
+        if (!request || Object.values(request.scope).some((value) => !value)) {
+            this.showToast('Tenant, host, instance, and agent are required', 'error');
+            return;
+        }
+        const { scope, query, headers } = request;
+        if (cursor) query.cursor = cursor;
+        this.activityScope = scope;
+        this.activityQuery = { ...query, cursor: undefined };
+        sessionStorage.setItem('management-ui-activity-scope', JSON.stringify(scope));
         const coverage = document.getElementById('activity-coverage');
         if (coverage) {
             coverage.className = 'activity-coverage unknown';
             coverage.textContent = 'Loading coverage before rendering the timeline…';
         }
         try {
-            const suffix = query.toString() ? `?${query}` : '';
+            const queryString = new URLSearchParams(Object.entries(query).filter(([, value]) => value != null));
+            const suffix = queryString.toString() ? `?${queryString}` : '';
             const response = (await ApiClient.request(`/api/v2/activity/timeline${suffix}`, { headers })).response;
             if (!response.ok) throw new Error(`HTTP ${response.status}`);
             const data = await response.json();
-            this.renderActivityCoverage(data.completeness || {});
-            this.renderActivityTimeline(data.events || []);
+            if (cursor && data.cursor_found === false) {
+                await this.fetchActivityTimeline({ cursor: null, append: false });
+                if (coverage) {
+                    const marker = document.createElement('div');
+                    marker.textContent = 'Requested Activity cursor is no longer retained. The scoped first page was reconciled; evidence before that page remains incomplete.';
+                    coverage.className = 'activity-coverage incomplete';
+                    coverage.prepend(marker);
+                }
+                return;
+            }
+            if (data.cursor_found === false) throw new Error('activity cursor is invalid for this filtered timeline');
+            this.renderActivityCoverage(data.completeness || {}, data.coverage || []);
+            this.renderActivityTimeline(data.events || [], { append });
+            this.activityNextCursor = data.has_more ? data.next_cursor : null;
+            const next = document.getElementById('activity-next');
+            if (next) next.disabled = !this.activityNextCursor;
+            const page = document.getElementById('activity-page-status');
+            if (page) page.textContent = `${data.events?.length || 0} events on this page · ${data.has_more ? 'more available' : 'end of timeline'}`;
+            this.focusActivityDeepLink();
         } catch (error) {
             if (coverage) {
                 coverage.className = 'activity-coverage incomplete';
@@ -4232,7 +6059,33 @@ class AgenticDashboard {
         }
     }
 
-    renderActivityCoverage(summary) {
+    async exportActivityTimeline() {
+        const request = this.activityRequest();
+        if (!request || Object.values(request.scope).some((value) => !value)) {
+            this.showToast('Tenant, host, instance, and agent are required for export', 'error');
+            return;
+        }
+        try {
+            const response = (await ApiClient.request('/api/v2/activity/export', {
+                method: 'POST',
+                headers: { ...request.headers, 'Content-Type': 'application/json' },
+                body: JSON.stringify(request.query),
+            })).response;
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            const evidence = await response.json();
+            const blob = new Blob([JSON.stringify(evidence, null, 2)], { type: 'application/json' });
+            const link = document.createElement('a');
+            link.href = URL.createObjectURL(blob);
+            link.download = `activity-evidence-${Date.now()}.json`;
+            link.click();
+            URL.revokeObjectURL(link.href);
+            this.showToast('Signed activity evidence exported', 'success');
+        } catch (error) {
+            this.showToast(`Activity export unavailable: ${error.message}`, 'error');
+        }
+    }
+
+    renderActivityCoverage(summary, collectors = []) {
         const coverage = document.getElementById('activity-coverage');
         if (!coverage) return;
         const complete = summary.complete === true;
@@ -4240,7 +6093,8 @@ class AgenticDashboard {
         const unsupported = Array.isArray(summary.unsupported_event_classes)
             ? summary.unsupported_event_classes.join(', ') || 'none'
             : 'unknown';
-        coverage.textContent = [
+        const overview = document.createElement('div');
+        overview.textContent = [
             `Coverage: ${complete ? 'complete' : 'incomplete or unknown'}`,
             `collectors=${summary.collector_count ?? 0}`,
             `gaps=${summary.sequence_gap_count ?? 0}`,
@@ -4251,15 +6105,36 @@ class AgenticDashboard {
             `clock uncertainty=${summary.maximum_clock_error_ms ?? 0}ms`,
             `unsupported=${unsupported}`,
         ].join(' · ');
+        coverage.replaceChildren(overview);
+        if (collectors.length) {
+            const details = document.createElement('details');
+            const heading = document.createElement('summary');
+            heading.textContent = `Collector coverage (${collectors.length})`;
+            details.append(heading);
+            for (const collector of collectors) {
+                const row = document.createElement('div');
+                row.textContent = [
+                    collector.collector_id || 'unknown collector',
+                    `${collector.event_count ?? 0} events`,
+                    `${collector.sequence_gaps?.length ?? 0} gaps`,
+                    `${collector.durable_loss_records?.length ?? 0} durable losses`,
+                    collector.stale ? 'stale' : 'current',
+                    `clock ±${collector.maximum_clock_error_ms ?? 0}ms`,
+                ].join(' · ');
+                details.append(row);
+            }
+            coverage.append(details);
+        }
     }
 
-    renderActivityTimeline(events) {
+    renderActivityTimeline(events, { append = false } = {}) {
         const list = document.getElementById('activity-list');
         if (!list) return;
         const fragment = document.createDocumentFragment();
         for (const event of events) {
             const row = document.createElement('div');
             row.className = 'activity-entry';
+            row.id = `activity-event-${String(event.event_id || '').replace(/[^a-zA-Z0-9_-]/g, '-')}`;
 
             const header = document.createElement('div');
             header.className = 'log-entry-header';
@@ -4274,9 +6149,10 @@ class AgenticDashboard {
             const source = document.createElement('div');
             source.className = 'activity-source';
             const trust = String(event.source?.trust || 'unknown');
+            const trustClass = trust === 'self_reported' ? 'self-reported' : trust;
             const badge = document.createElement('span');
-            badge.className = `trust-badge ${['observed', 'attested', 'self-reported', 'derived'].includes(trust) ? trust : 'unknown'}`;
-            badge.textContent = trust === 'observed' ? 'independently observed' : trust;
+            badge.className = `trust-badge ${['observed', 'attested', 'self-reported', 'derived'].includes(trustClass) ? trustClass : 'unknown'}`;
+            badge.textContent = trust === 'observed' ? 'independently observed' : trust.replace('_', '-');
             const sourceText = document.createElement('span');
             sourceText.textContent = `${event.source?.layer || 'unknown'} / ${event.source?.collector || 'unknown'}`;
             source.append(badge, sourceText);
@@ -4294,16 +6170,76 @@ class AgenticDashboard {
                 event.outcome?.status && `outcome=${event.outcome.status}`,
                 `sensitivity=${event.sensitivity || 'unknown'}`,
             ].filter(Boolean).join(' · ');
-            row.append(header, source, correlation);
+            const links = document.createElement('div');
+            const permalink = document.createElement('button');
+            permalink.type = 'button';
+            permalink.className = 'activity-link';
+            permalink.textContent = 'Permalink';
+            permalink.addEventListener('click', () => this.updateActivityDeepLink(event));
+            links.append(permalink);
+            if (ids.session_id) {
+                const sessionLink = document.createElement('button');
+                sessionLink.type = 'button';
+                sessionLink.className = 'activity-link';
+                sessionLink.textContent = 'Filter session';
+                sessionLink.addEventListener('click', () => {
+                    document.getElementById('activity-session').value = ids.session_id;
+                    this.fetchActivityTimeline();
+                });
+                links.append(sessionLink);
+            }
+            const instance = [...(this.instances || new Map()).values()].find((item) => item.id === ids.instance_id);
+            if (instance) {
+                const instanceLink = document.createElement('button');
+                instanceLink.type = 'button';
+                instanceLink.className = 'activity-link';
+                instanceLink.textContent = `Open ${instance.name}`;
+                instanceLink.addEventListener('click', () => {
+                    this.selectedAgent = instance.name;
+                    this.updateManagementDeepLink({ instance: instance.name });
+                    this.renderVmList();
+                });
+                links.append(instanceLink);
+            }
+            row.append(header, source, correlation, links);
             fragment.appendChild(row);
         }
-        list.replaceChildren(fragment);
-        if (events.length === 0) {
+        if (append) list.appendChild(fragment);
+        else list.replaceChildren(fragment);
+        if (!append && events.length === 0) {
             const empty = document.createElement('div');
             empty.className = 'log-placeholder';
             empty.textContent = 'No activity events matched this authorized scope.';
             list.appendChild(empty);
         }
+    }
+
+    updateActivityDeepLink(event) {
+        const url = new URL(window.location.href);
+        url.searchParams.set('activity_event', event.event_id);
+        if (event.correlation?.session_id) url.searchParams.set('activity_session', event.correlation.session_id);
+        const filters = this.activityQuery || {};
+        const names = {
+            event_name: 'activity_event_name', since: 'activity_since', until: 'activity_until',
+            plane: 'activity_plane', trust: 'activity_trust', outcome: 'activity_outcome',
+            mission_id: 'activity_mission', task_id: 'activity_task', tool_call_id: 'activity_tool',
+            command_id: 'activity_command', process_id: 'activity_process', trace_id: 'activity_trace',
+        };
+        for (const [filter, parameter] of Object.entries(names)) {
+            if (filters[filter]) url.searchParams.set(parameter, filters[filter]);
+            else url.searchParams.delete(parameter);
+        }
+        history.replaceState(null, '', url);
+        this.focusActivityDeepLink();
+    }
+
+    focusActivityDeepLink() {
+        const eventId = new URLSearchParams(window.location.search).get('activity_event');
+        if (!eventId) return;
+        const rowId = `activity-event-${eventId.replace(/[^a-zA-Z0-9_-]/g, '-')}`;
+        const row = document.getElementById(rowId);
+        row?.scrollIntoView({ block: 'nearest' });
+        row?.classList.add('selected');
     }
 
     // Map a VmEvent.event_type to a UI severity level for filter/styling.
@@ -4375,15 +6311,67 @@ class AgenticDashboard {
             .catch(() => this.showToast('Failed to copy', 'error'));
     }
 
-    async fetchEvents() {
+    setEventStreamStatus(state, message) {
+        this.eventStreamState = state;
+        const status = document.getElementById('event-stream-status');
+        if (!status) return;
+        status.className = `stream-status ${state}`;
+        status.textContent = message;
+    }
+
+    normalizeEventV2(event) {
+        const subject = String(event.subject || '');
+        return {
+            id: String(event.id || ''),
+            event_type: String(event.kind || 'unknown'),
+            timestamp: event.timestamp,
+            vm_name: subject.startsWith('instance/') ? subject.slice('instance/'.length) : subject,
+            details: event.data || {},
+        };
+    }
+
+    async fetchEvents({ forceSnapshot = false, reconciliationReason = null } = {}) {
         try {
-            const resp = (await ApiClient.request('/api/v1/events')).response;
+            const params = new URLSearchParams({ limit: String(this.maxLogEvents) });
+            if (!forceSnapshot && this.lastEventId) params.set('cursor', String(this.lastEventId));
+            const resp = (await ApiClient.request(`/api/v2/admin/events?${params}`)).response;
+            if (!resp.ok) {
+                const problem = await resp.json().catch(() => ({}));
+                if (!forceSnapshot && problem.code === 'stream.invalid_cursor') {
+                    this.lastEventId = 0;
+                    this.setEventStreamStatus('incomplete', 'Event resume cursor was invalid. Reconciling the bounded snapshot; earlier evidence remains incomplete.');
+                    return this.fetchEvents({
+                        forceSnapshot: true,
+                        reconciliationReason: 'Event resume cursor was invalid.',
+                    });
+                }
+                throw new Error(problem.detail || `HTTP ${resp.status}`);
+            }
             const data = await resp.json();
-            if (data.last_event_id && data.last_event_id === this.lastEventId) return;
-            this.lastEventId = data.last_event_id || 0;
-            this.mergeEvents(data.events || []);
+            if (data.gap && !forceSnapshot) {
+                this.setEventStreamStatus(
+                    'incomplete',
+                    'Event cursor fell behind the retained window. Reconciling the bounded snapshot; older events remain unavailable.',
+                );
+                return this.fetchEvents({
+                    forceSnapshot: true,
+                    reconciliationReason: 'Event cursor fell behind the retained window.',
+                });
+            }
+            const events = (data.items || [])
+                .map((event) => this.normalizeEventV2(event))
+                .sort((a, b) => Number(String(b.id).replace(/^ev_/, '')) - Number(String(a.id).replace(/^ev_/, '')));
+            this.mergeEvents(events);
+            if (data.cursor != null) this.lastEventId = String(data.cursor);
+            if (forceSnapshot) {
+                this.setEventStreamStatus(
+                    'incomplete',
+                    `${reconciliationReason || 'Bounded event snapshot requested.'} Bounded snapshot reconciled; earlier events cannot be proven complete.`,
+                );
+            }
         } catch (e) {
             console.error('Failed to fetch events:', e);
+            this.setEventStreamStatus('degraded', `Event reconciliation unavailable (${e.message}).`);
         }
     }
 
@@ -4393,34 +6381,52 @@ class AgenticDashboard {
     startEventStream() {
         if (this._eventSource) return;
         try {
-            const since = encodeURIComponent(new Date().toISOString());
-            const es = new EventSource(`/api/v1/events?follow=true&since=${since}`);
+            const params = new URLSearchParams({ follow: 'true', limit: String(this.maxLogEvents) });
+            if (this.lastEventId) params.set('cursor', String(this.lastEventId));
+            const es = new EventSource(`/api/v2/admin/events?${params}`);
             this._eventSource = es;
 
-            es.onmessage = (msg) => {
+            es.onopen = () => {
+                this.setEventStreamStatus('live', `Live event stream connected at cursor ${this.lastEventId || 'latest'}.`);
+            };
+
+            es.addEventListener('event', (msg) => {
                 if (!msg.data) return;
                 try {
-                    const ev = JSON.parse(msg.data);
+                    const ev = this.normalizeEventV2(JSON.parse(msg.data));
+                    if (msg.lastEventId) this.lastEventId = String(msg.lastEventId);
                     this.addEvent(ev);
                 } catch (e) {
                     console.warn('Bad SSE event payload:', e);
+                    this.setEventStreamStatus('degraded', 'Event stream returned an invalid payload; polling reconciliation remains active.');
                 }
-            };
+            });
 
-            es.addEventListener('lagged', (msg) => {
-                console.warn('Event stream lagged:', msg.data);
-                // Reconnect with a fresh snapshot so we don't miss the gap.
+            es.addEventListener('resync-required', (msg) => {
+                console.warn('Event stream requires resync:', msg.data);
+                this.setEventStreamStatus('incomplete', 'Event stream gap detected. Reconciling the bounded snapshot now.');
                 this.stopEventStream();
-                this.fetchEvents().then(() => this.startEventStream());
+                this.fetchEvents({ forceSnapshot: true }).then(() => this.startEventStream());
+            });
+
+            es.addEventListener('stream-closed', (msg) => {
+                this.setEventStreamStatus('degraded', `Event stream closed by the server (${msg.data || 'no reason'}).`);
+                this.stopEventStream();
             });
 
             es.onerror = () => {
-                // Browser will auto-retry; nothing to do but log.
                 console.warn('Event stream disconnected; polling fallback continues');
+                this.setEventStreamStatus('degraded', `Event stream disconnected at cursor ${this.lastEventId || 'unknown'}; polling reconciliation remains active.`);
             };
         } catch (e) {
             console.error('Failed to start event stream:', e);
         }
+    }
+
+    async reconcileEventStream() {
+        this.stopEventStream();
+        await this.fetchEvents({ forceSnapshot: true });
+        this.startEventStream();
     }
 
     stopEventStream() {
@@ -4437,7 +6443,7 @@ class AgenticDashboard {
 
     // Stable key per event for dedup across polling+SSE.
     _eventKey(e) {
-        return `${e.timestamp}|${e.event_type}|${e.agent_id || e.vm_name || ''}`;
+        return e.id || `${e.timestamp}|${e.event_type}|${e.agent_id || e.vm_name || ''}`;
     }
 
     _eventPasses(e) {
@@ -4605,7 +6611,7 @@ class AgenticDashboard {
     }
 
     _systemLogKey(l) {
-        return `${l.timestamp}|${l.target}|${l.message}`;
+        return l.id || `${l.timestamp}|${l.target}|${l.message}`;
     }
 
     _systemLogPasses(l) {
@@ -4692,25 +6698,165 @@ class AgenticDashboard {
         `;
     }
 
-    async fetchSystemLogs() {
+    setSystemStreamStatus(state, message) {
+        const status = document.getElementById('system-stream-status');
+        if (!status) return;
+        status.className = `stream-status ${state}`;
+        status.textContent = message;
+    }
+
+    async fetchSystemLogs({ forceSnapshot = false, reconciliationReason = null } = {}) {
         try {
-            const resp = (await ApiClient.request('/api/v1/logs?limit=200')).response;
-            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+            const params = new URLSearchParams({ limit: String(this.maxSystemLogs) });
+            if (!forceSnapshot && this.lastSystemLogId) params.set('cursor', String(this.lastSystemLogId));
+            const resp = (await ApiClient.request(`/api/v2/admin/logs?${params}`)).response;
+            if (!resp.ok) {
+                const problem = await resp.json().catch(() => ({}));
+                if (!forceSnapshot && problem.code === 'stream.invalid_cursor') {
+                    this.lastSystemLogId = 0;
+                    this.setSystemStreamStatus('incomplete', 'System log resume cursor was invalid. Reconciling the bounded snapshot; earlier evidence remains incomplete.');
+                    return this.fetchSystemLogs({
+                        forceSnapshot: true,
+                        reconciliationReason: 'System log resume cursor was invalid.',
+                    });
+                }
+                throw new Error(problem.detail || `HTTP ${resp.status}`);
+            }
             const data = await resp.json();
-            this.mergeSystemLogs(data.logs || []);
+            if (data.gap && !forceSnapshot) {
+                this.setSystemStreamStatus(
+                    'incomplete',
+                    'System log cursor fell behind the retained window. Reconciling the bounded snapshot.',
+                );
+                return this.fetchSystemLogs({
+                    forceSnapshot: true,
+                    reconciliationReason: 'System log cursor fell behind the retained window.',
+                });
+            }
+            const logs = (data.items || []).sort((a, b) => {
+                const aId = Number(String(a.id || '').replace(/^log_/, ''));
+                const bId = Number(String(b.id || '').replace(/^log_/, ''));
+                return bId - aId;
+            });
+            this.mergeSystemLogs(logs);
+            if (data.cursor != null) this.lastSystemLogId = String(data.cursor);
+            if (forceSnapshot) {
+                this.setSystemStreamStatus(
+                    'incomplete',
+                    `${reconciliationReason || 'Bounded system log snapshot requested.'} Bounded snapshot reconciled; older evicted entries remain unavailable.`,
+                );
+            }
         } catch (e) {
             console.error('Failed to fetch system logs:', e);
+            this.setSystemStreamStatus('degraded', `System log reconciliation unavailable (${e.message}).`);
         }
+    }
+
+    startSystemLogStream() {
+        if (this._systemLogEventSource) return;
+        const params = new URLSearchParams({ follow: 'true', limit: String(this.maxSystemLogs) });
+        if (this.lastSystemLogId) params.set('cursor', String(this.lastSystemLogId));
+        try {
+            const source = new EventSource(`/api/v2/admin/logs?${params}`);
+            this._systemLogEventSource = source;
+            source.onopen = () => {
+                this.setSystemStreamStatus('live', `Live system log stream connected at cursor ${this.lastSystemLogId || 'latest'}.`);
+            };
+            source.addEventListener('log', (message) => {
+                if (!message.data) return;
+                try {
+                    const log = JSON.parse(message.data);
+                    if (message.lastEventId) this.lastSystemLogId = String(message.lastEventId);
+                    this.addSystemLog(log);
+                } catch (error) {
+                    console.warn('Bad system log SSE payload:', error);
+                    this.setSystemStreamStatus('degraded', 'System log stream returned an invalid payload.');
+                }
+            });
+            source.addEventListener('resync-required', () => {
+                this.setSystemStreamStatus('incomplete', 'System log stream gap detected. Reconciling the bounded snapshot.');
+                this.stopSystemLogStream();
+                this.fetchSystemLogs({ forceSnapshot: true }).then(() => this.startSystemLogStream());
+            });
+            source.onerror = () => {
+                this.setSystemStreamStatus(
+                    'degraded',
+                    `System log stream disconnected at cursor ${this.lastSystemLogId || 'unknown'}; polling remains active.`,
+                );
+            };
+        } catch (error) {
+            this.setSystemStreamStatus('degraded', `System log stream unavailable (${error.message}).`);
+        }
+    }
+
+    stopSystemLogStream() {
+        this._systemLogEventSource?.close();
+        this._systemLogEventSource = null;
+    }
+
+    async reconcileSystemLogStream() {
+        this.stopSystemLogStream();
+        await this.fetchSystemLogs({ forceSnapshot: true });
+        this.startSystemLogStream();
     }
 
     // =========================================================================
     // Global event listeners
     // =========================================================================
 
+    setupModalAccessibility() {
+        const focusable = (modal) => [...modal.querySelectorAll(
+            'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        )].filter((element) => !element.hidden && element.getClientRects().length > 0);
+        let lastOutsideFocus = document.activeElement;
+
+        document.addEventListener('focusin', (event) => {
+            if (!event.target.closest?.('.modal:not(.hidden)')) lastOutsideFocus = event.target;
+        });
+        for (const modal of document.querySelectorAll('.modal')) {
+            modal.setAttribute('aria-hidden', modal.classList.contains('hidden') ? 'true' : 'false');
+            modal.addEventListener('keydown', (event) => {
+                if (event.key === 'Escape') {
+                    event.preventDefault();
+                    const dismiss = modal.querySelector('.cancel-btn, .modal-close');
+                    if (dismiss) dismiss.click();
+                    else modal.classList.add('hidden');
+                    return;
+                }
+                if (event.key !== 'Tab') return;
+                const items = focusable(modal);
+                if (!items.length) { event.preventDefault(); modal.focus(); return; }
+                const first = items[0];
+                const last = items[items.length - 1];
+                if (event.shiftKey && document.activeElement === first) {
+                    event.preventDefault(); last.focus();
+                } else if (!event.shiftKey && document.activeElement === last) {
+                    event.preventDefault(); first.focus();
+                }
+            });
+            const observer = new MutationObserver(() => {
+                const hidden = modal.classList.contains('hidden');
+                modal.setAttribute('aria-hidden', hidden ? 'true' : 'false');
+                if (!hidden) {
+                    modal.__returnFocus = lastOutsideFocus;
+                    queueMicrotask(() => {
+                        if (!modal.contains(document.activeElement)) {
+                            (focusable(modal)[0] || modal).focus();
+                        }
+                    });
+                } else if (modal.__returnFocus?.isConnected) {
+                    modal.__returnFocus.focus();
+                    modal.__returnFocus = null;
+                }
+            });
+            observer.observe(modal, { attributes: true, attributeFilter: ['class'] });
+        }
+    }
+
     setupGlobalListeners() {
         // OAuth modal
-        document.querySelector('.modal-close').addEventListener('click', () => this.hideOAuthModal());
-        document.querySelector('.modal-overlay').addEventListener('click', () => this.hideOAuthModal());
+        document.querySelector('#oauth-modal .modal-close').addEventListener('click', () => this.hideOAuthModal());
+        document.querySelector('#oauth-modal .modal-overlay').addEventListener('click', () => this.hideOAuthModal());
         document.getElementById('oauth-submit').addEventListener('click', () => this.submitOAuthInput());
         document.getElementById('oauth-input').addEventListener('keypress', (e) => {
             if (e.key === 'Enter') this.submitOAuthInput();
@@ -4740,11 +6886,8 @@ class AgenticDashboard {
         // Periodic event refresh (until WebSocket broadcast is implemented)
         setInterval(() => this.fetchEvents(), 5000);
 
-        // Periodic VM list refresh
-        setInterval(() => this.fetchVms(), 10000);
-        // Mirror VM polling for containers (#178). Backend SSE for container.* events
-        // would let us drop polling entirely — see follow-up.
-        setInterval(() => this.fetchContainers(), 10000);
+        // Canonical inventory includes VM, Docker, and host runtimes.
+        setInterval(() => this.fetchInstances(), 10000);
 
         // Periodic system log refresh
         setInterval(() => this.fetchSystemLogs(), 5000);
@@ -4781,9 +6924,7 @@ class AgenticDashboard {
     }
 
     esc(text) {
-        const d = document.createElement('div');
-        d.textContent = text;
-        return d.innerHTML;
+        return escAttr(text);
     }
 
     showToast(message, type = 'info') {
@@ -5552,7 +7693,7 @@ const PushNotifications = {
                     `<td><time>${escAttr(cfg.created_at)}</time></td>` +
                     `<td>` +
                     `<button type="button" class="pn-test-btn" data-id="${escAttr(cfg.id)}">Test</button> ` +
-                    `<button type="button" class="pn-delete-btn" data-id="${escAttr(cfg.id)}">&times;</button>` +
+                    `<button type="button" class="pn-delete-btn" data-id="${escAttr(cfg.id)}" aria-label="Delete push notification ${escAttr(cfg.id)}">&times;</button>` +
                     `</td>`;
                 tbody.appendChild(tr);
             }
@@ -5671,12 +7812,15 @@ class PtyWsV1Client {
         this.clientId = null;
         this.members = [];
         this.activatedExtensions = [];
+        this.supportedOperations = new Set();
         this.bindingHelloReceived = false;
+        this.bindingHelloTimer = null;
         this.userInitiatedClose = false;
         this.serverCloseDelivered = false;
 
         // Callbacks (assigned by caller).
         this.onBindingHello = () => {};
+        this.onConnectionChanged = () => {};
         this.onRoleChanged = () => {};
         this.onMembershipChanged = () => {};
         this.onClosed = () => {};
@@ -5722,6 +7866,13 @@ class PtyWsV1Client {
                 try { this.ws.close(1002, 'pty-ws.v1 subprotocol required'); } catch (_) {}
                 return;
             }
+            this.onConnectionChanged('connected');
+            clearTimeout(this.bindingHelloTimer);
+            this.bindingHelloTimer = setTimeout(() => {
+                if (this.bindingHelloReceived) return;
+                this.onError({ kind: 'capability', message: 'Timed out waiting for binding_hello' });
+                try { this.ws?.close(1002, 'binding_hello timeout'); } catch (_) {}
+            }, 5000);
             // Don't send pty.join_session until we've seen binding_hello;
             // the spec allows it but the executor's session registry may
             // race — being polite gives the server time to flush hello
@@ -5730,11 +7881,15 @@ class PtyWsV1Client {
         };
         this.ws.onmessage = (e) => this._handleRawFrame(e.data);
         this.ws.onclose = (e) => {
+            clearTimeout(this.bindingHelloTimer);
+            this.bindingHelloTimer = null;
+            this.onConnectionChanged('disconnected');
             if (this.serverCloseDelivered) return;
             const reason = e.reason || (this.userInitiatedClose ? 'leave' : 'transport');
             this.onClosed({ code: e.code, reason, userInitiated: this.userInitiatedClose });
         };
         this.ws.onerror = () => {
+            this.onConnectionChanged('degraded');
             // The WebSocket spec hides the underlying reason from JS for
             // security; surface a generic transport error.
             this.onError({ kind: 'transport' });
@@ -5754,6 +7909,7 @@ class PtyWsV1Client {
             }
         } catch (e) {
             this.onError({ kind: 'parse', error: e.message });
+            try { this.ws?.close(1002, 'invalid pty-ws frame'); } catch (_) {}
             return;
         }
         if (frame && typeof frame.seq === 'number') {
@@ -5765,6 +7921,17 @@ class PtyWsV1Client {
     _dispatch(frame) {
         if (!frame || typeof frame.op !== 'string') {
             this.onUnknownFrame(frame);
+            try { this.ws?.close(1002, 'invalid pty-ws frame'); } catch (_) {}
+            return;
+        }
+        if (!this.bindingHelloReceived && frame.op !== 'binding_hello') {
+            this.onError({ kind: 'capability', message: 'PTY frame received before binding_hello' });
+            try { this.ws?.close(1002, 'frame before binding_hello'); } catch (_) {}
+            return;
+        }
+        if (this.bindingHelloReceived && frame.op === 'binding_hello') {
+            this.onError({ kind: 'capability', message: 'Duplicate binding_hello received' });
+            try { this.ws?.close(1002, 'duplicate binding_hello'); } catch (_) {}
             return;
         }
         switch (frame.op) {
@@ -5778,8 +7945,30 @@ class PtyWsV1Client {
                     try { this.ws?.close(1002, 'pty-ws.v1 subprotocol required'); } catch (_) {}
                     return;
                 }
-                this.bindingHelloReceived = true;
-                this.activatedExtensions = (frame.payload && frame.payload.activated_extensions) || [];
+                {
+                    const payload = frame.payload || {};
+                    const bindingMajor = String(payload.binding_version || '').split('.')[0];
+                    const operations = Array.isArray(payload.supported_operations)
+                        ? payload.supported_operations.filter((value) => typeof value === 'string')
+                        : [];
+                    if (payload.binding_uri !== 'https://agentic-sandbox.aiwg.io/bindings/pty-ws/v1'
+                        || bindingMajor !== '1' || !operations.includes('pty.join_session')) {
+                        this.onError({
+                            kind: 'capability',
+                            message: 'Incompatible pty-ws binding advertisement',
+                            bindingUri: payload.binding_uri || null,
+                            bindingVersion: payload.binding_version || null,
+                        });
+                        try { this.ws?.close(1002, 'incompatible pty-ws binding'); } catch (_) {}
+                        return;
+                    }
+                    this.bindingHelloReceived = true;
+                    clearTimeout(this.bindingHelloTimer);
+                    this.bindingHelloTimer = null;
+                    this.activatedExtensions = Array.isArray(payload.activated_extensions)
+                        ? payload.activated_extensions : [];
+                    this.supportedOperations = new Set(operations);
+                }
                 this.onBindingHello(frame.payload || {});
                 // Now safe to join.
                 this._sendVerb('pty.join_session', this._buildJoinPayload());
@@ -5883,6 +8072,15 @@ class PtyWsV1Client {
 
     _sendVerb(op, payload) {
         if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return false;
+        if (!this.bindingHelloReceived) return false;
+        if (!this.supportedOperations.has(op)) {
+            this.onError({ kind: 'capability', operation: op, message: `Unsupported PTY operation: ${op}` });
+            return false;
+        }
+        if (this.ws.bufferedAmount > 512 * 1024) {
+            this.onError({ kind: 'backpressure', bufferedAmount: this.ws.bufferedAmount });
+            return false;
+        }
         const frame = {
             op,
             ts: new Date().toISOString(),
@@ -5998,6 +8196,29 @@ function _ptyV2UpdateRoleBadge(container, role) {
     const relBtn = container.querySelector('.pty-release-controller-btn');
     if (reqBtn) reqBtn.style.display = role === 'observer' ? '' : 'none';
     if (relBtn) relBtn.style.display = role === 'controller' ? '' : 'none';
+    const terminal = container.querySelector('.xterm-wrapper');
+    if (terminal) {
+        terminal.dataset.role = role || 'unknown';
+        terminal.dataset.readonly = role === 'controller' ? 'false' : 'true';
+        _ptyV2RefreshTerminalLabel(terminal);
+        terminal.querySelector('.xterm-helper-textarea')
+            ?.setAttribute('aria-readonly', role === 'controller' ? 'false' : 'true');
+    }
+}
+
+function _ptyV2RefreshTerminalLabel(terminal) {
+    const agent = terminal.dataset.agentLabel || 'Session';
+    const connection = terminal.dataset.connection || 'unknown';
+    const role = terminal.dataset.role || 'unknown';
+    const posture = terminal.dataset.readonly === 'false' ? 'interactive' : 'read-only';
+    terminal.setAttribute('aria-label', `${agent} terminal; connection ${connection}; role ${role}; ${posture}`);
+}
+
+function _ptyV2UpdateConnection(container, connection) {
+    const terminal = container?.querySelector('.xterm-wrapper');
+    if (!terminal) return;
+    terminal.dataset.connection = connection || 'unknown';
+    _ptyV2RefreshTerminalLabel(terminal);
 }
 
 function _ptyV2UpdateMembers(container, members) {
@@ -6047,6 +8268,12 @@ function _ptyV2EnsureToolbar(pane) {
 // On disconnect (non-user-initiated) schedules a reconnect with
 // replay_from = lastSeq.
 function openPtyV2Session({ pane, agentId, instanceId, sessionId, terminal, replayFromSeq = null, wsUrlOverride = null }) {
+    const terminalRegion = pane?.querySelector('.xterm-wrapper');
+    if (terminalRegion) {
+        terminalRegion.dataset.transport = 'pty-v2';
+        terminalRegion.dataset.connection = 'connecting';
+        _ptyV2RefreshTerminalLabel(terminalRegion);
+    }
     _ptyV2EnsureToolbar(pane);
     // Dispose any prior v2 xterm listeners attached to this terminal so
     // a reconnect doesn't accumulate handlers (each forwards onData →
@@ -6075,6 +8302,7 @@ function openPtyV2Session({ pane, agentId, instanceId, sessionId, terminal, repl
 
     // Wire UI callbacks.
     client.onRoleChanged = (role) => _ptyV2UpdateRoleBadge(pane, role);
+    client.onConnectionChanged = (state) => _ptyV2UpdateConnection(pane, state);
     client.onMembershipChanged = (members) => _ptyV2UpdateMembers(pane, members);
     client.onError = (err) => {
         try {
@@ -6141,7 +8369,7 @@ if (typeof window !== 'undefined') {
 
 // === end #247 ===
 
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
     _initSunsetBanner();
     // #250: must run after _initSunsetBanner so the banner exists for
     // count-updates. Safe to call even if the API endpoint 503s — the
@@ -6149,7 +8377,13 @@ document.addEventListener('DOMContentLoaded', () => {
     // DeprecationTracker disabled — pre-launch, no v1 consumers exist yet.
     // Re-enable by uncommenting when external clients start hitting v1.
     // try { DeprecationTracker.init(); } catch (e) { console.error('DeprecationTracker init failed', e); }
-    window.dashboard = new AgenticDashboard();
+    try {
+        await window.ManagementUIReady;
+        window.dashboard = new AgenticDashboard();
+    } catch (error) {
+        console.error('Management UI contract boundary failed to initialize', error);
+        return;
+    }
     // === #247 wire settings toggle (idempotent) ===
     try {
         const toggle = document.getElementById('pty-legacy-toggle');

@@ -1,15 +1,18 @@
 //! HTTP API for workload credential metadata.
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::Response,
     routing::get,
-    Json, Router,
+    Extension, Json, Router,
 };
-use serde::Serialize;
+use chrono::Utc;
+use serde::{Deserialize, Serialize};
 
-use super::server::AppState;
+use super::operator_auth::{OperatorIdentity, OperatorRole, RequireAdmin};
+use super::server::{append_security_audit, AppState};
+use crate::audit::{AuditEventType, AuditOutcome, AuditQueryFilter};
 use crate::credentials::{
     CredentialError, CredentialLeaseResponse, CredentialMetadataResponse,
     IssueCredentialLeaseRequest, UpsertCredentialRequest,
@@ -30,9 +33,39 @@ struct ErrorResponse {
     error: String,
 }
 
+#[derive(Debug, Serialize)]
+struct AccessAuthorityResponse {
+    schema_version: &'static str,
+    mode: &'static str,
+    actor: Option<String>,
+    role: Option<&'static str>,
+    permissions: Vec<&'static str>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct AccessAuditQuery {
+    date: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct AccessAuditEvent {
+    id: String,
+    sequence: u64,
+    timestamp: chrono::DateTime<Utc>,
+    event_type: String,
+    actor: String,
+    resource: String,
+    correlation_id: Option<String>,
+    action: String,
+    outcome: String,
+    trace_id: Option<String>,
+}
+
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", get(list_credentials).post(create_credential))
+        .route("/authority", get(get_access_authority))
+        .route("/audit", get(list_access_audit))
         .route("/leases", get(list_leases))
         .route("/leases/{lease_id}", get(get_lease).delete(revoke_lease))
         .route(
@@ -47,6 +80,166 @@ pub fn router() -> Router<AppState> {
         )
 }
 
+fn request_actor(identity: Option<&Extension<OperatorIdentity>>) -> String {
+    identity
+        .map(|Extension(identity)| identity.actor.clone())
+        .unwrap_or_else(|| "local-trusted-network".to_string())
+}
+
+async fn append_access_audit(
+    state: &AppState,
+    identity: Option<&Extension<OperatorIdentity>>,
+    event_type: AuditEventType,
+    resource: impl Into<String>,
+    action: impl Into<String>,
+    outcome: AuditOutcome,
+) {
+    append_security_audit(
+        state,
+        event_type,
+        request_actor(identity),
+        resource,
+        action,
+        outcome,
+        serde_json::json!({"metadata_only": true}),
+    )
+    .await;
+}
+
+async fn get_access_authority(
+    State(state): State<AppState>,
+    role: Option<Extension<OperatorRole>>,
+    identity: Option<Extension<OperatorIdentity>>,
+) -> Response {
+    let explicitly_configured = state.operator_auth.is_some()
+        || !state.mtls_config.is_empty()
+        || state.unix_peer_creds_config.is_explicit();
+    let effective_role = role
+        .map(|Extension(role)| role)
+        .or_else(|| (!explicitly_configured).then_some(OperatorRole::Admin));
+    let mut permissions = Vec::new();
+    if effective_role.is_some() {
+        permissions.extend([
+            "credential.read",
+            "credential_lease.read",
+            "access_audit.read",
+        ]);
+    }
+    if effective_role == Some(OperatorRole::Admin) {
+        permissions.extend([
+            "credential.create",
+            "credential.update",
+            "credential.delete",
+            "credential_lease.issue",
+            "credential_lease.revoke",
+        ]);
+    } else if effective_role == Some(OperatorRole::Operator) {
+        permissions.extend(["credential_lease.issue", "credential_lease.revoke"]);
+    }
+    if identity.is_some() && effective_role.is_some() {
+        permissions.extend(["ssh_lease.read", "ssh_lease.issue", "ssh_lease.revoke"]);
+    }
+    Json(AccessAuthorityResponse {
+        schema_version: "management.access-authority/v1",
+        mode: if identity.is_some() {
+            "authenticated_operator"
+        } else if explicitly_configured {
+            "unresolved"
+        } else {
+            "trusted_local_listener"
+        },
+        actor: identity
+            .as_ref()
+            .map(|Extension(identity)| identity.actor.clone())
+            .or_else(|| (!explicitly_configured).then(|| "local-trusted-network".to_string())),
+        role: effective_role.map(OperatorRole::as_str),
+        permissions,
+    })
+    .into_response()
+}
+
+async fn list_access_audit(
+    State(state): State<AppState>,
+    Query(query): Query<AccessAuditQuery>,
+) -> Response {
+    let date = query
+        .date
+        .unwrap_or_else(|| Utc::now().format("%Y-%m-%d").to_string());
+    if chrono::NaiveDate::parse_from_str(&date, "%Y-%m-%d").is_err() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "date must use YYYY-MM-DD"})),
+        )
+            .into_response();
+    }
+    let Some(logger) = state.audit_logger.as_ref() else {
+        return Json(serde_json::json!({
+            "available": false,
+            "reason": "security audit logger is not configured",
+            "date": date,
+            "events": [],
+        }))
+        .into_response();
+    };
+    let events = match logger
+        .query(
+            &date,
+            Some(AuditQueryFilter {
+                limit: Some(1000),
+                ..Default::default()
+            }),
+        )
+        .await
+    {
+        Ok(events) => events,
+        Err(crate::audit::AuditError::LogNotFound(_)) => Vec::new(),
+        Err(error) => {
+            tracing::warn!(error = %error, audit_date = %date, "access audit query unavailable");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "audit query unavailable"})),
+            )
+                .into_response();
+        }
+    };
+    let mut projected: Vec<_> = events
+        .into_iter()
+        .filter(|event| {
+            matches!(
+                &event.event_type,
+                AuditEventType::SecretAccess
+                    | AuditEventType::SecretRotation
+                    | AuditEventType::GatewaySshLease
+            ) || (event.event_type == AuditEventType::ConfigChange
+                && event.action.starts_with("credential_"))
+        })
+        .map(|event| AccessAuditEvent {
+            id: event.id,
+            sequence: event.sequence,
+            timestamp: event.timestamp,
+            event_type: event.event_type.to_string(),
+            actor: event.actor,
+            resource: event.resource,
+            correlation_id: event
+                .details
+                .get("lease_id")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+            action: event.action,
+            outcome: event.outcome.to_string(),
+            trace_id: event.trace_id,
+        })
+        .collect();
+    projected.sort_by(|left, right| right.sequence.cmp(&left.sequence));
+    projected.truncate(200);
+    Json(serde_json::json!({
+        "available": true,
+        "date": date,
+        "events": projected,
+    }))
+    .into_response()
+}
+
 async fn list_credentials(State(state): State<AppState>) -> Response {
     Json(CredentialListResponse {
         credentials: state.credential_broker.list(),
@@ -56,11 +249,36 @@ async fn list_credentials(State(state): State<AppState>) -> Response {
 
 async fn create_credential(
     State(state): State<AppState>,
+    identity: Option<Extension<OperatorIdentity>>,
+    _admin: RequireAdmin,
     Json(request): Json<UpsertCredentialRequest>,
 ) -> Response {
+    let id = request.id.clone();
     match state.credential_broker.create(request) {
-        Ok(response) => (StatusCode::CREATED, Json(response)).into_response(),
-        Err(err) => credential_error(err),
+        Ok(response) => {
+            append_access_audit(
+                &state,
+                identity.as_ref(),
+                AuditEventType::ConfigChange,
+                id,
+                "credential_created",
+                AuditOutcome::Success,
+            )
+            .await;
+            (StatusCode::CREATED, Json(response)).into_response()
+        }
+        Err(err) => {
+            append_access_audit(
+                &state,
+                identity.as_ref(),
+                AuditEventType::ConfigChange,
+                id,
+                "credential_create_denied",
+                AuditOutcome::Denied,
+            )
+            .await;
+            credential_error(err)
+        }
     }
 }
 
@@ -78,10 +296,36 @@ async fn get_lease(State(state): State<AppState>, Path(lease_id): Path<String>) 
     }
 }
 
-async fn revoke_lease(State(state): State<AppState>, Path(lease_id): Path<String>) -> Response {
+async fn revoke_lease(
+    State(state): State<AppState>,
+    identity: Option<Extension<OperatorIdentity>>,
+    Path(lease_id): Path<String>,
+) -> Response {
     match state.credential_broker.revoke_lease(&lease_id) {
-        Ok(response) => Json(response).into_response(),
-        Err(err) => credential_error(err),
+        Ok(response) => {
+            append_access_audit(
+                &state,
+                identity.as_ref(),
+                AuditEventType::SecretAccess,
+                lease_id,
+                "credential_lease_revoked",
+                AuditOutcome::Success,
+            )
+            .await;
+            Json(response).into_response()
+        }
+        Err(err) => {
+            append_access_audit(
+                &state,
+                identity.as_ref(),
+                AuditEventType::SecretAccess,
+                lease_id,
+                "credential_lease_revoke_denied",
+                AuditOutcome::Denied,
+            )
+            .await;
+            credential_error(err)
+        }
     }
 }
 
@@ -100,12 +344,35 @@ async fn list_leases_for_credential(
 
 async fn issue_lease(
     State(state): State<AppState>,
+    identity: Option<Extension<OperatorIdentity>>,
     Path(id): Path<String>,
     Json(request): Json<IssueCredentialLeaseRequest>,
 ) -> Response {
     match state.credential_broker.issue_lease(&id, request) {
-        Ok(response) => (StatusCode::CREATED, Json(response)).into_response(),
-        Err(err) => credential_error(err),
+        Ok(response) => {
+            append_access_audit(
+                &state,
+                identity.as_ref(),
+                AuditEventType::SecretAccess,
+                response.id.clone(),
+                "credential_lease_issued",
+                AuditOutcome::Success,
+            )
+            .await;
+            (StatusCode::CREATED, Json(response)).into_response()
+        }
+        Err(err) => {
+            append_access_audit(
+                &state,
+                identity.as_ref(),
+                AuditEventType::SecretAccess,
+                id,
+                "credential_lease_issue_denied",
+                AuditOutcome::Denied,
+            )
+            .await;
+            credential_error(err)
+        }
     }
 }
 
@@ -118,19 +385,70 @@ async fn get_credential(State(state): State<AppState>, Path(id): Path<String>) -
 
 async fn update_credential(
     State(state): State<AppState>,
+    identity: Option<Extension<OperatorIdentity>>,
+    _admin: RequireAdmin,
     Path(id): Path<String>,
     Json(request): Json<UpsertCredentialRequest>,
 ) -> Response {
     match state.credential_broker.update(&id, request) {
-        Ok(response) => Json(response).into_response(),
-        Err(err) => credential_error(err),
+        Ok(response) => {
+            append_access_audit(
+                &state,
+                identity.as_ref(),
+                AuditEventType::ConfigChange,
+                id,
+                "credential_updated",
+                AuditOutcome::Success,
+            )
+            .await;
+            Json(response).into_response()
+        }
+        Err(err) => {
+            append_access_audit(
+                &state,
+                identity.as_ref(),
+                AuditEventType::ConfigChange,
+                id,
+                "credential_update_denied",
+                AuditOutcome::Denied,
+            )
+            .await;
+            credential_error(err)
+        }
     }
 }
 
-async fn delete_credential(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+async fn delete_credential(
+    State(state): State<AppState>,
+    identity: Option<Extension<OperatorIdentity>>,
+    _admin: RequireAdmin,
+    Path(id): Path<String>,
+) -> Response {
     match state.credential_broker.delete(&id) {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(err) => credential_error(err),
+        Ok(()) => {
+            append_access_audit(
+                &state,
+                identity.as_ref(),
+                AuditEventType::ConfigChange,
+                id,
+                "credential_deleted",
+                AuditOutcome::Success,
+            )
+            .await;
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Err(err) => {
+            append_access_audit(
+                &state,
+                identity.as_ref(),
+                AuditEventType::ConfigChange,
+                id,
+                "credential_delete_denied",
+                AuditOutcome::Denied,
+            )
+            .await;
+            credential_error(err)
+        }
     }
 }
 
@@ -209,6 +527,7 @@ mod tests {
             v1_counter: None,
             idempotency_store: Arc::new(crate::http::idempotency::IdempotencyStore::new()),
             mcp_config: None,
+            management_ws_endpoint: None,
         }
     }
 
@@ -362,5 +681,106 @@ mod tests {
         assert!(!text.contains("sk-http-lease-secret"));
         assert!(!text.contains("plaintext"));
         assert!(text.contains("revoked"));
+    }
+
+    #[tokio::test]
+    async fn trusted_local_authority_does_not_claim_ssh_identity() {
+        let app = Router::new()
+            .nest("/api/v2/credentials", router())
+            .with_state(test_state());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v2/credentials/authority")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["schema_version"], "management.access-authority/v1");
+        assert_eq!(body["mode"], "trusted_local_listener");
+        assert_eq!(body["role"], "admin");
+        let permissions = body["permissions"].as_array().unwrap();
+        assert!(permissions
+            .iter()
+            .any(|value| value.as_str() == Some("credential_lease.issue")));
+        assert!(!permissions
+            .iter()
+            .any(|value| value.as_str() == Some("ssh_lease.issue")));
+    }
+
+    #[tokio::test]
+    async fn access_audit_reports_explicit_unavailable_state() {
+        let app = Router::new()
+            .nest("/api/v2/credentials", router())
+            .with_state(test_state());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v2/credentials/audit?date=2026-09-03")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["available"], false);
+        assert_eq!(body["events"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn access_audit_projection_omits_event_details() {
+        let temp = tempfile::tempdir().unwrap();
+        let logger = Arc::new(
+            crate::audit::AuditLogger::new(crate::audit::AuditConfig {
+                log_dir: temp.path().to_path_buf(),
+                ..Default::default()
+            })
+            .await
+            .unwrap(),
+        );
+        logger
+            .log(
+                crate::audit::AuditEvent::new(
+                    AuditEventType::SecretAccess,
+                    "operator-1",
+                    "lease-1",
+                    "credential_lease_issued",
+                    AuditOutcome::Success,
+                )
+                .with_details(json!({
+                    "lease_id": "lease-1",
+                    "secret": "sk-audit-must-not-render"
+                })),
+            )
+            .await
+            .unwrap();
+        let mut state = test_state();
+        state.audit_logger = Some(logger);
+        let date = Utc::now().format("%Y-%m-%d");
+        let app = Router::new()
+            .nest("/api/v2/credentials", router())
+            .with_state(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v2/credentials/audit?date={date}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let text = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(!text.contains("sk-audit-must-not-render"));
+        assert!(!text.contains("details"));
+        let body: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(body["events"][0]["correlation_id"], "lease-1");
     }
 }

@@ -158,6 +158,8 @@ pub const SUPPORTED_CLIENT_MESSAGES: &[&str] = &[
     "session_resize",
 ];
 
+pub const MANAGEMENT_WS_PROTOCOL_VERSION: &str = "1.0";
+
 pub const SUPPORTED_FEATURES: &[&str] = &[
     "replay_buffer",
     "session_frames",
@@ -173,6 +175,7 @@ pub enum ServerMessage {
     /// clients can feature-gate (e.g. AIWG's `replayCapable` check at
     /// pty-bridge.ts:380). See #190.
     ServerHello {
+        protocol_version: &'static str,
         server_version: &'static str,
         supported_client_messages: &'static [&'static str],
         features: &'static [&'static str],
@@ -402,17 +405,23 @@ impl WsConnection {
 
         // Capability handshake (#190). First frame on every connection so
         // clients (AIWG bridge, future tooling) can feature-gate without
-        // probing. Unknown clients ignore it; the dashboard does today.
+        // probing. Protocol-correct clients validate it before sending.
         let hello = ServerMessage::ServerHello {
+            protocol_version: MANAGEMENT_WS_PROTOCOL_VERSION,
             server_version: env!("CARGO_PKG_VERSION"),
             supported_client_messages: SUPPORTED_CLIENT_MESSAGES,
             features: SUPPORTED_FEATURES,
         };
-        if let Ok(json) = serde_json::to_string(&hello) {
-            if let Err(e) = ws_tx.send(Message::Text(json.into())).await {
-                warn!(client = %id, error = %e, "failed to send server_hello — closing");
+        let json = match serde_json::to_string(&hello) {
+            Ok(json) => json,
+            Err(error) => {
+                error!(client = %id, %error, "failed to serialize server_hello — closing");
                 return;
             }
+        };
+        if let Err(error) = ws_tx.send(Message::Text(json.into())).await {
+            warn!(client = %id, %error, "failed to send server_hello — closing");
+            return;
         }
 
         // Spawn task to forward output messages to client (filtered by subscriptions)
@@ -1329,7 +1338,7 @@ fn output_to_server_message(msg: &OutputMessage) -> ServerMessage {
 mod tests {
     use super::{
         is_legacy_wildcard_subscription, legacy_agent_output_subscribe_allowed, option_enabled,
-        SUPPORTED_CLIENT_MESSAGES,
+        MANAGEMENT_WS_PROTOCOL_VERSION, SUPPORTED_CLIENT_MESSAGES,
     };
     use std::sync::{LazyLock, Mutex};
 
@@ -1383,6 +1392,7 @@ mod tests {
 
     #[test]
     fn server_hello_advertises_inventory_and_formal_session_operations() {
+        assert_eq!(MANAGEMENT_WS_PROTOCOL_VERSION, "1.0");
         for operation in [
             "list_agents",
             "list_sessions",

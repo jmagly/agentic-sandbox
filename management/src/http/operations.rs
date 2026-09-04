@@ -1,4 +1,4 @@
-//! Operation tracking for long-running VM operations
+//! Operation tracking for asynchronous management operations
 //!
 //! Tracks asynchronous VM operations (create, restart, etc.) with progress
 //! and result information. Operations are stored in memory with TTL.
@@ -201,6 +201,7 @@ pub enum OperationType {
     VmRestore,
     VmFork,
     VmWarmPool,
+    FleetReconcile,
 }
 
 /// Operation state

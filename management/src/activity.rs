@@ -234,6 +234,10 @@ pub struct SequenceGap {
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ActivityQuery {
+    /// Resume after this stable activity event identifier within the filtered
+    /// timeline. The cursor is intentionally the existing event ID rather than
+    /// a second database-specific offset.
+    pub cursor: Option<String>,
     pub event_name: Option<String>,
     pub collector: Option<String>,
     pub trust: Option<SourceTrust>,
@@ -286,6 +290,9 @@ pub struct ActivityQueryResult {
     pub events: Vec<ActivityEvent>,
     pub coverage: Vec<CollectorCoverage>,
     pub completeness: CompletenessAssessment,
+    pub next_cursor: Option<String>,
+    pub has_more: bool,
+    pub cursor_found: bool,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -679,17 +686,32 @@ impl ActivityStore {
         }
         let coverage = coverage_for_events(&db, scope, &all)?;
         let limit = query.limit.unwrap_or(200).min(5_000);
-        let events = all
+        let filtered: Vec<Arc<ActivityEvent>> = all
             .into_iter()
             .filter(|event| query.matches(event))
+            .collect();
+        let cursor_position = query
+            .cursor
+            .as_ref()
+            .and_then(|cursor| filtered.iter().position(|event| event.event_id == *cursor));
+        let cursor_found = query.cursor.is_none() || cursor_position.is_some();
+        let start = cursor_position.map(|position| position + 1).unwrap_or(0);
+        let has_more = filtered.len() > start.saturating_add(limit);
+        let events: Vec<ActivityEvent> = filtered
+            .into_iter()
+            .skip(start)
             .take(limit)
             .map(|event| (*event).clone())
             .collect();
+        let next_cursor = events.last().map(|event| event.event_id.clone());
         Ok(ActivityQueryResult {
             schema_version: ACTIVITY_SCHEMA_VERSION,
             events,
             completeness: assess_completeness(&coverage),
             coverage,
+            next_cursor,
+            has_more,
+            cursor_found,
         })
     }
 
@@ -1547,6 +1569,67 @@ mod tests {
         assert_eq!(result.events.len(), 1);
         assert!(!result.completeness.complete);
         assert!(result.completeness.maximum_clock_error_ms >= 4.0);
+    }
+
+    #[test]
+    fn timeline_pages_by_stable_event_cursor() {
+        let store = ActivityStore::in_memory().unwrap();
+        let ids = [
+            "0198f5f0-0000-7000-8000-000000000001",
+            "0198f5f0-0000-7000-8000-000000000002",
+            "0198f5f0-0000-7000-8000-000000000003",
+        ];
+        store
+            .ingest(
+                &scope(),
+                IngestBatch {
+                    events: ids
+                        .iter()
+                        .enumerate()
+                        .map(|(index, id)| event(id, index as u64 + 1))
+                        .collect(),
+                },
+            )
+            .unwrap();
+
+        let first = store
+            .query(
+                &scope(),
+                &ActivityQuery {
+                    limit: Some(2),
+                    ..ActivityQuery::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(first.events.len(), 2);
+        assert!(first.has_more);
+        assert_eq!(first.next_cursor.as_deref(), Some(ids[1]));
+
+        let second = store
+            .query(
+                &scope(),
+                &ActivityQuery {
+                    cursor: first.next_cursor,
+                    limit: Some(2),
+                    ..ActivityQuery::default()
+                },
+            )
+            .unwrap();
+        assert!(second.cursor_found);
+        assert_eq!(second.events.len(), 1);
+        assert_eq!(second.events[0].event_id, ids[2]);
+        assert!(!second.has_more);
+
+        let missing = store
+            .query(
+                &scope(),
+                &ActivityQuery {
+                    cursor: Some("0198f5f0-0000-7000-8000-ffffffffffff".into()),
+                    ..ActivityQuery::default()
+                },
+            )
+            .unwrap();
+        assert!(!missing.cursor_found);
     }
 
     #[test]

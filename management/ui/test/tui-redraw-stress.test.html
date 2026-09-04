@@ -33,12 +33,13 @@
         }, true);
 
         const results = document.getElementById('results');
+        let failures = 0;
         function assert(name, ok, detail) {
             const div = document.createElement('div');
             div.className = ok ? 'pass' : 'fail';
             div.textContent = (ok ? 'PASS ' : 'FAIL ') + name + (detail ? ' - ' + detail : '');
             results.appendChild(div);
-            if (!ok) console.error('FAIL', name, detail || '');
+            if (!ok) { failures += 1; console.error('FAIL', name, detail || ''); }
         }
 
         function wait(ms) {
@@ -112,6 +113,12 @@
 
             try {
                 const terminalHost = document.getElementById('terminal');
+                terminalHost.classList.add('xterm-wrapper');
+                terminalHost.setAttribute('role', 'region');
+                terminalHost.dataset.agentLabel = 'browser-redraw-agent';
+                terminalHost.dataset.role = 'unknown';
+                terminalHost.dataset.connection = 'connecting';
+                terminalHost.dataset.readonly = 'true';
                 const term = new Terminal({ cols: 80, rows: 10, convertEol: true, scrollback: 100 });
                 term.open(terminalHost);
 
@@ -134,7 +141,12 @@
 
                 await waitFor(() => FakeWS.instances.length === 1, 'initial websocket');
                 await waitFor(() => FakeWS.last.readyState === FakeWS.OPEN, 'initial websocket open');
-                FakeWS.last.deliver({ op: 'binding_hello', seq: 0, payload: { activated_extensions: ['pty-ws/v1'] } });
+                FakeWS.last.deliver({ op: 'binding_hello', seq: 0, payload: {
+                    binding_uri: 'https://agentic-sandbox.aiwg.io/bindings/pty-ws/v1',
+                    binding_version: '1.0.0',
+                    activated_extensions: ['https://agentic-sandbox.aiwg.io/extensions/pty-extensions/v1'],
+                    supported_operations: ['pty.join_session', 'pty.session_input', 'pty.session_resize', 'pty.request_keyframe', 'pty.request_role', 'pty.release_role', 'pty.leave_session'],
+                } });
                 assert('redraw_stress_initial_join_sent',
                     FakeWS.last.sent.length === 1 && JSON.parse(FakeWS.last.sent[0]).op === 'pty.join_session');
 
@@ -142,6 +154,13 @@
                     op: 'role_assigned', seq: 1,
                     payload: { role: 'controller', client_id: 'browser-test' },
                 });
+                assert('terminal_accessibility_exposes_connection_role_and_interactive_state',
+                    terminalHost.dataset.connection === 'connected' &&
+                    terminalHost.dataset.role === 'controller' &&
+                    terminalHost.dataset.readonly === 'false' &&
+                    terminalHost.getAttribute('aria-label').includes('connection connected'));
+                assert('terminal_accessibility_avoids_live_region_output_flooding',
+                    !terminalHost.hasAttribute('aria-live'));
 
                 for (let i = 0; i < 240; i++) {
                     const n = String(i).padStart(3, '0');
@@ -166,7 +185,12 @@
                 await waitFor(() => reconnect.readyState === FakeWS.OPEN, 'reconnect websocket open');
                 assert('redraw_stress_reconnect_uses_replay_cursor',
                     reconnect.url.includes('replay_from=241'), reconnect.url);
-                reconnect.deliver({ op: 'binding_hello', seq: 0, payload: { activated_extensions: ['pty-ws/v1'] } });
+                reconnect.deliver({ op: 'binding_hello', seq: 0, payload: {
+                    binding_uri: 'https://agentic-sandbox.aiwg.io/bindings/pty-ws/v1',
+                    binding_version: '1.0.0',
+                    activated_extensions: ['https://agentic-sandbox.aiwg.io/extensions/pty-extensions/v1'],
+                    supported_operations: ['pty.join_session', 'pty.session_input', 'pty.session_resize', 'pty.request_keyframe', 'pty.request_role', 'pty.release_role', 'pty.leave_session'],
+                } });
                 assert('redraw_stress_reconnect_rejoins_session',
                     reconnect.sent.length === 1 && JSON.parse(reconnect.sent[0]).op === 'pty.join_session');
 
@@ -186,6 +210,8 @@
             } finally {
                 window.WebSocket = realWS;
                 window.setTimeout = realSetTimeout;
+                document.body.dataset.result = failures ? 'fail' : 'pass';
+                document.body.dataset.failures = String(failures);
             }
         })();
     </script>

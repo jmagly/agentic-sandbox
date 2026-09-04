@@ -1218,6 +1218,12 @@ async fn main() -> Result<()> {
         "/srv/agentshare".to_string(),
         "/srv/agentshare/tasks".to_string(),
     )
+    .with_management_ws_endpoint(
+        std::env::var("AGENTIC_MANAGEMENT_WS_PUBLIC_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| format!("ws://{{host}}:{ws_port}/")),
+    )
     .with_mcp_config(mcp_config)
     .with_operator_auth({
         let cfg = crate::http::operator_auth::OperatorAuthConfig::load(

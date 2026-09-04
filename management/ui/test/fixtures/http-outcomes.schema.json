@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentic-sandbox.aiwg.io/schemas/management-ui-http-outcomes-v1.json",
+  "type": "object",
+  "required": ["schema_version", "operations", "outcomes"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "schema_version": { "const": "1.0" },
+    "operations": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "required": ["id", "method", "path", "domain"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "method": { "enum": ["GET", "POST", "PUT", "DELETE"] },
+          "path": { "type": "string", "pattern": "^/" },
+          "domain": { "type": "string", "minLength": 1 }
+        },
+        "additionalProperties": false
+      }
+    },
+    "outcomes": {
+      "type": "object",
+      "required": ["success", "accepted", "problem", "forbidden", "conflict", "rate_limited", "unavailable", "non_json_error"],
+      "additionalProperties": {
+        "type": "object",
+        "required": ["status", "headers", "body"],
+        "properties": {
+          "status": { "type": "integer", "minimum": 200, "maximum": 599 },
+          "headers": { "type": "object", "additionalProperties": { "type": "string" } },
+          "body": {}
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

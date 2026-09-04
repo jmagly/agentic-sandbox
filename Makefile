@@ -1,4 +1,4 @@
-.PHONY: build test lint clean docker help install deps integration-test test-unit test-scripts test-integration test-e2e test-all test-celld test-celld-uat-structure test-celld-uat test-celld-uat-automated test-celld-soak test-celld-human-uat fmt vet check build-agent-musl build-agent-all docker-mgmt docker-agent docker-push
+.PHONY: build test lint clean docker help install deps integration-test test-unit test-scripts test-integration test-e2e test-all test-management-ui test-management-ui-browser test-celld test-celld-uat-structure test-celld-uat test-celld-uat-automated test-celld-soak test-celld-human-uat fmt vet check build-agent-musl build-agent-all docker-mgmt docker-agent docker-push
 
 # Docker image tags
 # Internal base image. Versioned tag is what downstream Dockerfile FROMs
@@ -98,6 +98,12 @@ test-scripts: ## Run lightweight script regression tests
 	@./tests/container/test-agentshare-run-retention.sh
 	@./tests/container/test-e2e-agentshare-forwarding.sh
 	@./scripts/verify-container-security.sh
+
+test-management-ui: ## Run deterministic management dashboard contracts and state-flow tests
+	@node --test --test-concurrency=$(NODE_TEST_CONCURRENCY) management/ui/test/management-ui.test.mjs
+
+test-management-ui-browser: ## Run focused management dashboard tests in a headless Chromium-compatible browser
+	@./scripts/run-management-ui-browser-smoke.sh
 
 test-celld: ## Run deterministic Celld Rust, contract, and Worker behavior tests
 	@./scripts/test-celld-contracts.sh
@@ -199,6 +205,6 @@ clean: ## Remove build artifacts
 clean-all: clean docker-clean ## Remove all build artifacts and Docker images
 
 # Quick checks before commit
-check: lint test-unit test-scripts ## Run all checks (format check + tests)
+check: lint test-unit test-scripts test-management-ui ## Run all checks (format check + tests)
 
 .DEFAULT_GOAL := help

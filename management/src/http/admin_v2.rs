@@ -21,9 +21,10 @@
 //! Issue: #215.
 
 use axum::{
-    body::Body,
-    extract::{Path as AxPath, Query, State},
-    http::{header, StatusCode},
+    body::{to_bytes, Body},
+    extract::{Path as AxPath, Query, Request, State},
+    http::{header, HeaderMap, HeaderValue, Method, StatusCode},
+    middleware::Next,
     response::{
         sse::{Event as SseEvent, KeepAlive, Sse},
         IntoResponse, Response,
@@ -35,15 +36,18 @@ use base64::Engine as _;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
 use std::fs;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 
+use super::idempotency::{AdminIdempotencyDecision, IdempotencyStore};
 use super::operations::{Operation, OperationType};
 use super::server::AppState;
 use crate::celld::{CellAction, CellCommand, EffectStatus};
@@ -123,13 +127,158 @@ pub fn router() -> Router<AppState> {
         .route("/deprecation/v1-counters", get(get_v1_counters))
 }
 
+const ADMIN_IDEMPOTENCY_BODY_LIMIT: usize = 16 * 1024 * 1024;
+
+/// Bind every keyed v2 admin mutation to one method/URI/body fingerprint.
+/// The reservation is installed before dispatch, preventing concurrent
+/// duplicates, and the complete response is cached before it is returned to
+/// the transport so response loss can be reconciled by replaying the same key.
+pub async fn enforce_idempotency(
+    State(store): State<Arc<IdempotencyStore>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if matches!(
+        *request.method(),
+        Method::GET | Method::HEAD | Method::OPTIONS
+    ) {
+        return next.run(request).await;
+    }
+    let key = match IdempotencyStore::validate_key(request.headers()) {
+        Ok(Some(key)) => key,
+        Ok(None) => return next.run(request).await,
+        Err(detail) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "idempotency.invalid_key",
+                "Invalid idempotency key",
+                Some(detail.to_string()),
+                None,
+            )
+        }
+    };
+
+    let (parts, body) = request.into_parts();
+    let body = match to_bytes(body, ADMIN_IDEMPOTENCY_BODY_LIMIT).await {
+        Ok(body) => body,
+        Err(error) => {
+            return error_response(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "idempotency.body_unavailable",
+                "Request body unavailable",
+                Some(format!("cannot fingerprint keyed mutation: {error}")),
+                None,
+            )
+        }
+    };
+    let mut hasher = Sha256::new();
+    hasher.update(parts.method.as_str().as_bytes());
+    hasher.update(b"\n");
+    hasher.update(
+        parts
+            .uri
+            .path_and_query()
+            .map(|value| value.as_str())
+            .unwrap_or("/"),
+    );
+    hasher.update(b"\n");
+    hasher.update(&body);
+    // Bind the request to the authenticated principal resolved by the outer
+    // auth middleware. Credential material itself never enters the cache
+    // fingerprint, so token rotation does not change the operator identity.
+    if let Some(identity) = parts
+        .extensions
+        .get::<super::operator_auth::OperatorIdentity>()
+    {
+        hasher.update(b"\nactor:");
+        hasher.update(identity.actor.as_bytes());
+    } else if let Some(peer) = parts
+        .extensions
+        .get::<super::operator_auth::UnixPeerCreds>()
+    {
+        hasher.update(format!("\nuid:{}", peer.uid).as_bytes());
+    } else if let Some(identity) = parts.extensions.get::<super::operator_auth::MtlsIdentity>() {
+        hasher.update(b"\nmtls:");
+        hasher.update(identity.cn.as_bytes());
+    } else if let Some(role) = parts.extensions.get::<super::operator_auth::OperatorRole>() {
+        hasher.update(format!("\nrole:{role:?}").as_bytes());
+    } else {
+        hasher.update(b"\nactor:trusted-network");
+    }
+    let fingerprint = format!("{:x}", hasher.finalize());
+
+    match store.begin_admin(&key, &fingerprint) {
+        AdminIdempotencyDecision::Replay(cached) => {
+            let mut response = Response::new(Body::from(cached.body));
+            *response.status_mut() = cached.status;
+            *response.headers_mut() = cached.headers;
+            response
+                .headers_mut()
+                .insert("idempotency-replayed", HeaderValue::from_static("true"));
+            response
+        }
+        AdminIdempotencyDecision::Conflict => error_response(
+            StatusCode::CONFLICT,
+            "idempotency.key_conflict",
+            "Idempotency key conflict",
+            Some("this key is already bound to a different method, URI, or payload".to_string()),
+            None,
+        ),
+        AdminIdempotencyDecision::InFlight => {
+            let mut response = error_response(
+                StatusCode::CONFLICT,
+                "idempotency.in_progress",
+                "Idempotent request in progress",
+                Some(
+                    "the original keyed mutation has not produced a replayable response yet"
+                        .to_string(),
+                ),
+                None,
+            );
+            response
+                .headers_mut()
+                .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+            response
+        }
+        AdminIdempotencyDecision::Execute => {
+            let request = Request::from_parts(parts, Body::from(body));
+            let response = next.run(request).await;
+            let (parts, body) = response.into_parts();
+            match to_bytes(body, ADMIN_IDEMPOTENCY_BODY_LIMIT).await {
+                Ok(body) => {
+                    store.complete_admin(
+                        &key,
+                        &fingerprint,
+                        parts.status,
+                        parts.headers.clone(),
+                        body.clone(),
+                    );
+                    Response::from_parts(parts, Body::from(body))
+                }
+                Err(error) => {
+                    store.abandon_admin(&key, &fingerprint);
+                    err_internal(&format!("cannot retain keyed mutation response: {error}"))
+                }
+            }
+        }
+    }
+}
+
 #[derive(Serialize)]
 struct BootstrapReadinessResponse {
     status: &'static str,
+    management_websocket: ManagementWebSocketDiscovery,
     ca_provider: CaProviderReadiness,
     bootstrap: BootstrapReadiness,
     error_taxonomy: Vec<ClientSafeBootstrapError>,
     notes: Vec<&'static str>,
+}
+
+#[derive(Serialize)]
+struct ManagementWebSocketDiscovery {
+    endpoint: Option<String>,
+    source: &'static str,
+    protocol_version: &'static str,
 }
 
 #[derive(Serialize)]
@@ -214,6 +363,15 @@ pub async fn get_bootstrap_readiness(State(state): State<AppState>) -> Response 
 
     let body = BootstrapReadinessResponse {
         status,
+        management_websocket: ManagementWebSocketDiscovery {
+            endpoint: state.management_ws_endpoint.clone(),
+            source: if state.management_ws_endpoint.is_some() {
+                "server_advertised"
+            } else {
+                "same_origin_fallback"
+            },
+            protocol_version: crate::ws::MANAGEMENT_WS_PROTOCOL_VERSION,
+        },
         ca_provider: CaProviderReadiness {
             configured: ca.is_some(),
             status: ca_status,
@@ -765,6 +923,12 @@ struct ProvisionRequest {
     agentshare: bool,
     #[serde(default)]
     start: bool,
+    #[serde(default)]
+    vcpus: Option<u32>,
+    #[serde(default)]
+    memory_mb: Option<u64>,
+    #[serde(default)]
+    disk_gb: Option<u64>,
     /// Optional launch cwd for host-backed instances.
     #[serde(default)]
     working_dir: Option<PathBuf>,
@@ -806,6 +970,7 @@ struct OperationStatusV2 {
     id: String,
     kind: String,
     state: String,
+    target: String,
     created_at: DateTime<Utc>,
     #[serde(skip_serializing_if = "Option::is_none")]
     completed_at: Option<DateTime<Utc>>,
@@ -813,6 +978,12 @@ struct OperationStatusV2 {
     result: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<Value>,
+    progress: OperationProgressV2,
+}
+
+#[derive(Debug, Serialize)]
+struct OperationProgressV2 {
+    percent: u8,
 }
 
 #[derive(Debug, Serialize)]
@@ -890,6 +1061,7 @@ fn loadout_runtime_for_v2(
 
 #[derive(Debug, Serialize)]
 struct LogEntryV2 {
+    id: String,
     timestamp: DateTime<Utc>,
     level: String,
     target: String,
@@ -919,6 +1091,56 @@ struct StreamQuery {
     kind: Option<String>,
     #[serde(default)]
     limit: Option<usize>,
+    /// Stable event cursor. Accepts either the SSE numeric ID or the public
+    /// `ev_<id>` resource ID returned in snapshot items.
+    #[serde(default)]
+    cursor: Option<String>,
+}
+
+fn event_cursor(value: &str) -> Result<u64, ()> {
+    value
+        .strip_prefix("ev_")
+        .or_else(|| value.strip_prefix("log_"))
+        .unwrap_or(value)
+        .parse()
+        .map_err(|_| ())
+}
+
+fn stream_resume_cursor(
+    query_cursor: Option<&str>,
+    headers: &HeaderMap,
+) -> Result<Option<u64>, ()> {
+    if let Some(value) = headers.get("last-event-id") {
+        return value
+            .to_str()
+            .map_err(|_| ())
+            .and_then(event_cursor)
+            .map(Some);
+    }
+    query_cursor.map(event_cursor).transpose()
+}
+
+fn event_matches_kind(event: &super::events::VmEvent, wanted: Option<&str>) -> bool {
+    wanted
+        .map(|wanted| {
+            let kind = event.event_type.to_string();
+            if let Some(prefix) = wanted.strip_suffix(".*") {
+                kind.starts_with(prefix)
+            } else {
+                kind == wanted
+            }
+        })
+        .unwrap_or(true)
+}
+
+fn event_v2(item: super::events::SequencedVmEvent) -> EventV2 {
+    EventV2 {
+        id: format!("ev_{}", item.id),
+        kind: item.event.event_type.to_string(),
+        timestamp: item.event.timestamp,
+        subject: Some(format!("instance/{}", item.event.vm_name)),
+        data: serde_json::to_value(&item.event.details).ok(),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1079,6 +1301,7 @@ fn v1_optype_to_v2(t: &OperationType) -> &'static str {
         OperationType::VmRestore => "instance.restore",
         OperationType::VmFork => "instance.fork",
         OperationType::VmWarmPool => "warm_pool.manage",
+        OperationType::FleetReconcile => "fleet.reconcile",
     }
 }
 
@@ -1108,11 +1331,19 @@ fn op_to_v2(op: &Operation) -> OperationStatusV2 {
         id: op.id.clone(),
         kind: v1_optype_to_v2(&op.op_type).to_string(),
         state: v1_opstate_to_v2(&op.state).to_string(),
+        target: op.target.clone(),
         created_at: op.created_at,
         completed_at: op.completed_at,
         result: op.result.clone(),
         error,
+        progress: OperationProgressV2 {
+            percent: op.progress_percent,
+        },
     }
+}
+
+pub(crate) fn operation_value(op: &Operation) -> Value {
+    serde_json::to_value(op_to_v2(op)).unwrap_or_default()
 }
 
 /// Insert a synthetic "succeeded" operation for v1 endpoints that
@@ -1592,7 +1823,7 @@ fn build_instance_from_container(
         name: c.name.clone(),
         runtime: "docker".to_string(),
         provider: None,
-        capabilities: Vec::new(),
+        capabilities: runtime_lifecycle_capabilities("docker"),
         capability_constraints: Vec::new(),
         state,
         agent_card_url,
@@ -1658,7 +1889,7 @@ fn build_instance_from_registered_context(
     } else if let Some(metadata) = vm_metadata.as_ref() {
         vm_capabilities(&metadata.provider, metadata.vfio)
     } else {
-        Vec::new()
+        runtime_lifecycle_capabilities(runtime)
     };
     let capability_constraints = vm_metadata
         .as_ref()
@@ -2194,6 +2425,17 @@ fn common_vm_capabilities() -> Vec<String> {
     .into_iter()
     .map(str::to_string)
     .collect()
+}
+
+fn runtime_lifecycle_capabilities(runtime: &str) -> Vec<String> {
+    let values: &[&str] = match runtime {
+        "docker" => &["instance.start", "instance.stop", "instance.destroy"],
+        // The configured host supervisor currently implements stop/destroy;
+        // start/restart are not advertised until their handlers exist.
+        "host" => &["instance.stop", "instance.destroy"],
+        _ => &[],
+    };
+    values.iter().map(|value| (*value).to_string()).collect()
 }
 
 fn vfio_faststart_constraint() -> RuntimeCapabilityConstraint {
@@ -3261,6 +3503,9 @@ async fn provision_instance_inner(
     let agentshare = req.agentshare;
     let start = req.start;
     let ssh_key = req.ssh_key.clone();
+    let vcpus = req.vcpus;
+    let memory_mb = req.memory_mb;
+    let disk_gb = req.disk_gb;
     let working_dir = req.working_dir.clone();
     let vm_provider_for_task = effective_vm_provider.clone();
     let runtime_launch_intent_for_task = runtime_launch_intent.clone();
@@ -3339,6 +3584,15 @@ async fn provision_instance_inner(
                 }
                 if agentshare {
                     cmd.arg("--agentshare");
+                }
+                if let Some(value) = vcpus.filter(|value| *value > 0) {
+                    cmd.arg("--cpus").arg(value.to_string());
+                }
+                if let Some(value) = memory_mb.filter(|value| *value > 0) {
+                    cmd.arg("--memory").arg(format!("{value}M"));
+                }
+                if let Some(value) = disk_gb.filter(|value| *value > 0) {
+                    cmd.arg("--disk").arg(format!("{value}G"));
                 }
                 if start {
                     cmd.arg("--start");
@@ -5568,11 +5822,19 @@ async fn destroy_instance(State(state): State<AppState>, AxPath(id): AxPath<Stri
     }
 }
 
-/// Remove an instance from the executor's `InstanceRegistry` and best-effort
-/// delete its on-disk signing key directory (#252). Safe to call when the
+/// Remove an instance from the executor's `InstanceRegistry`, release its
+/// startup-profile binding, and best-effort delete its on-disk signing key
+/// directory (#252). Safe to call when the
 /// executor surface isn't mounted — both `executor_instance_registry` and
 /// `executor_signing_keys_dir` are `None` in that case.
 pub(super) fn remove_instance_from_executor(state: &AppState, instance_id: &str) {
+    if let Err(error) = state.startup_profiles.unbind_instance_profile(instance_id) {
+        tracing::warn!(
+            instance_id = %instance_id,
+            error = %error,
+            "failed to release startup profile binding for removed instance"
+        );
+    }
     if let Some(resolver) = state.transport_identity_resolver.as_ref() {
         if let Some(uds_uid) = resolver.unregister_uds_instance(instance_id) {
             tracing::info!(
@@ -5799,6 +6061,9 @@ async fn get_operation(State(state): State<AppState>, AxPath(id): AxPath<String>
 
 // ─── Handlers: storage ───────────────────────────────────────────────────
 
+const MAX_MANAGEMENT_STORAGE_OBJECT_BYTES: u64 = 1024 * 1024;
+const MAX_MANAGEMENT_STORAGE_BROWSE_ENTRIES: usize = 500;
+
 /// Resolve a storage path to an absolute filesystem path under the
 /// agentshare / tasks roots. Refuses path traversal.
 fn resolve_storage_path(state: &AppState, scope: &str, rel: &str) -> Result<PathBuf, Response> {
@@ -5858,8 +6123,8 @@ async fn get_storage_object(
         Ok(p) => p,
         Err(r) => return r,
     };
-    let bytes = match tokio::fs::read(&fs_path).await {
-        Ok(b) => b,
+    let meta = match tokio::fs::metadata(&fs_path).await {
+        Ok(metadata) => metadata,
         Err(_) => {
             return err_not_found(
                 "object",
@@ -5868,9 +6133,60 @@ async fn get_storage_object(
             )
         }
     };
-    let meta = match tokio::fs::metadata(&fs_path).await {
-        Ok(m) => m,
-        Err(e) => return err_internal(&format!("stat failed: {}", e)),
+    if meta.is_dir() {
+        let mut reader = match tokio::fs::read_dir(&fs_path).await {
+            Ok(reader) => reader,
+            Err(error) => return err_internal(&format!("directory browse failed: {error}")),
+        };
+        let mut items = Vec::new();
+        let mut truncated = false;
+        loop {
+            let entry = match reader.next_entry().await {
+                Ok(Some(entry)) => entry,
+                Ok(None) => break,
+                Err(error) => return err_internal(&format!("directory browse failed: {error}")),
+            };
+            if items.len() == MAX_MANAGEMENT_STORAGE_BROWSE_ENTRIES {
+                truncated = true;
+                break;
+            }
+            let metadata = match entry.metadata().await {
+                Ok(metadata) => metadata,
+                Err(_) => continue,
+            };
+            items.push(json!({
+                "name": entry.file_name().to_string_lossy(),
+                "kind": if metadata.is_dir() { "directory" } else { "object" },
+                "size_bytes": metadata.is_file().then_some(metadata.len()),
+            }));
+        }
+        items.sort_by(|left, right| left["name"].as_str().cmp(&right["name"].as_str()));
+        return Json(json!({
+            "kind": "directory",
+            "scope": scope,
+            "path": path,
+            "items": items,
+            "truncated": truncated,
+            "limit": MAX_MANAGEMENT_STORAGE_BROWSE_ENTRIES,
+        }))
+        .into_response();
+    }
+    if meta.len() > MAX_MANAGEMENT_STORAGE_OBJECT_BYTES {
+        return error_response(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "storage.object_too_large",
+            "Storage object exceeds management UI read limit",
+            Some(format!(
+                "object is {} bytes; maximum is {} bytes",
+                meta.len(),
+                MAX_MANAGEMENT_STORAGE_OBJECT_BYTES
+            )),
+            None,
+        );
+    }
+    let bytes = match tokio::fs::read(&fs_path).await {
+        Ok(bytes) => bytes,
+        Err(error) => return err_internal(&format!("read failed: {error}")),
     };
     let modified: DateTime<Utc> = meta
         .modified()
@@ -5931,6 +6247,12 @@ async fn put_storage_object(
         }
         (None, None) => return err_validation("body must include 'content' or 'content_base64'"),
     };
+    if bytes.len() as u64 > MAX_MANAGEMENT_STORAGE_OBJECT_BYTES {
+        return err_validation(&format!(
+            "storage object exceeds {} byte management limit",
+            MAX_MANAGEMENT_STORAGE_OBJECT_BYTES
+        ));
+    }
     if let Some(parent) = fs_path.parent() {
         if let Err(e) = tokio::fs::create_dir_all(parent).await {
             return err_internal(&format!("mkdir failed: {}", e));
@@ -6016,16 +6338,25 @@ async fn list_container_images() -> Response {
     Json(json!({"items": v2_items})).into_response()
 }
 
+fn loadout_profiles_dir() -> Option<PathBuf> {
+    std::env::var_os("AGENTIC_LOADOUT_PROFILES_DIR")
+        .map(PathBuf::from)
+        .filter(|path| path.is_dir())
+        .or_else(|| {
+            [
+                "images/qemu/loadouts/profiles",
+                "../images/qemu/loadouts/profiles",
+            ]
+            .iter()
+            .map(PathBuf::from)
+            .find(|path| path.is_dir())
+        })
+}
+
 async fn list_loadouts() -> Response {
     // Scan the loadout profiles directory directly. Reuses the v1 parser so
     // runtime_options and resolved compatibility never drift between surfaces.
-    let dir = [
-        "images/qemu/loadouts/profiles",
-        "../images/qemu/loadouts/profiles",
-    ]
-    .iter()
-    .map(std::path::PathBuf::from)
-    .find(|p| p.is_dir());
+    let dir = loadout_profiles_dir();
     let dir = match dir {
         Some(d) => d,
         None => return Json(json!({"items": []})).into_response(),
@@ -6055,18 +6386,82 @@ async fn list_loadouts() -> Response {
 }
 
 async fn create_loadout(Json(req): Json<LoadoutCreateRequest>) -> Response {
-    // Validate YAML parses
-    if serde_yaml::from_str::<serde_yaml::Value>(&req.manifest).is_err() {
-        return err_validation("manifest must be valid YAML");
+    if req.name.is_empty()
+        || req.name.len() > 80
+        || !req
+            .name
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_' || ch == '-')
+        || matches!(req.name.chars().next(), Some('_' | '-'))
+    {
+        return err_validation(
+            "name must be 1-80 lowercase letters, digits, underscores, or hyphens",
+        );
     }
+    if req.manifest.len() > 256 * 1024 {
+        return err_validation("manifest exceeds the 256 KiB catalog limit");
+    }
+    let yaml = match serde_yaml::from_str::<serde_yaml::Value>(&req.manifest) {
+        Ok(yaml) => yaml,
+        Err(_) => return err_validation("manifest must be valid YAML"),
+    };
+    let manifest_name = yaml
+        .get("metadata")
+        .and_then(|metadata| metadata.get("name"))
+        .and_then(|name| name.as_str());
+    if manifest_name != Some(req.name.as_str()) {
+        return err_validation("manifest metadata.name must match the requested catalog name");
+    }
+    let dir = loadout_profiles_dir();
+    let Some(dir) = dir else {
+        return err_internal("loadout catalog directory is unavailable");
+    };
+    let path = dir.join(format!("{}.yaml", req.name));
+    let mut file = match tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .await
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            return error_response(
+                StatusCode::CONFLICT,
+                "loadout.already_exists",
+                "Loadout already exists",
+                Some(format!("catalog entry '{}' already exists", req.name)),
+                None,
+            )
+        }
+        Err(error) => return err_internal(&format!("loadout catalog create failed: {error}")),
+    };
+    if let Err(error) = file.write_all(req.manifest.as_bytes()).await {
+        let _ = tokio::fs::remove_file(&path).await;
+        return err_internal(&format!("loadout catalog write failed: {error}"));
+    }
+    if let Err(error) = file.flush().await {
+        let _ = tokio::fs::remove_file(&path).await;
+        return err_internal(&format!("loadout catalog flush failed: {error}"));
+    }
+    if let Err(error) = file.sync_data().await {
+        let _ = tokio::fs::remove_file(&path).await;
+        return err_internal(&format!("loadout catalog sync failed: {error}"));
+    }
+    let parsed = match super::loadouts::parse_loadout_file(&path) {
+        Some(parsed) => parsed,
+        None => {
+            let _ = tokio::fs::remove_file(&path).await;
+            return err_validation("manifest is not a supported loadout profile");
+        }
+    };
     let v2 = LoadoutV2 {
-        name: req.name.clone(),
+        name: parsed.name,
         version: "1".to_string(),
-        runtime: None,
-        description: None,
+        runtime: loadout_runtime_for_v2(parsed.runtime_options.as_ref()),
+        description: Some(parsed.description),
         manifest: Some(req.manifest),
-        runtime_options: None,
-        compatibility: Vec::new(),
+        runtime_options: parsed.runtime_options,
+        compatibility: parsed.compatibility,
     };
     let body = serde_json::to_vec(&v2).unwrap_or_default();
     Response::builder()
@@ -6078,55 +6473,97 @@ async fn create_loadout(Json(req): Json<LoadoutCreateRequest>) -> Response {
 
 // ─── Handlers: streaming ─────────────────────────────────────────────────
 
-async fn stream_logs(Query(q): Query<StreamQuery>) -> Response {
+fn log_matches(entry: &crate::telemetry::log_buffer::LogEntry, q: &StreamQuery) -> bool {
+    q.level
+        .as_deref()
+        .map(|level| entry.level.eq_ignore_ascii_case(level))
+        .unwrap_or(true)
+        && q.target
+            .as_deref()
+            .map(|target| entry.target.contains(target))
+            .unwrap_or(true)
+}
+
+fn log_entry_v2(entry: crate::telemetry::log_buffer::LogEntry) -> LogEntryV2 {
+    LogEntryV2 {
+        id: format!("log_{}", entry.id),
+        timestamp: entry.timestamp,
+        level: entry.level.to_string(),
+        target: entry.target,
+        message: entry.message,
+    }
+}
+
+async fn stream_logs(Query(q): Query<StreamQuery>, headers: HeaderMap) -> Response {
+    let cursor = match stream_resume_cursor(q.cursor.as_deref(), &headers) {
+        Ok(cursor) => cursor,
+        Err(()) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "stream.invalid_cursor",
+                "Invalid stream cursor",
+                Some("cursor must be a numeric ID or an ev_/log_ prefixed numeric ID".into()),
+                None,
+            )
+        }
+    };
     if !q.follow {
-        // Snapshot
         let limit = q.limit.unwrap_or(200).min(5000);
-        let entries = crate::telemetry::log_buffer::snapshot(limit);
+        let (entries, gap, latest) = if let Some(cursor) = cursor {
+            crate::telemetry::log_buffer::snapshot_after(cursor, limit)
+        } else {
+            (
+                crate::telemetry::log_buffer::snapshot(limit),
+                false,
+                crate::telemetry::log_buffer::last_id(),
+            )
+        };
         let items: Vec<LogEntryV2> = entries
             .into_iter()
-            .filter(|e| {
-                q.level
-                    .as_deref()
-                    .map(|lvl| e.level.eq_ignore_ascii_case(lvl))
-                    .unwrap_or(true)
-            })
-            .filter(|e| {
-                q.target
-                    .as_deref()
-                    .map(|t| e.target.contains(t))
-                    .unwrap_or(true)
-            })
-            .map(|e| LogEntryV2 {
-                timestamp: e.timestamp,
-                level: e.level.to_string(),
-                target: e.target,
-                message: e.message,
-            })
+            .filter(|entry| log_matches(entry, &q))
+            .map(log_entry_v2)
             .collect();
-        return Json(json!({"items": items})).into_response();
+        return Json(json!({
+            "items": items,
+            "cursor": latest.to_string(),
+            "gap": gap,
+            "bounded": true,
+        }))
+        .into_response();
     }
-    // SSE: emit periodic snapshots of new entries.
-    // Without a tracing-layer event broadcast we tail the ring buffer.
+
+    // The log ring has no broadcast sender, so follow mode tails by stable
+    // cursor. Unlike the previous implementation, it emits each entry once.
+    let mut cursor = cursor.unwrap_or_else(crate::telemetry::log_buffer::last_id);
     let stream = async_stream::stream! {
-        let mut seen = 0u64;
         let mut interval = tokio::time::interval(Duration::from_millis(500));
         loop {
             interval.tick().await;
-            let snap = crate::telemetry::log_buffer::snapshot(50);
-            for entry in snap.into_iter().rev() {
-                seen += 1;
-                let v2 = LogEntryV2 {
-                    timestamp: entry.timestamp,
-                    level: entry.level.to_string(),
-                    target: entry.target,
-                    message: entry.message,
-                };
-                let data = serde_json::to_string(&v2).unwrap_or_default();
+            let (entries, gap, latest) = crate::telemetry::log_buffer::snapshot_after(cursor, 5000);
+            if gap {
+                let data = json!({
+                    "reason": "cursor_before_retained_window",
+                    "cursor": cursor.to_string(),
+                    "latest_cursor": latest.to_string(),
+                    "action": "fetch_snapshot_and_reconnect",
+                });
                 yield Ok::<_, Infallible>(
-                    SseEvent::default().id(seen.to_string()).event("log").data(data),
+                    SseEvent::default().event("resync-required").data(data.to_string()),
                 );
             }
+            for entry in entries {
+                cursor = cursor.max(entry.id);
+                if !log_matches(&entry, &q) {
+                    continue;
+                }
+                let id = entry.id;
+                let v2 = log_entry_v2(entry);
+                let data = serde_json::to_string(&v2).unwrap_or_default();
+                yield Ok::<_, Infallible>(
+                    SseEvent::default().id(id.to_string()).event("log").data(data),
+                );
+            }
+            cursor = cursor.max(latest);
         }
     };
     Sse::new(stream)
@@ -6138,59 +6575,107 @@ async fn stream_logs(Query(q): Query<StreamQuery>) -> Response {
         .into_response()
 }
 
-async fn stream_events(Query(q): Query<StreamQuery>) -> Response {
+async fn stream_events(Query(q): Query<StreamQuery>, headers: HeaderMap) -> Response {
     let store = super::events::get_event_store();
+    let cursor = match stream_resume_cursor(q.cursor.as_deref(), &headers) {
+        Ok(cursor) => cursor,
+        Err(()) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "stream.invalid_cursor",
+                "Invalid stream cursor",
+                Some("cursor must be a numeric ID or an ev_/log_ prefixed numeric ID".into()),
+                None,
+            )
+        }
+    };
+    let limit = q.limit.unwrap_or(200).min(5000);
     if !q.follow {
-        let limit = q.limit.unwrap_or(200).min(5000);
-        let all = store.get_all_events(limit).await;
+        let (all, gap) = if let Some(cursor) = cursor {
+            store.get_sequenced_events_after(cursor, limit).await
+        } else {
+            (store.get_all_sequenced_events(limit).await, false)
+        };
         let items: Vec<EventV2> = all
             .into_iter()
-            .filter(|e| {
-                q.kind
-                    .as_deref()
-                    .map(|k| {
-                        let kind = format!("{}", e.event_type);
-                        if let Some(prefix) = k.strip_suffix(".*") {
-                            kind.starts_with(prefix)
-                        } else {
-                            kind == k
-                        }
-                    })
-                    .unwrap_or(true)
-            })
-            .map(|e| EventV2 {
-                id: format!("ev_{}", uuid::Uuid::new_v4().simple()),
-                kind: format!("{}", e.event_type),
-                timestamp: e.timestamp,
-                subject: Some(format!("instance/{}", e.vm_name)),
-                data: serde_json::to_value(&e.details).ok(),
-            })
+            .filter(|item| event_matches_kind(&item.event, q.kind.as_deref()))
+            .map(event_v2)
             .collect();
-        return Json(json!({"items": items})).into_response();
+        return Json(json!({
+            "items": items,
+            "cursor": store.last_event_id().await.to_string(),
+            "gap": gap,
+            "bounded": true,
+        }))
+        .into_response();
     }
 
-    // SSE: subscribe to the broadcast channel.
+    // Subscribe before reading the replay window so an event arriving between
+    // the two operations is either replayed or received live (and then safely
+    // deduplicated by its stable ID).
     let mut rx = store.subscribe();
+    let replay_cursor = cursor.unwrap_or_else(|| 0);
+    let replay = if cursor.is_some() {
+        store.get_sequenced_events_after(replay_cursor, limit).await
+    } else {
+        (Vec::new(), false)
+    };
+    let kind_filter = q.kind.clone();
+    let stream_store = store.clone();
     let stream = async_stream::stream! {
-        let mut seq = 0u64;
+        if replay.1 {
+            let data = json!({
+                "reason": "cursor_before_retained_window",
+                "cursor": replay_cursor.to_string(),
+                "action": "fetch_snapshot_and_reconnect",
+            });
+            yield Ok::<_, Infallible>(
+                SseEvent::default().event("resync-required").data(data.to_string()),
+            );
+        }
+        for item in replay.0 {
+            if !event_matches_kind(&item.event, kind_filter.as_deref()) {
+                continue;
+            }
+            let id = item.id;
+            let event = event_v2(item);
+            let data = serde_json::to_string(&event).unwrap_or_default();
+            yield Ok::<_, Infallible>(
+                SseEvent::default().id(id.to_string()).event("event").data(data),
+            );
+        }
         loop {
             match rx.recv().await {
-                Ok(e) => {
-                    seq += 1;
-                    let kind = format!("{}", e.event_type);
-                    let v2 = EventV2 {
-                        id: format!("ev_{}", uuid::Uuid::new_v4().simple()),
-                        kind: kind.clone(),
-                        timestamp: e.timestamp,
-                        subject: Some(format!("instance/{}", e.vm_name)),
-                        data: serde_json::to_value(&e.details).ok(),
-                    };
-                    let data = serde_json::to_string(&v2).unwrap_or_default();
+                Ok(item) => {
+                    if !event_matches_kind(&item.event, kind_filter.as_deref()) {
+                        continue;
+                    }
+                    let id = item.id;
+                    let event = event_v2(item);
+                    let data = serde_json::to_string(&event).unwrap_or_default();
                     yield Ok::<_, Infallible>(
-                        SseEvent::default().id(seq.to_string()).event(&kind).data(data),
+                        SseEvent::default().id(id.to_string()).event("event").data(data),
                     );
                 }
-                Err(_) => break,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
+                    let data = json!({
+                        "reason": "subscriber_lagged",
+                        "missed": missed,
+                        "latest_cursor": stream_store.last_event_id().await.to_string(),
+                        "action": "fetch_snapshot_and_reconnect",
+                    });
+                    yield Ok::<_, Infallible>(
+                        SseEvent::default().event("resync-required").data(data.to_string()),
+                    );
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    yield Ok::<_, Infallible>(
+                        SseEvent::default()
+                            .event("stream-closed")
+                            .data("{\"terminal\":true,\"reason\":\"event_store_closed\"}"),
+                    );
+                    break;
+                }
             }
         }
     };
@@ -6210,6 +6695,8 @@ mod tests {
     use super::*;
     use axum::body::to_bytes;
     use axum::http::Request;
+    use axum::middleware;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
     use tower::ServiceExt;
 
@@ -6217,6 +6704,123 @@ mod tests {
     /// `AIWG_PROVISION_VM_SCRIPT`. Tests acquire this guard for the lifetime
     /// of any code path that depends on the env var being a specific value.
     static PROVISION_ENV_LOCK: Mutex<()> = Mutex::new(());
+    static LOADOUT_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn event_source_resume_header_overrides_original_query_cursor() {
+        let mut headers = HeaderMap::new();
+        headers.insert("last-event-id", HeaderValue::from_static("log_42"));
+        assert_eq!(stream_resume_cursor(Some("7"), &headers), Ok(Some(42)));
+
+        headers.insert("last-event-id", HeaderValue::from_static("invalid"));
+        assert_eq!(stream_resume_cursor(Some("ev_7"), &headers), Err(()));
+        assert_eq!(
+            stream_resume_cursor(Some("invalid"), &HeaderMap::new()),
+            Err(())
+        );
+        assert_eq!(stream_resume_cursor(None, &HeaderMap::new()), Ok(None));
+    }
+
+    #[tokio::test]
+    async fn keyed_admin_mutation_replays_and_rejects_payload_collision() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let handler_calls = calls.clone();
+        let store = Arc::new(IdempotencyStore::new());
+        let app = Router::new()
+            .route(
+                "/instances",
+                post(move |Json(body): Json<Value>| {
+                    let handler_calls = handler_calls.clone();
+                    async move {
+                        let call = handler_calls.fetch_add(1, Ordering::SeqCst) + 1;
+                        (
+                            StatusCode::ACCEPTED,
+                            Json(json!({"operation_id": format!("op-{call}"), "request": body})),
+                        )
+                    }
+                }),
+            )
+            .layer(middleware::from_fn_with_state(store, enforce_idempotency));
+
+        let keyed = |body: &'static str| {
+            Request::builder()
+                .method("POST")
+                .uri("/instances")
+                .header("content-type", "application/json")
+                .header("idempotency-key", "intent-1")
+                .body(Body::from(body))
+                .unwrap()
+        };
+        let first = app
+            .clone()
+            .oneshot(keyed(r#"{"name":"one"}"#))
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::ACCEPTED);
+        let first_body = body_bytes(first).await;
+
+        let replay = app
+            .clone()
+            .oneshot(keyed(r#"{"name":"one"}"#))
+            .await
+            .unwrap();
+        assert_eq!(replay.status(), StatusCode::ACCEPTED);
+        assert_eq!(replay.headers()["idempotency-replayed"], "true");
+        assert_eq!(body_bytes(replay).await, first_body);
+
+        let conflict = app
+            .clone()
+            .oneshot(keyed(r#"{"name":"two"}"#))
+            .await
+            .unwrap();
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+        let conflict_body: Value = serde_json::from_slice(&body_bytes(conflict).await).unwrap();
+        assert_eq!(conflict_body["code"], "idempotency.key_conflict");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        let principal_request = |actor: &'static str, authorization: &'static str| {
+            let mut request = Request::builder()
+                .method("POST")
+                .uri("/instances")
+                .header("content-type", "application/json")
+                .header("authorization", authorization)
+                .header("idempotency-key", "intent-principal")
+                .body(Body::from(r#"{"name":"principal-bound"}"#))
+                .unwrap();
+            request
+                .extensions_mut()
+                .insert(crate::http::operator_auth::OperatorIdentity {
+                    actor: actor.to_string(),
+                    role: crate::http::operator_auth::OperatorRole::Admin,
+                });
+            request
+        };
+        let alice = app
+            .clone()
+            .oneshot(principal_request("alice", "Bearer rotated-alice-token"))
+            .await
+            .unwrap();
+        assert_eq!(alice.status(), StatusCode::ACCEPTED);
+        let bob = app
+            .clone()
+            .oneshot(principal_request("bob", "Bearer bob-token"))
+            .await
+            .unwrap();
+        assert_eq!(bob.status(), StatusCode::CONFLICT);
+
+        let invalid = Request::builder()
+            .method("POST")
+            .uri("/instances")
+            .header("content-type", "application/json")
+            .header("idempotency-key", "x".repeat(256))
+            .body(Body::from(r#"{"name":"invalid-key"}"#))
+            .unwrap();
+        let invalid = app.oneshot(invalid).await.unwrap();
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+        let invalid_body: Value = serde_json::from_slice(&body_bytes(invalid).await).unwrap();
+        assert_eq!(invalid_body["code"], "idempotency.invalid_key");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
 
     /// Absolute path to a fixture script under `management/tests/fixtures/`.
     fn fixture(name: &str) -> std::path::PathBuf {
@@ -6343,6 +6947,7 @@ mod tests {
             v1_counter: None,
             idempotency_store: Arc::new(crate::http::idempotency::IdempotencyStore::new()),
             mcp_config: None,
+            management_ws_endpoint: Some("ws://{host}:8121/".to_string()),
         }
     }
 
@@ -6372,6 +6977,11 @@ mod tests {
         let body: Value =
             serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
         assert_eq!(body["status"], "disabled");
+        assert_eq!(
+            body["management_websocket"]["endpoint"],
+            "ws://{host}:8121/"
+        );
+        assert_eq!(body["management_websocket"]["protocol_version"], "1.0");
         assert_eq!(body["ca_provider"]["configured"], false);
         assert_eq!(body["bootstrap"]["token_store_configured"], false);
         assert!(body["error_taxonomy"]
@@ -8458,9 +9068,12 @@ fi
 
     #[tokio::test]
     async fn loadouts_post_accepts_valid_yaml() {
+        let _guard = LOADOUT_ENV_LOCK.lock().unwrap();
+        let catalog = tempfile::tempdir().expect("loadout catalog");
+        std::env::set_var("AGENTIC_LOADOUT_PROFILES_DIR", catalog.path());
         let body = json!({
-            "name": "profiles/test.yaml",
-            "manifest": "version: '1'\nruntime: qemu\nprofile: basic\n",
+            "name": "test",
+            "manifest": "metadata:\n  name: test\n  description: Test loadout\n",
         });
         let resp = app()
             .oneshot(
@@ -8473,10 +9086,18 @@ fi
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::CREATED);
+        let response_status = resp.status();
         let bytes = body_bytes(resp).await;
+        assert_eq!(
+            response_status,
+            StatusCode::CREATED,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
         let v: Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(v["name"], "profiles/test.yaml");
+        assert_eq!(v["name"], "test");
+        assert!(catalog.path().join("test.yaml").is_file());
+        std::env::remove_var("AGENTIC_LOADOUT_PROFILES_DIR");
     }
 
     #[tokio::test]
@@ -10558,5 +11179,109 @@ exit 2
         assert!(cid_registry.contains("43=other-instance"));
 
         std::env::remove_var("VM_STORAGE_DIR");
+    }
+
+    #[tokio::test]
+    async fn management_storage_browse_is_metadata_only_and_object_reads_are_bounded() {
+        let root = tempfile::tempdir().expect("agentshare root");
+        let directory = root.path().join("agent-a-inbox").join("reports");
+        std::fs::create_dir_all(&directory).expect("storage directory");
+        std::fs::write(directory.join("small.txt"), "small").expect("small object");
+        std::fs::write(
+            directory.join("large.bin"),
+            vec![0_u8; MAX_MANAGEMENT_STORAGE_OBJECT_BYTES as usize + 1],
+        )
+        .expect("large object");
+        let mut state = test_state();
+        state.agentshare_root = Some(root.path().to_string_lossy().into_owned());
+        let app = app_with_state(state);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v2/admin/storage/inbox/agent-a/reports")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value = serde_json::from_slice(&body_bytes(response).await).unwrap();
+        assert_eq!(body["kind"], "directory");
+        assert_eq!(body["limit"], MAX_MANAGEMENT_STORAGE_BROWSE_ENTRIES);
+        assert_eq!(body["items"].as_array().unwrap().len(), 2);
+        assert!(body["items"][0].get("content").is_none());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v2/admin/storage/inbox/agent-a/reports/large.bin")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn loadout_create_persists_a_unique_catalog_entry_with_resolved_compatibility() {
+        let _guard = LOADOUT_ENV_LOCK.lock().unwrap();
+        let catalog = tempfile::tempdir().expect("loadout catalog");
+        std::env::set_var("AGENTIC_LOADOUT_PROFILES_DIR", catalog.path());
+        let manifest = r#"
+metadata:
+  name: ui-test
+  description: UI contract fixture
+runtime_options:
+  kind: vm
+  provider: cloud-hypervisor
+  required_capabilities: [instance.restore]
+"#;
+        let response = app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v2/admin/loadouts")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({ "name": "ui-test", "manifest": manifest }))
+                            .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let response_status = response.status();
+        let response_bytes = body_bytes(response).await;
+        assert_eq!(
+            response_status,
+            StatusCode::CREATED,
+            "{}",
+            String::from_utf8_lossy(&response_bytes)
+        );
+        let body: Value = serde_json::from_slice(&response_bytes).unwrap();
+        assert_eq!(body["name"], "ui-test");
+        assert_eq!(body["runtime"], "qemu");
+        assert!(body["compatibility"].is_array());
+        assert!(catalog.path().join("ui-test.yaml").is_file());
+
+        let duplicate = app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v2/admin/loadouts")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({ "name": "ui-test", "manifest": manifest }))
+                            .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(duplicate.status(), StatusCode::CONFLICT);
+        std::env::remove_var("AGENTIC_LOADOUT_PROFILES_DIR");
     }
 }

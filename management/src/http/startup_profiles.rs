@@ -14,7 +14,14 @@ use crate::startup_profiles::{StartupProfile, StartupProfileError, UpsertStartup
 
 #[derive(Debug, Serialize)]
 struct StartupProfileListResponse {
-    startup_profiles: Vec<StartupProfile>,
+    startup_profiles: Vec<StartupProfileResponse>,
+}
+
+#[derive(Debug, Serialize)]
+struct StartupProfileResponse {
+    #[serde(flatten)]
+    profile: StartupProfile,
+    active_instance_bindings: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -35,7 +42,12 @@ pub fn router() -> Router<AppState> {
 
 async fn list_startup_profiles(State(state): State<AppState>) -> Response {
     Json(StartupProfileListResponse {
-        startup_profiles: state.startup_profiles.list(),
+        startup_profiles: state
+            .startup_profiles
+            .list()
+            .into_iter()
+            .map(|profile| profile_response(&state, profile))
+            .collect(),
     })
     .into_response()
 }
@@ -45,14 +57,16 @@ async fn create_startup_profile(
     Json(request): Json<UpsertStartupProfileRequest>,
 ) -> Response {
     match state.startup_profiles.create(request) {
-        Ok(profile) => (StatusCode::CREATED, Json(profile)).into_response(),
+        Ok(profile) => {
+            (StatusCode::CREATED, Json(profile_response(&state, profile))).into_response()
+        }
         Err(err) => startup_profile_error(err),
     }
 }
 
 async fn get_startup_profile(State(state): State<AppState>, Path(id): Path<String>) -> Response {
     match state.startup_profiles.get(&id) {
-        Ok(profile) => Json(profile).into_response(),
+        Ok(profile) => Json(profile_response(&state, profile)).into_response(),
         Err(err) => startup_profile_error(err),
     }
 }
@@ -63,8 +77,16 @@ async fn update_startup_profile(
     Json(request): Json<UpsertStartupProfileRequest>,
 ) -> Response {
     match state.startup_profiles.update(&id, request) {
-        Ok(profile) => Json(profile).into_response(),
+        Ok(profile) => Json(profile_response(&state, profile)).into_response(),
         Err(err) => startup_profile_error(err),
+    }
+}
+
+fn profile_response(state: &AppState, profile: StartupProfile) -> StartupProfileResponse {
+    let active_instance_bindings = state.startup_profiles.active_binding_count(&profile.id);
+    StartupProfileResponse {
+        profile,
+        active_instance_bindings,
     }
 }
 
@@ -79,6 +101,7 @@ fn startup_profile_error(err: StartupProfileError) -> Response {
     let status = match err {
         StartupProfileError::NotFound(_) => StatusCode::NOT_FOUND,
         StartupProfileError::AlreadyExists(_) => StatusCode::CONFLICT,
+        StartupProfileError::InUse(_) => StatusCode::CONFLICT,
         StartupProfileError::Validation(_) => StatusCode::BAD_REQUEST,
         StartupProfileError::Persistence(_) | StartupProfileError::Serialization(_) => {
             StatusCode::INTERNAL_SERVER_ERROR
@@ -139,6 +162,7 @@ mod tests {
             v1_counter: None,
             idempotency_store: Arc::new(crate::http::idempotency::IdempotencyStore::new()),
             mcp_config: None,
+            management_ws_endpoint: None,
         }
     }
 
@@ -199,6 +223,7 @@ mod tests {
         let json: Value = serde_json::from_str(&text).unwrap();
         assert_eq!(json["id"], "startup_codex");
         assert_eq!(json["status"]["state"], "pending");
+        assert_eq!(json["active_instance_bindings"], 0);
         assert_eq!(
             json["credential_refs"][0]["target"]["name"],
             "OPENAI_API_KEY"

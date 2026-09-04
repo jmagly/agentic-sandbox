@@ -369,7 +369,22 @@ fn router(state: CelldApiState) -> Router {
 }
 
 async fn status(State(state): State<CelldApiState>) -> Json<serde_json::Value> {
-    Json(json!({"status":state.status,"configuration_error":state.configuration_error}))
+    let mut capabilities = vec![
+        "bundle.validate",
+        "fleet.validate",
+        "fleet.preflight",
+        "fleet.diagnose",
+        "fleet.plan-upgrade",
+    ];
+    if state.status.enabled && state.status.configured && state.client.is_some() {
+        capabilities.extend(["cell.read", "cell.command", "cell.reconcile"]);
+    }
+    Json(json!({
+        "schema_version": "management.celld-capabilities/v1",
+        "status": state.status,
+        "capabilities": capabilities,
+        "configuration_error": state.configuration_error,
+    }))
 }
 
 #[derive(Deserialize)]
@@ -994,6 +1009,16 @@ mod tests {
             callback_mtls_cn: None,
             configuration_error: None,
         }
+    }
+
+    #[tokio::test]
+    async fn status_discovers_only_safe_capabilities_when_provider_is_disabled() {
+        let body = status(State(disabled_state())).await.0;
+        assert_eq!(body["schema_version"], "management.celld-capabilities/v1");
+        let capabilities = body["capabilities"].as_array().unwrap();
+        assert!(capabilities.iter().any(|value| value == "bundle.validate"));
+        assert!(!capabilities.iter().any(|value| value == "cell.command"));
+        assert!(!capabilities.iter().any(|value| value == "cell.reconcile"));
     }
 
     fn callback_state() -> (CelldApiState, Arc<MockEffectDispatcher>, tempfile::TempDir) {

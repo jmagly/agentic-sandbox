@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentic-sandbox.aiwg.io/schemas/management-ui-route-matrix-v1.json",
+  "type": "object",
+  "required": ["schema_version", "routes", "dashboard_actions", "rationale"],
+  "properties": {
+    "schema_version": { "const": "1.0" },
+    "description": { "type": "string", "minLength": 1 },
+    "routes": {
+      "type": "object",
+      "required": ["v2_admin", "a2a", "pty", "observability", "temporary_v1", "intentionally_api_only", "capability_unavailable", "domain_workspace"],
+      "propertyNames": { "enum": ["v2_admin", "a2a", "pty", "observability", "temporary_v1", "intentionally_api_only", "capability_unavailable", "domain_workspace"] },
+      "additionalProperties": {
+        "type": "array",
+        "items": { "type": "string", "pattern": "^/" },
+        "uniqueItems": true
+      }
+    },
+    "dashboard_actions": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": { "type": "string" }
+    },
+    "rationale": { "type": "object", "additionalProperties": { "type": "string" } }
+  },
+  "additionalProperties": true
+}

@@ -7,7 +7,7 @@
 
 use axum::{
     extract::{Path, State},
-    http::StatusCode,
+    http::{header, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
@@ -22,6 +22,7 @@ use agentic_sandbox_executor::store::task_store::{
     TaskState, TaskStore,
 };
 
+use super::operations::{Operation, OperationState, OperationType};
 use super::operator_auth::RequireAdmin;
 use super::server::AppState;
 
@@ -527,6 +528,18 @@ async fn reconcile(
         Err(cause) => return internal("fleet.reconciliation_failed", cause),
     };
     let after_revision = inventory_revision(&inventory);
+    if reconciliation_revision_is_stale(request.before_revision, after_revision) {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": "fleet.stale_inventory_revision",
+                "message": "fleet inventory changed after the reviewed reconciliation plan",
+                "expected_revision": request.before_revision,
+                "current_revision": after_revision,
+            })),
+        )
+            .into_response();
+    }
     let rows = request
         .child_ids
         .iter()
@@ -555,18 +568,47 @@ async fn reconcile(
             })
         })
         .collect::<Vec<_>>();
-    (
-        StatusCode::OK,
-        Json(json!({
-            "document_type": "reconciliation",
-            "api_version": API_VERSION,
-            "generated_at": Utc::now().to_rfc3339(),
-            "before_revision": request.before_revision,
-            "after_revision": after_revision,
-            "rows": rows,
-        })),
+    let result = json!({
+        "document_type": "reconciliation",
+        "api_version": API_VERSION,
+        "generated_at": Utc::now().to_rfc3339(),
+        "before_revision": request.before_revision,
+        "after_revision": after_revision,
+        "rows": rows,
+    });
+    let Some(operation_store) = state.operation_store.as_ref() else {
+        return error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "fleet.operation_store_unavailable",
+            "management operation store is not mounted",
+        );
+    };
+    let mut operation = Operation::new(OperationType::FleetReconcile, "fleet".to_string());
+    operation.state = OperationState::Completed;
+    operation.completed_at = Some(Utc::now());
+    operation.progress_percent = 100;
+    operation.result = Some(result);
+    let operation_id = operation_store.insert(operation.clone());
+    let mut response = (
+        StatusCode::ACCEPTED,
+        Json(super::admin_v2::operation_value(&operation)),
     )
-        .into_response()
+        .into_response();
+    response.headers_mut().insert(
+        header::LOCATION,
+        HeaderValue::from_str(&format!("/api/v2/admin/operations/{operation_id}"))
+            .unwrap_or_else(|_| HeaderValue::from_static("/api/v2/admin/operations")),
+    );
+    response.headers_mut().insert(
+        "operation-id",
+        HeaderValue::from_str(&operation_id)
+            .unwrap_or_else(|_| HeaderValue::from_static("unknown")),
+    );
+    response
+}
+
+fn reconciliation_revision_is_stale(reviewed: u64, current: u64) -> bool {
+    reviewed != current
 }
 
 fn validate_dispatch_record(record: &Value) -> Result<(), String> {
@@ -928,6 +970,12 @@ mod tests {
             "last_seen": "2026-08-02T12:00:01Z", "artifacts": []});
         assert!(validate_status(&status, 1).is_ok());
         assert!(validate_status(&status, 0).is_err());
+    }
+
+    #[test]
+    fn reconciliation_refuses_a_stale_reviewed_inventory_revision() {
+        assert!(!reconciliation_revision_is_stale(7, 7));
+        assert!(reconciliation_revision_is_stale(7, 8));
     }
 
     #[test]

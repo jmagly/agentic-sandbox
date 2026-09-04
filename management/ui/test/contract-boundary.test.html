@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>Management UI contract boundary tests</title>
+</head>
+<body>
+    <h1>Management UI contract boundary tests</h1>
+    <div id="results"></div>
+    <script type="module">
+        import {
+            HttpOutcomeError,
+            HttpTransport,
+            RequestOwnership,
+            ResumableEventBuffer,
+            StaleResponseError,
+            UnsupportedContractVersionError,
+            normalizeResponse,
+            projectAccessAuditMetadata,
+            projectCredentialLeaseMetadata,
+            projectCredentialMetadata,
+            projectSshLeaseMetadata,
+            requireMajorVersion,
+        } from '../modules/index.mjs';
+
+        const results = document.querySelector('#results');
+        let failures = 0;
+        function assert(name, condition) {
+            const row = document.createElement('div');
+            row.className = condition ? 'pass' : 'fail';
+            row.textContent = `${condition ? 'PASS' : 'FAIL'} ${name}`;
+            results.append(row);
+            if (!condition) failures += 1;
+        }
+
+        const fixture = await fetch('./fixtures/http-outcomes.json').then((response) => response.json());
+        const dashboardHtml = await fetch('../index.html').then((response) => response.text());
+        const makeResponse = (item) => new Response(
+            typeof item.body === 'string' ? item.body : JSON.stringify(item.body),
+            { status: item.status, headers: item.headers },
+        );
+
+        const expectedKinds = {
+            success: 'success', accepted: 'accepted', problem: 'http_error',
+            forbidden: 'forbidden', conflict: 'conflict', rate_limited: 'rate_limited',
+            unavailable: 'unavailable', non_json_error: 'non_json_error',
+        };
+        for (const [name, item] of Object.entries(fixture.outcomes)) {
+            const outcome = await normalizeResponse(makeResponse(item));
+            assert(`normalizes ${name}`, outcome.kind === expectedKinds[name]);
+            assert(`${name} preserves request identifier`, outcome.requestId === item.headers['x-request-id']);
+        }
+
+        const rateLimited = await normalizeResponse(makeResponse(fixture.outcomes.rate_limited));
+        assert('Retry-After is normalized to milliseconds', rateLimited.retryAfterMs === 3000);
+        const accepted = await normalizeResponse(makeResponse(fixture.outcomes.accepted));
+        assert('202 preserves trace/request/operation identifiers',
+            accepted.traceId === 'trace-2' && accepted.requestId === 'req-2' && accepted.operationId === 'op-2');
+
+        const ownership = new RequestOwnership();
+        let releaseFirst;
+        const first = new Promise((resolve) => { releaseFirst = resolve; });
+        const transport = new HttpTransport({
+            ownership,
+            fetchImpl: async (url) => {
+                if (url.endsWith('/first')) await first;
+                return makeResponse(fixture.outcomes.success);
+            },
+        });
+        const stale = transport.request('/first', { owner: 'instance-detail' }).catch((error) => error);
+        const current = transport.request('/second', { owner: 'instance-detail' });
+        releaseFirst();
+        assert('new selection completes', (await current).ok === true);
+        const staleError = await stale;
+        assert('superseded selection is aborted or stale',
+            staleError instanceof StaleResponseError ||
+            (staleError instanceof HttpOutcomeError && staleError.outcome.kind === 'aborted'));
+
+        requireMajorVersion({ schema_version: '1.9', additive: true }, {
+            contract: 'fixture', field: 'schema_version', supportedMajor: 1,
+        });
+        assert('additive fields and supported minor versions are tolerated', true);
+        let rejectedMajor = false;
+        try {
+            requireMajorVersion({ schema_version: '2.0' }, {
+                contract: 'fixture', field: 'schema_version', supportedMajor: 1,
+            });
+        } catch (error) { rejectedMajor = error instanceof UnsupportedContractVersionError; }
+        assert('unknown required major version is rejected', rejectedMajor);
+
+        const stream = new ResumableEventBuffer({ limit: 3 });
+        assert('first streamed event is accepted', stream.append({ id: 'ev_1' }) === true);
+        assert('replayed streamed event is duplicate-suppressed', stream.append({ id: 'ev_1' }) === false);
+        stream.append({ id: 'ev_2' });
+        stream.append({ id: 'ev_3' });
+        stream.append({ id: 'ev_4' });
+        assert('high-volume stream state stays bounded', stream.items.length === 3 && !stream.seen.has('ev_1'));
+        assert('last-event cursor advances to the newest accepted event', stream.lastEventId === 'ev_4');
+        stream.markGap({ reason: 'cursor_before_retained_window', missed: 20 });
+        assert('replay gap makes evidence explicitly incomplete',
+            stream.incomplete === true && stream.gap.missed === 20);
+
+        // Reconnect replays can safely flow through the same state container.
+        assert('reconnect replay does not double-render the last event',
+            stream.append({ id: stream.lastEventId }) === false && stream.items.length === 3);
+
+        const configOperationIds = new Set(fixture.operations.map((operation) => operation.id));
+        for (const id of [
+            'startup.list', 'startup.create', 'startup.detail', 'startup.update', 'startup.delete',
+            'loadout.list', 'loadout.create', 'storage.read', 'storage.write', 'storage.delete',
+            'acceleration.ch.snapshot', 'acceleration.ch.restore', 'acceleration.ch.fork',
+            'acceleration.ch.pool_init', 'acceleration.ch.pool_handoff',
+            'acceleration.libvirt.checkpoint', 'acceleration.libvirt.restore',
+            'acceleration.libvirt.pool_init', 'acceleration.libvirt.pool_handoff', 'mcp.discovery',
+        ]) assert(`configuration operation fixture covers ${id}`, configOperationIds.has(id));
+        for (const id of [
+            'config-workspace', 'startup-profile-review', 'startup-profile-apply',
+            'storage-review-write', 'storage-apply-write', 'acceleration-review',
+            'acceleration-apply', 'mcp-discovery',
+        ]) assert(`dashboard exposes ${id}`, dashboardHtml.includes(`id="${id}"`));
+
+        for (const id of [
+            'access.authority', 'access.audit', 'credential.list',
+            'credential.lease.list', 'credential.lease.issue', 'credential.lease.revoke',
+            'ssh.lease.list', 'ssh.lease.issue', 'ssh.lease.revoke',
+        ]) assert(`access operation fixture covers ${id}`, configOperationIds.has(id));
+        for (const id of [
+            'access-workspace', 'credential-list', 'credential-lease-review',
+            'credential-lease-apply', 'ssh-lease-review', 'ssh-lease-apply',
+            'access-audit-list',
+        ]) assert(`dashboard exposes ${id}`, dashboardHtml.includes(`id="${id}"`));
+
+        const hostile = '<img src=x onerror=globalThis.__executed=true> sk-test-do-not-render';
+        const credential = projectCredentialMetadata({
+            id: hostile, provider: 'openai', type: 'api_key', scopes: [hostile],
+            allowed_uses: ['session.launch'], configured: true,
+            backend: { kind: 'file', reference: '/secret/provider/key' },
+            value: 'sk-value', plaintext: 'sk-plaintext',
+        });
+        const credentialLease = projectCredentialLeaseMetadata({
+            id: 'lease-1', state: 'active', expires_at: '2000-01-01T00:00:00Z',
+            proxy_policy: { authorization: 'Bearer secret' }, secret: 'lease-secret',
+        }, Date.parse('2026-01-01T00:00:00Z'));
+        const sshLease = projectSshLeaseMetadata({
+            id: 'ssh-1', state: 'active', expires_at: '2100-01-01T00:00:00Z',
+            public_key: hostile, certificate: 'ssh-rsa-certificate secret',
+        }, Date.parse('2026-01-01T00:00:00Z'));
+        const audit = projectAccessAuditMetadata({
+            id: 'audit-1', details: { secret: hostile }, action: 'credential_lease_issue',
+        });
+        const projections = JSON.stringify({ credential, credentialLease, sshLease, audit });
+        assert('access projections omit credential backend references', !projections.includes('/secret/provider/key'));
+        assert('access projections omit credential and proxy material',
+            !projections.includes('sk-value') && !projections.includes('sk-plaintext') && !projections.includes('Bearer secret'));
+        assert('SSH projection omits public key and certificate bodies',
+            !projections.includes('ssh-rsa-certificate') && !Object.hasOwn(sshLease, 'public_key'));
+        assert('audit projection omits detail payloads', !projections.includes('lease-secret') && !Object.hasOwn(audit, 'details'));
+        assert('expired active leases render as expired', credentialLease.state === 'expired');
+
+        const hostileNode = document.createElement('button');
+        hostileNode.textContent = credential.id;
+        results.append(hostileNode);
+        assert('hostile credential metadata is rendered as inert text',
+            hostileNode.querySelector('img') === null && globalThis.__executed !== true);
+
+        document.body.dataset.result = failures ? 'fail' : 'pass';
+        document.body.dataset.failures = String(failures);
+    </script>
+</body>
+</html>

@@ -22,8 +22,15 @@
     <header>
         <div class="header-content">
             <h1>Agentic Sandbox</h1>
+            <nav class="workspace-nav" aria-label="Management workspace">
+                <button type="button" data-workspace="console" class="active">Console</button>
+                <button type="button" data-workspace="fleet">Fleet</button>
+                <button type="button" data-workspace="celld">Celld</button>
+                <button type="button" data-workspace="config">Config</button>
+                <button type="button" data-workspace="access">Access</button>
+            </nav>
             <div class="header-right">
-                <span id="vm-count" class="header-stat">0 VMs</span>
+                <span id="vm-count" class="header-stat">0 instances</span>
                 <span class="header-divider">|</span>
                 <span id="agent-count" class="header-stat">0 agents</span>
                 <!-- #247 PTY transport toggle: when checked, panes fall
@@ -38,9 +45,10 @@
                     <span class="aiwg-status-text">AIWG</span>
                     <button id="aiwg-reconnect-btn" class="aiwg-reconnect-btn" title="Reconnect the AIWG framework session. NOTE: this is not the container control-stream reconnect (#625) — to re-register a soft-locked agent without killing the container, run `docker kill --signal=HUP <ctr>` or `agent-reconnect` (CLI-only).">&#8635;</button>
                 </div>
-                <div id="connection-status" class="status-disconnected">
+                <div id="connection-status" class="status-disconnected" role="status" aria-live="polite">
                     <span class="status-dot"></span>
                     <span class="status-text">Disconnected</span>
+                    <button id="connection-retry" type="button" hidden>Retry</button>
                 </div>
             </div>
         </div>
@@ -49,26 +57,35 @@
     <div id="main-layout">
         <!-- Left Navigation Blades -->
         <div id="nav-blades">
-            <!-- VM List (always visible) -->
+            <!-- Runtime-neutral instance inventory (always visible) -->
             <aside id="vm-blade" class="nav-blade">
                 <div class="blade-header">
-                    <h3>VMs</h3>
-                    <button id="create-vm-btn" class="blade-add-btn" title="Create new VM">+</button>
+                    <h3>Instances</h3>
+                    <button id="create-vm-btn" class="blade-add-btn" title="Create new instance" aria-label="Create new instance">+</button>
                 </div>
                 <div class="blade-body">
                     <div id="vm-list" class="blade-list">
                         <div class="blade-placeholder">Loading...</div>
                     </div>
                 </div>
+                <section class="operation-queue" aria-labelledby="operation-queue-title">
+                    <div class="operation-queue-header">
+                        <h4 id="operation-queue-title">Operations</h4>
+                        <button id="reconcile-operations" type="button" title="Refresh instances and tracked operations">Reconcile</button>
+                    </div>
+                    <div id="operation-list" aria-live="polite">
+                        <p class="operation-empty">No tracked operations.</p>
+                    </div>
+                </section>
             </aside>
 
             <!-- Sessions Blade (slides in when VM selected) -->
             <aside id="sessions-blade" class="nav-blade hidden">
                 <div class="blade-header">
-                    <button class="blade-back" title="Back">&#9664;</button>
+                    <button class="blade-back" title="Back" aria-label="Back to instances">&#9664;</button>
                     <h3 id="sessions-blade-title">Sessions</h3>
-                    <button class="blade-action" id="reconcile-btn" title="Reconcile">&#8635;</button>
-                    <button class="blade-add-btn" id="create-session-btn" title="New session">+</button>
+                    <button class="blade-action" id="reconcile-btn" title="Reconcile" aria-label="Reconcile selected instance sessions">&#8635;</button>
+                    <button class="blade-add-btn" id="create-session-btn" title="New session" aria-label="Create session">+</button>
                 </div>
                 <div class="blade-body">
                     <div id="sessions-list" class="blade-list">
@@ -79,10 +96,182 @@
         </div>
 
         <main id="pane-container">
+            <section id="fleet-workspace" class="management-workspace hidden" aria-labelledby="fleet-workspace-title">
+                <header class="workspace-header">
+                    <div><h2 id="fleet-workspace-title">Fleet workloads</h2><p>Durable desired, observed, and correlated workload state.</p></div>
+                    <button id="fleet-refresh" type="button" class="btn">Refresh inventory</button>
+                </header>
+                <div id="fleet-status" class="workspace-status" role="status">Inventory not loaded.</div>
+                <div class="workspace-columns">
+                    <section><h3>Inventory</h3><div id="fleet-list" class="workspace-list"></div></section>
+                    <section><h3>Workload detail</h3><div id="fleet-detail" class="workspace-detail"><p>Select a workload.</p></div></section>
+                </div>
+                <section class="review-panel">
+                    <h3>Reconciliation review</h3>
+                    <p>Select workloads above, preview the revision-bound plan, then apply it.</p>
+                    <button id="fleet-preview-reconcile" type="button" class="btn">Preview reconciliation</button>
+                    <button id="fleet-apply-reconcile" type="button" class="btn btn-primary" disabled>Apply reviewed plan</button>
+                    <pre id="fleet-reconcile-preview">No plan reviewed.</pre>
+                    <div id="fleet-reconcile-result" class="workspace-detail" role="status"></div>
+                </section>
+            </section>
+
+            <section id="celld-workspace" class="management-workspace hidden" aria-labelledby="celld-workspace-title">
+                <header class="workspace-header">
+                    <div><h2 id="celld-workspace-title">Celld operations</h2><p>Capability-gated cell control, validation, diagnosis, and upgrade planning.</p></div>
+                    <button id="celld-refresh" type="button" class="btn">Refresh status</button>
+                </header>
+                <div id="celld-status" class="workspace-status" role="status">Celld status not loaded.</div>
+                <div id="celld-capabilities" class="capability-list" aria-label="Discovered Celld capabilities"></div>
+                <div class="workspace-columns">
+                    <section class="review-panel">
+                        <h3>Cell detail and effects</h3>
+                        <label>Instance <input id="celld-instance" maxlength="255"></label>
+                        <label>Generation <input id="celld-generation" type="number" min="1" value="1"></label>
+                        <div class="workspace-actions">
+                            <button id="celld-get-cell" type="button" class="btn">Get cell</button>
+                            <button id="celld-preview-reconcile" type="button" class="btn">Preview reconcile</button>
+                            <button id="celld-apply-reconcile" type="button" class="btn btn-primary" disabled>Apply reconcile</button>
+                        </div>
+                        <label>Command document (JSON)<textarea id="celld-command" rows="9" spellcheck="false"></textarea></label>
+                        <button id="celld-preview-command" type="button" class="btn">Review command</button>
+                        <button id="celld-apply-command" type="button" class="btn btn-primary" disabled>Apply reviewed command</button>
+                        <pre id="celld-cell-result">No cell result.</pre>
+                    </section>
+                    <section class="review-panel">
+                        <h3>Fleet and bundle validation</h3>
+                        <label>Review document (JSON)<textarea id="celld-review-document" rows="14" spellcheck="false"></textarea></label>
+                        <div class="workspace-actions">
+                            <button type="button" class="btn celld-review-action" data-celld-review="bundle">Validate bundle</button>
+                            <button type="button" class="btn celld-review-action" data-celld-review="fleet">Validate fleet</button>
+                            <button type="button" class="btn celld-review-action" data-celld-review="preflight">Preflight</button>
+                            <button type="button" class="btn celld-review-action" data-celld-review="diagnose">Diagnose</button>
+                        </div>
+                        <label>Upgrade from <input id="celld-upgrade-from" value="v0.2.0"></label>
+                        <label>Upgrade to <input id="celld-upgrade-to" value="v0.2.1"></label>
+                        <button id="celld-plan-upgrade" type="button" class="btn">Review non-mutating upgrade plan</button>
+                        <button id="celld-cancel-plan" type="button" class="btn" disabled>Cancel reviewed plan</button>
+                        <pre id="celld-review-result">No validation or plan result.</pre>
+                    </section>
+                </div>
+            </section>
+            <section id="config-workspace" class="management-workspace hidden" aria-labelledby="config-workspace-title">
+                <header class="workspace-header">
+                    <div><h2 id="config-workspace-title">Configuration and acceleration</h2><p>Validated policy, storage, runtime acceleration, and read-only MCP discovery.</p></div>
+                    <button id="config-refresh" type="button" class="btn">Refresh all</button>
+                </header>
+                <div id="config-status" class="workspace-status" role="status">Configuration domains not loaded.</div>
+                <div class="config-grid">
+                    <section class="review-panel">
+                        <h3>Startup profiles</h3>
+                        <div id="startup-profile-list" class="workspace-list"></div>
+                        <label>Profile document (JSON)<textarea id="startup-profile-document" rows="12" spellcheck="false"></textarea></label>
+                        <div class="workspace-actions">
+                            <button id="startup-profile-new" type="button" class="btn">New</button>
+                            <button id="startup-profile-review" type="button" class="btn">Review</button>
+                            <button id="startup-profile-apply" type="button" class="btn btn-primary" disabled>Apply reviewed profile</button>
+                            <button id="startup-profile-delete" type="button" class="btn" disabled>Delete</button>
+                        </div>
+                        <pre id="startup-profile-preview">No profile reviewed.</pre>
+                    </section>
+                    <section class="review-panel">
+                        <h3>Loadouts v2</h3>
+                        <div id="config-loadout-list" class="workspace-list"></div>
+                        <div id="config-loadout-detail" class="workspace-detail"><p>Select a loadout.</p></div>
+                        <label>Name <input id="config-loadout-name" maxlength="80"></label>
+                        <label>Manifest (YAML)<textarea id="config-loadout-manifest" rows="9" spellcheck="false"></textarea></label>
+                        <button id="config-loadout-review" type="button" class="btn">Review creation</button>
+                        <button id="config-loadout-apply" type="button" class="btn btn-primary" disabled>Create reviewed loadout</button>
+                        <pre id="config-loadout-preview">No loadout reviewed.</pre>
+                    </section>
+                    <section class="review-panel">
+                        <h3>Scoped storage</h3>
+                        <div id="storage-authority" class="workspace-status">Choose a scope and path.</div>
+                        <label>Scope <select id="storage-scope"><option value="global">global (read-only)</option><option value="inbox">inbox</option><option value="outbox">outbox</option></select></label>
+                        <label>Path <input id="storage-path" placeholder="instance-or-task/path"></label>
+                        <div id="storage-breadcrumbs" class="workspace-actions" aria-label="Storage breadcrumbs"></div>
+                        <div class="workspace-actions">
+                            <button id="storage-read" type="button" class="btn">Browse / read</button>
+                            <button id="storage-review-write" type="button" class="btn">Review write</button>
+                            <button id="storage-apply-write" type="button" class="btn btn-primary" disabled>Apply reviewed write</button>
+                            <button id="storage-delete" type="button" class="btn">Delete object</button>
+                        </div>
+                        <div id="storage-list" class="workspace-list"></div>
+                        <label>Text content (maximum 1 MiB)<textarea id="storage-content" rows="10" spellcheck="false"></textarea></label>
+                        <pre id="storage-preview">No storage mutation reviewed.</pre>
+                    </section>
+                    <section class="review-panel">
+                        <h3>Runtime acceleration</h3>
+                        <div id="acceleration-capabilities" class="capability-list"></div>
+                        <label>Provider <select id="acceleration-provider"></select></label>
+                        <label>Action <select id="acceleration-action"></select></label>
+                        <label>Identifier <input id="acceleration-asset" placeholder="snapshot, checkpoint, or pool id"></label>
+                        <label>Instance / prefix <input id="acceleration-target" placeholder="source VM, restored name, or prefix"></label>
+                        <label>Capacity <input id="acceleration-capacity" type="number" min="1" max="64" value="1"></label>
+                        <button id="acceleration-review" type="button" class="btn">Review operation</button>
+                        <button id="acceleration-apply" type="button" class="btn btn-primary" disabled>Apply reviewed operation</button>
+                        <pre id="acceleration-preview">No acceleration operation reviewed.</pre>
+                    </section>
+                    <section class="review-panel config-wide">
+                        <h3>MCP discovery (read-only)</h3>
+                        <button id="mcp-refresh" type="button" class="btn">Refresh discovery</button>
+                        <div id="mcp-discovery" class="workspace-detail"><p>Discovery not loaded.</p></div>
+                    </section>
+                </div>
+            </section>
+            <section id="access-workspace" class="management-workspace hidden" aria-labelledby="access-workspace-title">
+                <header class="workspace-header">
+                    <div><h2 id="access-workspace-title">Access and leases</h2><p>Server-authorized credential and gateway SSH metadata with correlated audit evidence.</p></div>
+                    <button id="access-refresh" type="button" class="btn">Refresh all</button>
+                </header>
+                <div id="access-authority" class="workspace-status degraded" role="status">Authority evidence not loaded; mutation controls are disabled.</div>
+                <div class="config-grid">
+                    <section class="review-panel">
+                        <h3>Credential inventory</h3>
+                        <div id="credential-list" class="workspace-list"></div>
+                        <pre id="credential-detail">Select a credential definition.</pre>
+                    </section>
+                    <section class="review-panel">
+                        <h3>Credential leases</h3>
+                        <div id="credential-lease-list" class="workspace-list"></div>
+                        <pre id="credential-lease-detail">Select a credential lease for scope and lifecycle metadata.</pre>
+                        <label>Credential <select id="credential-lease-credential"></select></label>
+                        <label>Agent <input id="credential-lease-agent" maxlength="255"></label>
+                        <label>Instance <input id="credential-lease-instance" maxlength="255"></label>
+                        <label>Session <input id="credential-lease-session" maxlength="255"></label>
+                        <label>Allowed use <input id="credential-lease-use" list="credential-lease-use-options" maxlength="255" autocomplete="off"></label>
+                        <datalist id="credential-lease-use-options"></datalist>
+                        <label>TTL seconds <input id="credential-lease-ttl" type="number" min="1" max="3600" value="900"></label>
+                        <button id="credential-lease-review" type="button" class="btn" disabled>Review issuance</button>
+                        <button id="credential-lease-apply" type="button" class="btn btn-primary" disabled>Issue reviewed lease</button>
+                        <pre id="credential-lease-preview">No lease issuance reviewed.</pre>
+                    </section>
+                    <section class="review-panel">
+                        <h3>Gateway SSH leases</h3>
+                        <div id="ssh-lease-list" class="workspace-list"></div>
+                        <pre id="ssh-lease-detail">Select an SSH lease for actor, fingerprint, and lifecycle metadata.</pre>
+                        <label>Instance <input id="ssh-lease-instance" maxlength="255"></label>
+                        <label>Principal <input id="ssh-lease-principal" maxlength="64" value="agent"></label>
+                        <label>Access mode <select id="ssh-lease-mode"><option value="ssh">ssh</option></select></label>
+                        <label>Public key (write-only request field)<textarea id="ssh-lease-public-key" rows="4" spellcheck="false" autocomplete="off"></textarea></label>
+                        <label>TTL seconds <input id="ssh-lease-ttl" type="number" min="1" max="3600" value="900"></label>
+                        <button id="ssh-lease-review" type="button" class="btn" disabled>Review issuance</button>
+                        <button id="ssh-lease-apply" type="button" class="btn btn-primary" disabled>Issue reviewed lease</button>
+                        <pre id="ssh-lease-preview">No SSH lease issuance reviewed.</pre>
+                    </section>
+                    <section class="review-panel">
+                        <h3>Access audit evidence</h3>
+                        <label>Date <input id="access-audit-date" type="date"></label>
+                        <button id="access-audit-refresh" type="button" class="btn">Refresh audit evidence</button>
+                        <div id="access-audit-list" class="workspace-list"></div>
+                        <pre id="access-audit-detail">Select a metadata-only audit event.</pre>
+                    </section>
+                </div>
+            </section>
             <div id="no-agents" class="empty-state">
             <div class="empty-state-icon">&#9632;&#9632;&#9632;</div>
             <h2>No Agents Connected</h2>
-            <p class="empty-state-subtitle">Waiting for agent VMs to register with the management server.</p>
+            <p class="empty-state-subtitle">Waiting for instances to register with the management server.</p>
             <div class="empty-state-info">
                 <div class="info-card">
                     <h4>Server</h4>
@@ -101,21 +290,24 @@
 
     <!-- Log Sidebar (Right) -->
     <aside id="log-sidebar" class="collapsed">
-        <div class="sidebar-toggle" title="Toggle Log Panel">
+        <button type="button" class="sidebar-toggle" title="Toggle Log Panel" aria-label="Toggle log panel" aria-expanded="false">
             <span class="toggle-icon">&#9664;</span>
             <span class="toggle-label">Logs</span>
-        </div>
+        </button>
         <div class="sidebar-content">
             <div class="sidebar-header">
                 <h3>Log Monitor</h3>
-                <div class="sidebar-tabs">
-                    <button class="tab-btn active" data-tab="events">Events</button>
-                    <button class="tab-btn" data-tab="activity">Activity</button>
-                    <button class="tab-btn" data-tab="system">System</button>
+                <div class="sidebar-tabs" role="tablist" aria-label="Log views">
+                    <button id="log-events-tab" class="tab-btn active" data-tab="events" role="tab" aria-selected="true" aria-controls="log-events">Events</button>
+                    <button id="log-activity-tab" class="tab-btn" data-tab="activity" role="tab" aria-selected="false" aria-controls="log-activity" tabindex="-1">Activity</button>
+                    <button id="log-system-tab" class="tab-btn" data-tab="system" role="tab" aria-selected="false" aria-controls="log-system" tabindex="-1">System</button>
                 </div>
             </div>
             <div class="sidebar-body">
-                <div id="log-events" class="log-panel active">
+                <div id="log-events" class="log-panel active" role="tabpanel" aria-labelledby="log-events-tab">
+                    <div id="event-stream-status" class="stream-status unknown" role="status">
+                        Event stream has not connected.
+                    </div>
                     <div class="log-filters">
                         <select id="event-level-filter" title="Filter by severity">
                             <option value="all">All levels</option>
@@ -126,18 +318,41 @@
                         <select id="event-filter" title="Filter by event type">
                             <option value="all">All types</option>
                         </select>
-                        <button id="clear-events" class="icon-btn" title="Clear">&#8855;</button>
+                        <button id="clear-events" class="icon-btn" title="Clear" aria-label="Clear displayed events">&#8855;</button>
+                        <button id="reconcile-events" class="icon-btn" title="Reconcile event snapshot" aria-label="Reconcile event snapshot">&#8635;</button>
                     </div>
                     <div id="event-list" class="log-list"></div>
                 </div>
-                <div id="log-activity" class="log-panel">
+                <div id="log-activity" class="log-panel" role="tabpanel" aria-labelledby="log-activity-tab">
                     <form id="activity-query-form" class="activity-query-form">
                         <input id="activity-tenant" required maxlength="255" placeholder="Tenant" aria-label="Tenant ID">
                         <input id="activity-host" required maxlength="255" placeholder="Host" aria-label="Host ID">
                         <input id="activity-instance" required maxlength="255" placeholder="Instance" aria-label="Instance ID">
                         <input id="activity-agent" required maxlength="255" placeholder="Agent" aria-label="Agent ID">
                         <input id="activity-session" maxlength="255" placeholder="Session (optional)" aria-label="Session ID filter">
+                        <input id="activity-event-name" maxlength="255" placeholder="Event name (optional)" aria-label="Event name filter">
+                        <label>From <input id="activity-since" type="datetime-local" aria-label="Activity start time"></label>
+                        <label>Until <input id="activity-until" type="datetime-local" aria-label="Activity end time"></label>
+                        <select id="activity-plane" aria-label="Activity plane filter">
+                            <option value="">All planes</option><option>session</option><option>action</option><option>network</option><option>runtime</option><option>system</option><option>integrity</option>
+                        </select>
+                        <select id="activity-trust" aria-label="Activity trust filter">
+                            <option value="">All trust levels</option><option>observed</option><option>attested</option><option value="self_reported">self-reported</option><option>derived</option>
+                        </select>
+                        <select id="activity-outcome" aria-label="Activity outcome filter">
+                            <option value="">All outcomes</option><option>started</option><option>success</option><option>failure</option><option>allowed</option><option>denied</option><option>degraded</option><option>unknown</option>
+                        </select>
+                        <details class="activity-advanced">
+                            <summary>Advanced correlations</summary>
+                            <input id="activity-mission" maxlength="255" placeholder="Mission ID">
+                            <input id="activity-task" maxlength="255" placeholder="Task ID">
+                            <input id="activity-tool" maxlength="255" placeholder="Tool call ID">
+                            <input id="activity-command" maxlength="255" placeholder="Command ID">
+                            <input id="activity-process" maxlength="255" placeholder="Process ID">
+                            <input id="activity-trace" maxlength="255" placeholder="Trace ID">
+                        </details>
                         <button type="submit" class="btn btn-primary">Query</button>
+                        <button id="activity-export" type="button" class="btn">Export signed evidence</button>
                     </form>
                     <div id="activity-coverage" class="activity-coverage unknown" role="status">
                         Coverage not queried. No completeness claim is available.
@@ -149,8 +364,15 @@
                         <span class="trust-badge derived">derived</span>
                     </div>
                     <div id="activity-list" class="log-list" aria-live="polite"></div>
+                    <div class="activity-pagination">
+                        <span id="activity-page-status" role="status">No page loaded.</span>
+                        <button id="activity-next" type="button" class="btn" disabled>Next page</button>
+                    </div>
                 </div>
-                <div id="log-system" class="log-panel">
+                <div id="log-system" class="log-panel" role="tabpanel" aria-labelledby="log-system-tab">
+                    <div id="system-stream-status" class="stream-status unknown" role="status">
+                        System log stream has not connected.
+                    </div>
                     <div class="log-filters">
                         <select id="system-level-filter" title="Filter by log level">
                             <option value="all">All levels</option>
@@ -163,6 +385,7 @@
                         <select id="system-target-filter" title="Filter by module / target">
                             <option value="all">All targets</option>
                         </select>
+                        <button id="reconcile-system-logs" class="icon-btn" title="Reconcile system log snapshot" aria-label="Reconcile system log snapshot">&#8635;</button>
                     </div>
                     <div class="log-list" id="system-list">
                         <div class="log-placeholder">No system logs</div>
@@ -172,7 +395,7 @@
             <div class="sidebar-footer">
                 <span id="event-count">0 events</span>
                 <div class="sidebar-actions">
-                    <button id="copy-events" class="icon-btn" title="Copy to clipboard">&#128203;</button>
+                    <button id="copy-events" class="icon-btn" title="Copy to clipboard" aria-label="Copy displayed events to clipboard">&#128203;</button>
                     <label class="auto-scroll-toggle">
                         <input type="checkbox" id="auto-scroll" checked>
                         Auto-scroll
@@ -189,12 +412,12 @@
          V1Counter snapshot (preferred, GET /api/v2/admin/deprecation/v1-counters)
          or — when the snapshot endpoint is unreachable — from the
          client-side observations recorded by ApiClient's Sunset listener. -->
-    <div id="deprecation-modal" class="modal hidden">
-        <div class="modal-overlay"></div>
+    <div id="deprecation-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="deprecation-modal-title">
+        <div class="modal-overlay" aria-hidden="true"></div>
         <div class="modal-content detail-modal-content">
             <div class="modal-header">
-                <h3>v1 deprecation status</h3>
-                <button class="modal-close">&times;</button>
+                <h3 id="deprecation-modal-title">v1 deprecation status</h3>
+                <button type="button" class="modal-close" aria-label="Close v1 deprecation status">&times;</button>
             </div>
             <div class="modal-body" id="deprecation-panel">
                 <p class="deprecation-summary">
@@ -221,12 +444,12 @@
     </div>
 
     <!-- Detail Inspector Modal -->
-    <div id="detail-modal" class="modal hidden">
-        <div class="modal-overlay"></div>
+    <div id="detail-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="detail-modal-title">
+        <div class="modal-overlay" aria-hidden="true"></div>
         <div class="modal-content detail-modal-content">
             <div class="modal-header">
                 <h3 id="detail-modal-title">Details</h3>
-                <button class="modal-close">&times;</button>
+                <button type="button" class="modal-close" aria-label="Close details">&times;</button>
             </div>
             <div class="modal-body" id="detail-modal-body">
             </div>
@@ -234,12 +457,12 @@
     </div>
 
     <!-- OAuth Helper Modal -->
-    <div id="oauth-modal" class="modal hidden">
-        <div class="modal-overlay"></div>
+    <div id="oauth-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="oauth-modal-title">
+        <div class="modal-overlay" aria-hidden="true"></div>
         <div class="modal-content">
             <div class="modal-header">
-                <h3>Authorization Required</h3>
-                <button class="modal-close">&times;</button>
+                <h3 id="oauth-modal-title">Authorization Required</h3>
+                <button type="button" class="modal-close" aria-label="Close authorization dialog">&times;</button>
             </div>
             <div class="modal-body">
                 <p id="oauth-message">The agent is requesting authorization.</p>
@@ -261,14 +484,14 @@
     </div>
 
     <!-- Confirmation Dialog -->
-    <div id="confirm-modal" class="modal hidden">
-        <div class="modal-overlay"></div>
+    <div id="confirm-modal" class="modal hidden" role="alertdialog" aria-modal="true" aria-labelledby="confirm-modal-title" aria-describedby="confirm-modal-message">
+        <div class="modal-overlay" aria-hidden="true"></div>
         <div class="modal-content">
             <div class="modal-header">
-                <h3 class="confirm-title">Confirm Action</h3>
+                <h3 id="confirm-modal-title" class="confirm-title">Confirm Action</h3>
             </div>
             <div class="modal-body">
-                <p class="confirm-message">Are you sure?</p>
+                <p id="confirm-modal-message" class="confirm-message">Are you sure?</p>
                 <div class="modal-actions">
                     <button class="cancel-btn">Cancel</button>
                     <button class="confirm-btn danger">Confirm</button>
@@ -278,12 +501,12 @@
     </div>
 
     <!-- Create Instance Modal (#178) -->
-    <div id="create-vm-modal" class="modal hidden">
-        <div class="modal-overlay"></div>
+    <div id="create-vm-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="create-vm-modal-title">
+        <div class="modal-overlay" aria-hidden="true"></div>
         <div class="modal-content create-vm-content">
             <div class="modal-header">
-                <h3>Create Agent Instance</h3>
-                <button class="modal-close">&times;</button>
+                <h3 id="create-vm-modal-title">Create Agent Instance</h3>
+                <button type="button" class="modal-close" aria-label="Close create instance dialog">&times;</button>
             </div>
             <div class="modal-body">
                 <form id="create-vm-form">
@@ -296,6 +519,7 @@
                             <option value="host">Host (full host access)</option>
                         </select>
                         <small id="runtime-availability">Checking runtime availability…</small>
+                        <small id="bootstrap-readiness">Checking secure bootstrap readiness…</small>
                     </div>
 
                     <div class="runtime-only" data-runtime="host" hidden>
@@ -327,6 +551,12 @@
                             <input type="text" id="vm-name" placeholder="01" pattern="[a-z0-9-]+" required>
                         </div>
                         <small>Lowercase letters, numbers, and hyphens only</small>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="instance-startup-profile">Startup profile</label>
+                        <select id="instance-startup-profile"><option value="">None</option></select>
+                        <small>Optional policy reference; the server validates runtime compatibility and binds it to the new instance.</small>
                     </div>
 
                     <!-- Container-only: image picker -->
@@ -442,12 +672,12 @@
     </div>
 
     <!-- Create Session Modal -->
-    <div id="create-session-modal" class="modal hidden">
-        <div class="modal-overlay"></div>
+    <div id="create-session-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="create-session-modal-title">
+        <div class="modal-overlay" aria-hidden="true"></div>
         <div class="modal-content create-session-content">
             <div class="modal-header">
-                <h3>New Session on <span id="session-modal-vm">--</span></h3>
-                <button class="modal-close">&times;</button>
+                <h3 id="create-session-modal-title">New Session on <span id="session-modal-vm">--</span></h3>
+                <button type="button" class="modal-close" aria-label="Close create session dialog">&times;</button>
             </div>
             <div class="modal-body">
                 <form id="create-session-form">
@@ -556,7 +786,7 @@
     </dialog>
 
     <!-- Toast notifications -->
-    <div id="toast-container"></div>
+    <div id="toast-container" role="status" aria-live="polite" aria-atomic="false"></div>
 
     <script src="vendor/xterm/xterm.min.js"></script>
     <script src="vendor/xterm/addon-fit.min.js"></script>

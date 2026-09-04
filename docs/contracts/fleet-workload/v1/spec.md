@@ -71,9 +71,12 @@ contract under `/api/v2/fleet`:
 | `GET` | `/workloads` | Return a revisioned `inventory` document containing all durable workload records. |
 | `GET` | `/workloads/{child_id}` | Return one durable workload record. |
 | `POST` | `/workloads/{child_id}/observations` | Atomically advance a workload observation by exactly one revision and optionally bind newly assigned runtime identities. Stale writers or identity reassignment receive `409`. |
-| `POST` | `/reconcile` | Classify expected children as `re-adopted`, `terminal`, `unknown`, `failed-or-aborted`, or `operator-review-required`. |
+| `POST` | `/reconcile` | Classify expected children as `re-adopted`, `terminal`, `unknown`, `failed-or-aborted`, or `operator-review-required`. Returns `202` with a canonical `fleet.reconcile` operation, a pollable `Location`, and terminal classification evidence. |
 
-Mutating routes require the normal management admin principal. Records are
+Mutating routes require the normal management admin principal and accept an
+optional `Idempotency-Key`. An exact replay returns the original response with
+`Idempotency-Replayed: true`; key collisions and concurrent duplicates fail
+closed with `409`. Records are
 stored in the same SQLite database as the v2 executor task store, so admission,
 idempotency replay, observations, inventory, and reconciliation survive a
 management-server restart. The runtime rejects unknown top-level contract

@@ -20,6 +20,8 @@ pub enum StartupProfileError {
     AlreadyExists(String),
     #[error("startup profile validation failed: {0}")]
     Validation(String),
+    #[error("startup profile is in use: {0}")]
+    InUse(String),
     #[error("startup profile persistence failed: {0}")]
     Persistence(#[from] std::io::Error),
     #[error("startup profile serialization failed: {0}")]
@@ -439,6 +441,16 @@ impl StartupProfileStore {
             .map(|binding| binding.profile_id.clone())
     }
 
+    /// Number of active instance bindings that currently reference a profile.
+    pub fn active_binding_count(&self, profile_id: &str) -> usize {
+        self.inner
+            .read()
+            .bindings
+            .values()
+            .filter(|binding| binding.profile_id == profile_id)
+            .count()
+    }
+
     pub fn update_status(
         &self,
         id: &str,
@@ -467,10 +479,35 @@ impl StartupProfileStore {
 
     pub fn delete(&self, id: &str) -> Result<(), StartupProfileError> {
         let mut inner = self.inner.write();
+        let Some(profile) = inner.profiles.get(id) else {
+            return Err(StartupProfileError::NotFound(id.to_string()));
+        };
+        if matches!(
+            profile.status.state,
+            StartupState::Launching | StartupState::Running
+        ) {
+            return Err(StartupProfileError::InUse(format!(
+                "{id} is {}",
+                match profile.status.state {
+                    StartupState::Launching => "launching",
+                    StartupState::Running => "running",
+                    _ => unreachable!(),
+                }
+            )));
+        }
+        let binding_count = inner
+            .bindings
+            .values()
+            .filter(|binding| binding.profile_id == id)
+            .count();
+        if binding_count > 0 {
+            return Err(StartupProfileError::InUse(format!(
+                "{id} has {binding_count} active instance binding(s)"
+            )));
+        }
         if inner.profiles.remove(id).is_none() {
             return Err(StartupProfileError::NotFound(id.to_string()));
         }
-        inner.bindings.retain(|_, binding| binding.profile_id != id);
         self.persist_locked(&inner)
     }
 
@@ -773,7 +810,7 @@ mod tests {
     }
 
     #[test]
-    fn instance_binding_persists_and_is_removed_with_profile() {
+    fn bound_profile_must_be_unbound_before_safe_delete() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("startup-profiles.json");
         let store = StartupProfileStore::open(&path).unwrap();
@@ -789,7 +826,18 @@ mod tests {
             reopened.bound_profile_id("instance-1").as_deref(),
             Some("startup_codex")
         );
+        assert_eq!(reopened.active_binding_count("startup_codex"), 1);
 
+        assert!(matches!(
+            reopened.delete("startup_codex"),
+            Err(StartupProfileError::InUse(_))
+        ));
+        assert_eq!(
+            reopened.bound_profile_id("instance-1").as_deref(),
+            Some("startup_codex")
+        );
+        reopened.unbind_instance_profile("instance-1").unwrap();
+        assert_eq!(reopened.active_binding_count("startup_codex"), 0);
         reopened.delete("startup_codex").unwrap();
         assert_eq!(reopened.bound_profile_id("instance-1"), None);
     }

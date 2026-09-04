@@ -182,6 +182,17 @@ pub struct VmEvent {
     pub trace_id: Option<String>,
 }
 
+/// An event paired with the monotonic identifier assigned by the hot store.
+///
+/// The identifier is deliberately transport-neutral: HTTP snapshots can use it
+/// as a cursor and SSE can use it as `Last-Event-ID` without inventing a second
+/// sequence that resets on every connection.
+#[derive(Debug, Clone)]
+pub struct SequencedVmEvent {
+    pub id: u64,
+    pub event: VmEvent,
+}
+
 /// Incoming event from vm-event-bridge (more flexible parsing)
 #[derive(Debug, Deserialize)]
 pub struct IncomingVmEvent {
@@ -202,7 +213,7 @@ const EVENT_BROADCAST_CAPACITY: usize = 1024;
 /// Event store for recent events
 pub struct EventStore {
     /// Events per source (VM name or agent ID), most recent first
-    events: RwLock<HashMap<String, Vec<VmEvent>>>,
+    events: RwLock<HashMap<String, Vec<SequencedVmEvent>>>,
     /// Optional durable JSONL archive for events evicted from the hot window.
     archive: RwLock<Option<EventArchive>>,
     /// Total event count
@@ -218,7 +229,7 @@ pub struct EventStore {
     /// Live event fan-out for SSE subscribers. Senders never block; if a
     /// subscriber's channel fills up it receives a `Lagged` error and the
     /// SSE handler reports a gap.
-    tx: broadcast::Sender<VmEvent>,
+    tx: broadcast::Sender<SequencedVmEvent>,
 }
 
 impl Default for EventStore {
@@ -250,12 +261,21 @@ impl EventStore {
     /// Subscribe to live events. New subscribers only see events added
     /// after the call returns; pre-existing buffered events should be
     /// fetched separately via `get_all_events` / `get_events_since`.
-    pub fn subscribe(&self) -> broadcast::Receiver<VmEvent> {
+    pub fn subscribe(&self) -> broadcast::Receiver<SequencedVmEvent> {
         self.tx.subscribe()
     }
 
     /// Add an event to the store
     pub async fn add_event(&self, event: VmEvent) {
+        let id = {
+            let mut last_id = self.last_event_id.write().await;
+            *last_id += 1;
+            *last_id
+        };
+        let sequenced = SequencedVmEvent {
+            id,
+            event: event.clone(),
+        };
         let source = event
             .agent_id
             .clone()
@@ -264,7 +284,7 @@ impl EventStore {
         let source_events = events.entry(source).or_insert_with(Vec::new);
 
         // Insert at beginning (most recent first)
-        source_events.insert(0, event.clone());
+        source_events.insert(0, sequenced.clone());
 
         // Trim to max size
         let evicted = source_events.len().saturating_sub(MAX_EVENTS_PER_SOURCE);
@@ -281,16 +301,15 @@ impl EventStore {
         // Increment counters
         let mut count = self.total_count.write().await;
         *count += 1;
-        let mut last_id = self.last_event_id.write().await;
-        *last_id += 1;
         // Drop locks before broadcasting so subscribers can't deadlock the
         // store. `send` returns Err only when there are no receivers — fine.
         drop(events);
         drop(count);
-        drop(last_id);
         if !evicted_events.is_empty() {
             let archive = self.archive.read().await.clone();
             if let Some(archive) = archive {
+                let evicted_events: Vec<VmEvent> =
+                    evicted_events.into_iter().map(|item| item.event).collect();
                 match archive.append_many(&evicted_events).await {
                     Ok(()) => {
                         let mut archived_count = self.archived_count.write().await;
@@ -304,7 +323,7 @@ impl EventStore {
                 }
             }
         }
-        let _ = self.tx.send(event);
+        let _ = self.tx.send(sequenced);
     }
 
     /// Events newer than `since` (inclusive of `since` excluded), most recent first.
@@ -315,8 +334,8 @@ impl EventStore {
         let mut all: Vec<VmEvent> = events
             .values()
             .flatten()
-            .filter(|e| e.timestamp > since)
-            .cloned()
+            .filter(|e| e.event.timestamp > since)
+            .map(|e| e.event.clone())
             .collect();
         all.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
         all
@@ -332,19 +351,59 @@ impl EventStore {
         let events = self.events.read().await;
         events
             .get(vm_name)
-            .map(|e| e.iter().take(limit).cloned().collect())
+            .map(|e| {
+                e.iter()
+                    .take(limit)
+                    .map(|item| item.event.clone())
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
     /// Get all recent events across all VMs
     pub async fn get_all_events(&self, limit: usize) -> Vec<VmEvent> {
         let events = self.events.read().await;
-        let mut all_events: Vec<VmEvent> = events.values().flatten().cloned().collect();
+        let mut all_events: Vec<VmEvent> = events
+            .values()
+            .flatten()
+            .map(|item| item.event.clone())
+            .collect();
 
         // Sort by timestamp descending
         all_events.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
         all_events.truncate(limit);
         all_events
+    }
+
+    /// Get the newest hot-window events with their stable store identifiers.
+    pub async fn get_all_sequenced_events(&self, limit: usize) -> Vec<SequencedVmEvent> {
+        let events = self.events.read().await;
+        let mut all_events: Vec<SequencedVmEvent> = events.values().flatten().cloned().collect();
+        all_events.sort_by(|a, b| b.id.cmp(&a.id));
+        all_events.truncate(limit);
+        all_events
+    }
+
+    /// Return retained events after a cursor, oldest first, plus whether the
+    /// cursor predates the bounded hot window and therefore requires a resync.
+    pub async fn get_sequenced_events_after(
+        &self,
+        cursor: u64,
+        limit: usize,
+    ) -> (Vec<SequencedVmEvent>, bool) {
+        let events = self.events.read().await;
+        let mut all_events: Vec<SequencedVmEvent> = events.values().flatten().cloned().collect();
+        all_events.sort_by_key(|item| item.id);
+        let oldest = all_events.first().map(|item| item.id);
+        let gap = oldest
+            .map(|oldest_id| cursor.saturating_add(1) < oldest_id)
+            .unwrap_or(false);
+        let replay = all_events
+            .into_iter()
+            .filter(|item| item.id > cursor)
+            .take(limit)
+            .collect();
+        (replay, gap)
     }
 
     pub async fn query_events(
@@ -357,8 +416,8 @@ impl EventStore {
         let mut all_events: Vec<VmEvent> = events
             .values()
             .flatten()
-            .filter(|event| filter.matches(event))
-            .cloned()
+            .filter(|event| filter.matches(&event.event))
+            .map(|event| event.event.clone())
             .collect();
         drop(events);
 
@@ -956,7 +1015,8 @@ pub async fn list_events(Query(q): Query<EventQuery>, State(_state): State<AppSt
             }
             loop {
                 match rx.recv().await {
-                    Ok(ev) => {
+                    Ok(item) => {
+                        let ev = item.event;
                         if !matches(&ev) {
                             continue;
                         }
@@ -1126,6 +1186,44 @@ mod tests {
         assert_eq!(metrics.evicted_count, 50);
         assert_eq!(metrics.archived_count, 50);
         assert_eq!(metrics.archive_write_failures, 0);
+    }
+
+    #[tokio::test]
+    async fn sequenced_event_window_resumes_and_reports_evicted_cursor_gap() {
+        let store = EventStore::new();
+        let base = Utc::now();
+        for i in 0..(MAX_EVENTS_PER_SOURCE + 2) {
+            store
+                .add_event(VmEvent {
+                    event_type: VmEventType::Started,
+                    vm_name: "resume-vm".to_string(),
+                    timestamp: base + chrono::Duration::seconds(i as i64),
+                    details: VmEventDetails::default(),
+                    agent_id: None,
+                    trace_id: None,
+                })
+                .await;
+        }
+
+        let newest = store.get_all_sequenced_events(2).await;
+        let newest_id = MAX_EVENTS_PER_SOURCE as u64 + 2;
+        assert_eq!(
+            newest.iter().map(|item| item.id).collect::<Vec<_>>(),
+            vec![newest_id, newest_id - 1]
+        );
+
+        let (replayed, gap) = store.get_sequenced_events_after(newest_id - 2, 10).await;
+        assert!(!gap);
+        assert_eq!(
+            replayed.iter().map(|item| item.id).collect::<Vec<_>>(),
+            vec![newest_id - 1, newest_id]
+        );
+
+        let (_, gap) = store.get_sequenced_events_after(0, 10).await;
+        assert!(
+            gap,
+            "cursor before the retained hot window must be explicit"
+        );
     }
 
     #[tokio::test]

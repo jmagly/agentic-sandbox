@@ -59,7 +59,9 @@ returned in the acknowledgement. Ingest requires the admin role.
 
 `GET /api/v2/activity/events` returns correlated metadata plus collector
 coverage. Filters include `event_name`, session, mission, task, tool call,
-command, process, trace, time bounds, and a maximum `limit` of 5,000.
+command, process, trace, time bounds, and a maximum `limit` of 5,000. Responses
+include `next_cursor`, `has_more`, and `cursor_found`; pass `cursor` to resume
+after the last stable activity event ID from the preceding page.
 `GET /api/v2/activity/coverage` returns coverage without event rows.
 
 All three endpoints require the authorized scope headers
@@ -73,6 +75,72 @@ common secret-bearing payload keys are rejected. Existing events, audit,
 transcript, logs, and metrics endpoints remain unchanged. The stable schema is
 [`activity-event-v1.schema.json`](schemas/activity-event-v1.schema.json), and
 ADR-034 documents identifier ownership and compatibility mapping.
+
+### Fleet and Celld management workspaces
+
+The dashboard's **Fleet** workspace consumes `/api/v2/fleet/workloads` as the
+durable inventory of lineage, desired/observed state, monotonic revision,
+runtime identities, last observation, and artifact evidence. Reconciliation is
+a two-step UI workflow: preview a plan bound to `inventory_revision`, then send
+that exact `before_revision` to `/api/v2/fleet/reconcile`. A changed inventory
+returns `409 fleet.stale_inventory_revision`; the UI refreshes and requires a
+new review instead of applying stale intent. An accepted reconciliation returns
+`202` with a canonical operation ID, terminal classification evidence, and a
+`Location` that can be polled through the admin operations API. Keyed request
+replays return the original response with `Idempotency-Replayed: true`.
+
+The **Celld** workspace discovers readiness from `/api/v2/celld/status`.
+Validation, preflight, diagnosis, and upgrade planning stay non-mutating and
+show their exact response evidence. Cell commands and reconcile are disabled
+unless Celld is enabled and configured, and the exact generation-bound command
+must be reviewed before its single canonical request is sent. Lost mutation
+responses are shown as unknown outcomes and trigger a scoped cell read. A cell
+command can replay only its exact stored document because `operation_id` and
+`request_hash` are protected by the Celld effect ledger. A generation-only
+reconcile has no replay control; the operator resolves it from the scoped cell
+read before reviewing another reconcile.
+
+### Configuration management workspace
+
+The dashboard's **Config** workspace collects the lower-coupled v2 domains
+without falling back to legacy routes. Startup profiles support list, detail,
+validated create/update, safe delete, and selection during canonical instance
+provisioning. The server refuses deletion while a profile is launching,
+running, or bound to an instance.
+
+Loadout creation validates a bounded YAML document, requires its
+`metadata.name` to match the catalog key, and uses create-only persistence so
+an existing catalog entry cannot be overwritten. Runtime and provider
+compatibility, constraints, launch strategy, fast-start assets, and rejection
+reasons are rendered from the v2 catalog response.
+
+Scoped storage uses individually percent-encoded path segments and explicit
+breadcrumbs. `global` remains read-only; `inbox` and `outbox` writes require a
+review, overwrites and deletes require confirmation, directory responses are
+metadata-only and capped at 500 entries, and object reads/writes are capped at
+1 MiB.
+
+Snapshot, checkpoint, fork, and warm-pool actions appear only when the selected
+available provider advertises the corresponding capability. Every action is
+reviewed before one asynchronous request is issued and then tracked through the
+canonical operations API. MCP is discovery-only in this workspace: availability,
+transport, protocol, tool/resource metadata, and authentication posture are
+shown from `/api/v2/admin/mcp/discovery`; the dashboard neither solicits nor
+reveals bearer material.
+
+All mutating `/api/v2/admin`, `/api/v2/fleet`, and `/api/v2/startup-profiles`
+requests accept an optional `Idempotency-Key` header. A key is reserved before
+the handler runs and is bound for 24 hours to the authenticated operator
+identity plus the exact method, path/query, and request body. An identical
+replay returns the original status, headers, and body with
+`Idempotency-Replayed: true`. Reusing a key with a different request returns
+`409 idempotency.key_conflict`; a duplicate that arrives while the original is
+still running returns
+`409 idempotency.in_progress` with `Retry-After: 1`.
+The dashboard assigns that key when an operator reviews an intent and persists
+the exact method, path, and body before dispatch. If the response is lost or the
+page reloads during dispatch, the Operations queue exposes an unknown outcome
+that can only replay the stored request with its original key.
 
 ### Libvirt checkpoint and warm-pool API (v2)
 
@@ -741,6 +809,36 @@ List recent events across all VMs and agents.
 ```bash
 curl http://localhost:8122/api/v1/events
 ```
+
+---
+
+### Access Workspace Evidence
+
+The dashboard Access workspace resolves its effective authority from the server
+before enabling lease mutations. It displays allowlisted credential, credential
+lease, SSH lease, and audit metadata only. It never renders credential values,
+backend references, submitted public keys, or returned SSH certificate bodies.
+
+#### GET /api/v2/credentials/authority
+
+Returns `management.access-authority/v1` evidence containing the resolved mode,
+actor, role, and permission names. A trusted local listener may manage credential
+leases but does not claim an authenticated SSH identity; SSH permissions require
+an authenticated operator identity. An unresolved configured identity returns no
+permissions and clients must fail closed.
+
+#### GET /api/v2/credentials/audit?date=YYYY-MM-DD
+
+Returns at most 200 newest credential/lease/SSH audit projections for the UTC
+date. Each projection contains identifiers, actor, resource/correlation,
+action/outcome, timestamp, and trace ID only. Raw audit `details` are not
+returned. When the security audit logger is not configured, the response uses
+`available: false` with an empty event list rather than implying complete
+evidence.
+
+Credential lease TTLs are bounded to 1–3600 seconds. Mutation clients must not
+automatically replay an issue or revoke request after an ambiguous transport
+failure; reconcile inventory and audit evidence first.
 
 ---
 

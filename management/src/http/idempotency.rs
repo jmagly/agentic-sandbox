@@ -5,6 +5,7 @@
 
 use axum::http::{HeaderMap, StatusCode};
 use bytes::Bytes;
+use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -38,6 +39,52 @@ impl CachedResponse {
 #[derive(Clone)]
 pub struct IdempotencyStore {
     cache: Arc<DashMap<String, CachedResponse>>,
+    admin_cache: Arc<DashMap<String, AdminIdempotencyEntry>>,
+}
+
+#[derive(Clone, Debug)]
+enum AdminIdempotencyEntry {
+    Pending {
+        request_fingerprint: String,
+        created_at: Instant,
+    },
+    Complete(AdminCachedResponse),
+}
+
+impl AdminIdempotencyEntry {
+    fn is_expired(&self) -> bool {
+        match self {
+            Self::Pending { created_at, .. } => created_at.elapsed() > CACHE_TTL,
+            Self::Complete(response) => response.created_at.elapsed() > CACHE_TTL,
+        }
+    }
+
+    fn fingerprint(&self) -> &str {
+        match self {
+            Self::Pending {
+                request_fingerprint,
+                ..
+            } => request_fingerprint,
+            Self::Complete(response) => &response.request_fingerprint,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct AdminCachedResponse {
+    pub status: StatusCode,
+    pub headers: HeaderMap,
+    pub body: Bytes,
+    request_fingerprint: String,
+    created_at: Instant,
+}
+
+#[derive(Clone, Debug)]
+pub enum AdminIdempotencyDecision {
+    Execute,
+    Replay(AdminCachedResponse),
+    InFlight,
+    Conflict,
 }
 
 impl IdempotencyStore {
@@ -45,16 +92,32 @@ impl IdempotencyStore {
     pub fn new() -> Self {
         Self {
             cache: Arc::new(DashMap::new()),
+            admin_cache: Arc::new(DashMap::new()),
         }
     }
 
     /// Extract idempotency key from request headers
     pub fn extract_key(headers: &HeaderMap) -> Option<String> {
-        headers
-            .get(IDEMPOTENCY_KEY_HEADER)
-            .and_then(|v| v.to_str().ok())
-            .filter(|s| !s.is_empty() && s.len() <= MAX_KEY_LENGTH)
-            .map(|s| s.to_string())
+        Self::validate_key(headers).ok().flatten()
+    }
+
+    /// Distinguish an absent key from a malformed key. Admin mutations must
+    /// reject malformed keys instead of silently executing without replay
+    /// protection when the caller believes an intent key was accepted.
+    pub fn validate_key(headers: &HeaderMap) -> Result<Option<String>, &'static str> {
+        let Some(value) = headers.get(IDEMPOTENCY_KEY_HEADER) else {
+            return Ok(None);
+        };
+        let value = value
+            .to_str()
+            .map_err(|_| "key must contain visible ASCII")?;
+        if value.is_empty() {
+            return Err("key must not be empty");
+        }
+        if value.len() > MAX_KEY_LENGTH {
+            return Err("key exceeds 255 bytes");
+        }
+        Ok(Some(value.to_string()))
     }
 
     /// Get a cached response for the given key
@@ -90,6 +153,81 @@ impl IdempotencyStore {
         debug!(key = %key, status = %status, "Cached response for idempotency key");
     }
 
+    /// Atomically reserve an admin mutation intent or recover its response.
+    /// A key is bound to the method, route/query and body fingerprint supplied
+    /// by the HTTP boundary; reuse with any different request is a conflict.
+    pub fn begin_admin(&self, key: &str, request_fingerprint: &str) -> AdminIdempotencyDecision {
+        loop {
+            match self.admin_cache.entry(key.to_string()) {
+                Entry::Vacant(entry) => {
+                    entry.insert(AdminIdempotencyEntry::Pending {
+                        request_fingerprint: request_fingerprint.to_string(),
+                        created_at: Instant::now(),
+                    });
+                    return AdminIdempotencyDecision::Execute;
+                }
+                Entry::Occupied(entry) if entry.get().is_expired() => {
+                    entry.remove();
+                }
+                Entry::Occupied(entry) if entry.get().fingerprint() != request_fingerprint => {
+                    return AdminIdempotencyDecision::Conflict;
+                }
+                Entry::Occupied(entry) => match entry.get() {
+                    AdminIdempotencyEntry::Pending { .. } => {
+                        return AdminIdempotencyDecision::InFlight;
+                    }
+                    AdminIdempotencyEntry::Complete(response) => {
+                        return AdminIdempotencyDecision::Replay(response.clone());
+                    }
+                },
+            }
+        }
+    }
+
+    pub fn complete_admin(
+        &self,
+        key: &str,
+        request_fingerprint: &str,
+        status: StatusCode,
+        headers: HeaderMap,
+        body: Bytes,
+    ) {
+        let Some(entry) = self.admin_cache.get(key) else {
+            return;
+        };
+        let owns_reservation = matches!(
+            entry.value(),
+            AdminIdempotencyEntry::Pending { request_fingerprint: current, .. }
+                if current == request_fingerprint
+        );
+        drop(entry);
+        if owns_reservation {
+            self.admin_cache.insert(
+                key.to_string(),
+                AdminIdempotencyEntry::Complete(AdminCachedResponse {
+                    status,
+                    headers,
+                    body,
+                    request_fingerprint: request_fingerprint.to_string(),
+                    created_at: Instant::now(),
+                }),
+            );
+        }
+    }
+
+    pub fn abandon_admin(&self, key: &str, request_fingerprint: &str) {
+        let should_remove = self.admin_cache.get(key).is_some_and(|entry| {
+            matches!(
+                entry.value(),
+                AdminIdempotencyEntry::Pending { request_fingerprint: current, .. }
+                    if current == request_fingerprint
+            )
+        });
+        if should_remove {
+            self.admin_cache.remove(key);
+        }
+    }
+
     /// Remove expired entries (for periodic cleanup)
     pub fn cleanup_expired(&self) {
         let expired_keys: Vec<String> = self
@@ -103,6 +241,8 @@ impl IdempotencyStore {
             self.cache.remove(key);
         }
 
+        self.admin_cache.retain(|_, entry| !entry.is_expired());
+
         if !expired_keys.is_empty() {
             info!(
                 count = expired_keys.len(),
@@ -114,7 +254,7 @@ impl IdempotencyStore {
     /// Get cache statistics
     pub fn stats(&self) -> IdempotencyStats {
         IdempotencyStats {
-            total_entries: self.cache.len(),
+            total_entries: self.cache.len() + self.admin_cache.len(),
         }
     }
 }
@@ -175,6 +315,21 @@ mod tests {
 
         let key = IdempotencyStore::extract_key(&headers);
         assert_eq!(key, None);
+        assert_eq!(
+            IdempotencyStore::validate_key(&headers),
+            Err("key exceeds 255 bytes")
+        );
+    }
+
+    #[test]
+    fn invalid_admin_key_is_distinct_from_an_absent_key() {
+        let mut headers = HeaderMap::new();
+        assert_eq!(IdempotencyStore::validate_key(&headers), Ok(None));
+        headers.insert(IDEMPOTENCY_KEY_HEADER, HeaderValue::from_static(""));
+        assert_eq!(
+            IdempotencyStore::validate_key(&headers),
+            Err("key must not be empty")
+        );
     }
 
     #[test]
@@ -258,6 +413,55 @@ mod tests {
 
         let stats = store.stats();
         assert_eq!(stats.total_entries, 2);
+    }
+
+    #[test]
+    fn admin_request_key_is_bound_to_fingerprint_and_response() {
+        let store = IdempotencyStore::new();
+        assert!(matches!(
+            store.begin_admin("intent-1", "post:/instances:body-a"),
+            AdminIdempotencyDecision::Execute
+        ));
+        assert!(matches!(
+            store.begin_admin("intent-1", "post:/instances:body-a"),
+            AdminIdempotencyDecision::InFlight
+        ));
+        assert!(matches!(
+            store.begin_admin("intent-1", "post:/instances:body-b"),
+            AdminIdempotencyDecision::Conflict
+        ));
+
+        store.complete_admin(
+            "intent-1",
+            "post:/instances:body-a",
+            StatusCode::ACCEPTED,
+            HeaderMap::new(),
+            Bytes::from_static(br#"{"operation_id":"op-1"}"#),
+        );
+        match store.begin_admin("intent-1", "post:/instances:body-a") {
+            AdminIdempotencyDecision::Replay(response) => {
+                assert_eq!(response.status, StatusCode::ACCEPTED);
+                assert_eq!(
+                    response.body,
+                    Bytes::from_static(br#"{"operation_id":"op-1"}"#)
+                );
+            }
+            decision => panic!("expected replay, got {decision:?}"),
+        }
+    }
+
+    #[test]
+    fn abandoned_admin_request_can_be_retried() {
+        let store = IdempotencyStore::new();
+        assert!(matches!(
+            store.begin_admin("intent-2", "post:/instances:body"),
+            AdminIdempotencyDecision::Execute
+        ));
+        store.abandon_admin("intent-2", "post:/instances:body");
+        assert!(matches!(
+            store.begin_admin("intent-2", "post:/instances:body"),
+            AdminIdempotencyDecision::Execute
+        ));
     }
 
     #[test]

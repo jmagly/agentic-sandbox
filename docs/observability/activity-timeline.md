@@ -81,8 +81,9 @@ described in [activity governance](activity-governance.md).
 
 ## API and dashboard
 
-- `GET /api/v2/activity/timeline` returns `events`, per-collector `coverage`, and
-  the aggregate `completeness` assessment.
+- `GET /api/v2/activity/timeline` returns paginated `events`, a stable
+  `next_cursor`, per-collector `coverage`, and the aggregate `completeness`
+  assessment. Missing cursors are reported with `cursor_found=false`.
 - `GET /api/v2/activity/coverage` returns coverage without event records.
 - `POST /api/v2/activity/export` accepts the same filter object and returns the
   governed signed export.

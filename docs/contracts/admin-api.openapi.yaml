@@ -47,6 +47,14 @@ info:
     `id`. Clients poll `GET /operations/{id}` until `state` is `succeeded`,
     `failed`, or `canceled`.
 
+    Mutating operations
+    accept an optional `Idempotency-Key`. The key is bound to the authenticated
+    operator identity plus the exact HTTP method, path/query, and request body
+    for 24 hours. Repeating the same
+    intent returns the original response with `Idempotency-Replayed: true`;
+    reusing the key for a different request returns `409 Conflict`, and a
+    concurrent duplicate returns `409` with `Retry-After`.
+
     ### Errors
 
     All non-2xx responses use the
@@ -112,7 +120,7 @@ paths:
       summary: Inspect sanitized CA/bootstrap readiness
       description: |
         Returns client-safe readiness metadata for gRPC mTLS bootstrap. The
-        response reports CA backend status, trust-domain/freshness metadata,
+        response reports the public management WebSocket endpoint, CA backend status, trust-domain/freshness metadata,
         bootstrap token-store counts, and stable enrollment error codes. It
         never returns PEM bodies, token hashes, bearer values, CSRs, private
         keys, or filesystem paths.
@@ -126,6 +134,10 @@ paths:
                 secure:
                   value:
                     status: secure
+                    management_websocket:
+                      endpoint: ws://{host}:8121/
+                      source: server_advertised
+                      protocol_version: '1.0'
                     ca_provider:
                       configured: true
                       status: secure
@@ -156,6 +168,10 @@ paths:
                 disabled:
                   value:
                     status: disabled
+                    management_websocket:
+                      endpoint: ws://{host}:8121/
+                      source: server_advertised
+                      protocol_version: '1.0'
                     ca_provider:
                       configured: false
                       status: disabled
@@ -412,6 +428,8 @@ paths:
     post:
       tags: [instances]
       operationId: provisionInstance
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
       summary: Provision a new instance (async)
       description: |
         Kicks off async provisioning. Returns `202` with an
@@ -455,6 +473,9 @@ paths:
             Location:
               description: URL of the operation status resource.
               schema: { type: string, format: uri-reference }
+            Idempotency-Replayed:
+              description: Present with value `true` when this response was recovered from a completed keyed request.
+              schema: { type: string, enum: ['true'] }
           content:
             application/json:
               schema: { $ref: '#/components/schemas/OperationStatus' }
@@ -464,7 +485,9 @@ paths:
                     id: op_01HZK4XQ5G8XGE
                     kind: instance.provision
                     state: pending
+                    target: agent-dev-01
                     created_at: '2026-05-09T14:01:00Z'
+                    progress: { percent: 0 }
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
@@ -511,6 +534,8 @@ paths:
     post:
       tags: [lifecycle]
       operationId: startInstance
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
       summary: Start a stopped instance (async)
       description: Transitions a stopped instance to `running`. Returns `202` with an `OperationStatus`. Idempotent for instances already running.
       responses:
@@ -526,6 +551,8 @@ paths:
     post:
       tags: [lifecycle]
       operationId: stopInstance
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
       summary: Stop a running instance (async)
       description: Graceful shutdown. QEMU instances use libvirt shutdown; host instances are routed to the configured host supervisor and marked unready in the executor registry. Returns `202` with an `OperationStatus`. Idempotent for instances already stopped.
       responses:
@@ -541,6 +568,8 @@ paths:
     post:
       tags: [lifecycle]
       operationId: destroyInstance
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
       summary: Destroy an instance (async, irreversible)
       description: Hard teardown. QEMU instances are destroyed/undefined through libvirt; host instances are routed to the configured host supervisor, then removed from the executor registry and signing-key state. Returns `202` with an `OperationStatus`. Cannot be reversed; the instance id is retired.
       responses:
@@ -548,6 +577,7 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
         '500': { $ref: '#/components/responses/Internal' }
 
   /instances/{id}/restart:
@@ -555,6 +585,8 @@ paths:
     post:
       tags: [lifecycle]
       operationId: restartInstance
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
       summary: Restart an instance (async)
       description: Stop-then-start cycle preserving instance id, configuration, and persistent state. Returns `202` with an `OperationStatus`.
       responses:
@@ -570,6 +602,8 @@ paths:
     post:
       tags: [lifecycle]
       operationId: reprovisionInstance
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
       summary: Reprovision an instance in place (async)
       description: |
         Re-runs the provisioning pipeline against the existing instance id,
@@ -601,6 +635,8 @@ paths:
     post:
       tags: [secrets]
       operationId: rotateInstanceSecret
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
       summary: Retired legacy shared-secret rotation endpoint
       description: |
         Retired in #412 with the legacy agent shared-secret path. Agents now
@@ -629,12 +665,15 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
         '500': { $ref: '#/components/responses/Internal' }
 
   /libvirt/checkpoints:
     post:
       tags: [libvirt]
       operationId: createLibvirtCheckpoint
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
       summary: Capture a pre-enrollment QEMU/libvirt checkpoint
       description: |
         Quiesces and detaches virtiofs, captures RAM/device state with
@@ -654,6 +693,7 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
         '500': { $ref: '#/components/responses/Internal' }
 
   /libvirt/checkpoints/{checkpoint_id}/restore:
@@ -665,6 +705,8 @@ paths:
     post:
       tags: [libvirt]
       operationId: restoreLibvirtCheckpoint
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
       summary: Restore and enroll a fresh tenant in the saved libvirt domain
       requestBody:
         required: true
@@ -680,12 +722,15 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
         '500': { $ref: '#/components/responses/Internal' }
 
   /libvirt/warm-pools:
     post:
       tags: [libvirt]
       operationId: initializeLibvirtWarmPool
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
       summary: Reserve N distinct pre-booted libvirt checkpoint slots
       requestBody:
         required: true
@@ -701,6 +746,7 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
         '500': { $ref: '#/components/responses/Internal' }
 
   /libvirt/warm-pools/{pool}/handoff:
@@ -712,6 +758,8 @@ paths:
     post:
       tags: [libvirt]
       operationId: handoffLibvirtWarmPool
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
       summary: Atomically claim, restore, and enroll one libvirt warm slot
       requestBody:
         required: true
@@ -727,12 +775,15 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
         '500': { $ref: '#/components/responses/Internal' }
 
   /cloud-hypervisor/snapshots:
     post:
       tags: [cloud-hypervisor]
       operationId: createCloudHypervisorSnapshot
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
       summary: Capture a Cloud Hypervisor clean-base snapshot
       description: |
         Captures a CH snapshot through `ch-faststart.sh snapshot`. Clean-base
@@ -752,6 +803,7 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
         '500': { $ref: '#/components/responses/Internal' }
 
   /cloud-hypervisor/snapshots/{snapshot_id}/restore:
@@ -763,6 +815,8 @@ paths:
     post:
       tags: [cloud-hypervisor]
       operationId: restoreCloudHypervisorSnapshot
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
       summary: Restore a CH child from a verified clean-base snapshot
       requestBody:
         required: true
@@ -778,6 +832,7 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
         '500': { $ref: '#/components/responses/Internal' }
 
   /cloud-hypervisor/snapshots/{snapshot_id}/fork:
@@ -789,6 +844,8 @@ paths:
     post:
       tags: [cloud-hypervisor]
       operationId: forkCloudHypervisorSnapshot
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
       summary: Fork N CH children from one verified warm-base snapshot
       requestBody:
         required: true
@@ -804,12 +861,15 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
         '500': { $ref: '#/components/responses/Internal' }
 
   /cloud-hypervisor/warm-pools:
     post:
       tags: [cloud-hypervisor]
       operationId: initializeCloudHypervisorWarmPool
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
       summary: Initialize CH warm-pool accounting for a clean-base snapshot
       requestBody:
         required: true
@@ -825,6 +885,7 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
         '500': { $ref: '#/components/responses/Internal' }
 
   /cloud-hypervisor/warm-pools/{pool}/handoff:
@@ -836,6 +897,8 @@ paths:
     post:
       tags: [cloud-hypervisor]
       operationId: handoffCloudHypervisorWarmPool
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
       summary: Restore and hand out one CH child from a warm pool
       requestBody:
         required: true
@@ -851,6 +914,7 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
         '500': { $ref: '#/components/responses/Internal' }
 
   /operations/{id}:
@@ -882,8 +946,10 @@ paths:
                     id: op_01HZK4XQ5G8XGE
                     kind: instance.provision
                     state: succeeded
+                    target: agent-dev-01
                     created_at: '2026-05-09T14:01:00Z'
                     completed_at: '2026-05-09T14:02:43Z'
+                    progress: { percent: 100 }
                     result:
                       instance_id: 8a3f8b94-1c4e-4d2b-9c1a-1ad44e6b0dfe
         '401': { $ref: '#/components/responses/Unauthorized' }
@@ -914,9 +980,12 @@ paths:
     get:
       tags: [storage]
       operationId: getStorageObject
-      summary: Read a storage object's metadata or contents
+      summary: Browse a storage directory or read a bounded object's metadata and contents
       description: |
-        Returns the object's metadata and (optionally) its contents.
+        Directories return a metadata-only listing capped at 500 entries.
+        Objects larger than 1 MiB are rejected with `413` so this management
+        surface cannot materialize unbounded content. Otherwise returns the
+        object's metadata and contents.
         When the `Accept` header is `application/json` (default), returns
         the `StorageObject` envelope with `content_base64` for binary or
         `content` for text. When `Accept` is the object's media type
@@ -926,7 +995,10 @@ paths:
           description: Object found.
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/StorageObject' }
+              schema:
+                oneOf:
+                  - { $ref: '#/components/schemas/StorageObject' }
+                  - { $ref: '#/components/schemas/StorageDirectory' }
               examples:
                 json-mission:
                   value:
@@ -942,13 +1014,16 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '413': { $ref: '#/components/responses/BadRequest' }
         '503': { $ref: '#/components/responses/StorageUnavailable' }
     put:
       tags: [storage]
       operationId: putStorageObject
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
       summary: Create or replace a storage object
       description: |
-        Writes the supplied bytes at `scope/path`. `global` is read-only
+        Writes at most 1 MiB of supplied bytes at `scope/path`. `global` is read-only
         and rejects writes (`scope_disabled`). When the body is JSON
         with the `StorageObjectWrite` shape, `content` (text) or
         `content_base64` (binary) supplies the bytes. When the body is
@@ -980,11 +1055,14 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
         '422': { $ref: '#/components/responses/Validation' }
         '503': { $ref: '#/components/responses/StorageUnavailable' }
     delete:
       tags: [storage]
       operationId: deleteStorageObject
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
       summary: Delete a storage object
       description: Removes the object at `scope/path`. Returns `204` on success. `global` rejects deletes (`scope_disabled`). Idempotent — `404` is returned if the object does not exist at deletion time.
       responses:
@@ -992,6 +1070,7 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
         '503': { $ref: '#/components/responses/StorageUnavailable' }
 
   /container-images:
@@ -1056,7 +1135,7 @@ paths:
                 two-loadouts:
                   value:
                     items:
-                      - name: profiles/claude-only.yaml
+                      - name: claude-only
                         version: '1'
                         runtime: qemu
                         description: Claude Code single-agent profile.
@@ -1069,7 +1148,7 @@ paths:
                             provider: libvirt
                             eligible: true
                             launch_strategy: { mode: cold }
-                      - name: profiles/dual-review.yaml
+                      - name: dual-review
                         version: '1'
                         runtime: qemu
                         description: Two agents wired for cross-review.
@@ -1079,6 +1158,8 @@ paths:
     post:
       tags: [loadouts]
       operationId: createLoadout
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
       summary: Register a new loadout manifest
       description: |
         Uploads a loadout manifest. The manifest body is the YAML
@@ -1093,14 +1174,14 @@ paths:
             examples:
               minimal:
                 value:
-                  name: profiles/security-audit.yaml
+                  name: security-audit
                   manifest: |
-                    version: '1'
-                    runtime: qemu
-                    profile: agentic-dev
-                    agentshare: true
-          application/x-yaml:
-            schema: { type: string, description: Raw YAML manifest. Server derives `name` from `metadata.name` if present. }
+                    metadata:
+                      name: security-audit
+                      description: Security audit loadout
+                    runtime_options:
+                      kind: vm
+                      provider: cloud-hypervisor
       responses:
         '201':
           description: Loadout created.
@@ -1156,6 +1237,16 @@ paths:
           required: false
           schema: { type: integer, default: 200, minimum: 1, maximum: 5000 }
           description: Max entries to return when `follow=false`.
+        - name: cursor
+          in: query
+          required: false
+          schema: { type: string }
+          description: Resume after this stable log ID or SSE cursor. Last-Event-ID is also accepted.
+        - name: Last-Event-ID
+          in: header
+          required: false
+          schema: { type: string }
+          description: SSE resume cursor. When present, this takes precedence over the query cursor.
       responses:
         '200':
           description: Snapshot or live stream.
@@ -1163,20 +1254,27 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [items]
+                required: [items, cursor, gap, bounded]
                 properties:
                   items:
                     type: array
                     items: { $ref: '#/components/schemas/LogEntry' }
+                  cursor: { type: string, description: Latest server log cursor. }
+                  gap: { type: boolean, description: True when the requested cursor predates retained evidence. }
+                  bounded: { type: boolean, const: true }
               examples:
                 snapshot:
                   value:
                     items:
-                      - timestamp: '2026-05-09T14:00:00Z'
+                      - id: log_42
+                        timestamp: '2026-05-09T14:00:00Z'
                         level: info
                         target: management::dispatch
                         message: dispatched mission m-001
                         fields: { instance_id: 8a3f... }
+                    cursor: '42'
+                    gap: false
+                    bounded: true
             text/event-stream:
               schema:
                 type: string
@@ -1188,6 +1286,7 @@ paths:
                     event: log
                     data: {"timestamp":"2026-05-09T14:00:00Z","level":"info","target":"management::dispatch","message":"dispatched mission m-001"}
 
+        '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '500': { $ref: '#/components/responses/Internal' }
@@ -1207,7 +1306,7 @@ paths:
 
         Each SSE event has:
         - `id:` — monotonic sequence number.
-        - `event:` — the `Event.kind` (e.g. `instance.state_changed`).
+        - `event: event` — fixed; the dotted event kind remains in `data.kind`.
         - `data:` — one `Event` JSON object.
 
         Heartbeat comments are emitted every 15 seconds.
@@ -1225,6 +1324,16 @@ paths:
           in: query
           required: false
           schema: { type: integer, default: 200, minimum: 1, maximum: 5000 }
+        - name: cursor
+          in: query
+          required: false
+          schema: { type: string }
+          description: Resume after this stable event ID or SSE cursor. Last-Event-ID is also accepted.
+        - name: Last-Event-ID
+          in: header
+          required: false
+          schema: { type: string }
+          description: SSE resume cursor. When present, this takes precedence over the query cursor.
       responses:
         '200':
           description: Snapshot or live stream.
@@ -1232,20 +1341,26 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [items]
+                required: [items, cursor, gap, bounded]
                 properties:
                   items:
                     type: array
                     items: { $ref: '#/components/schemas/Event' }
+                  cursor: { type: string, description: Latest server event cursor. }
+                  gap: { type: boolean, description: True when the requested cursor predates retained evidence. }
+                  bounded: { type: boolean, const: true }
               examples:
                 snapshot:
                   value:
                     items:
-                      - id: ev_01HZK4Y9
+                      - id: ev_42
                         kind: instance.state_changed
                         timestamp: '2026-05-09T14:02:43Z'
                         subject: instance/8a3f8b94-1c4e-4d2b-9c1a-1ad44e6b0dfe
                         data: { from: provisioning, to: running }
+                    cursor: '42'
+                    gap: false
+                    bounded: true
             text/event-stream:
               schema:
                 type: string
@@ -1254,9 +1369,10 @@ paths:
                 stream:
                   value: |
                     id: 1
-                    event: instance.state_changed
+                    event: event
                     data: {"id":"ev_01HZK4Y9","kind":"instance.state_changed","timestamp":"2026-05-09T14:02:43Z","subject":"instance/8a3f...","data":{"from":"provisioning","to":"running"}}
 
+        '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '500': { $ref: '#/components/responses/Internal' }
@@ -1311,6 +1427,15 @@ paths:
 
 components:
   parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 255
+      description: Stable operator-intent key. Reuse is allowed only for an identical method, URI, and body.
     InstanceId:
       name: id
       in: path
@@ -1348,6 +1473,9 @@ components:
         Location:
           description: URL of the operation status resource.
           schema: { type: string, format: uri-reference }
+        Idempotency-Replayed:
+          description: Present with value `true` when this response was recovered from a completed keyed request.
+          schema: { type: string, enum: ['true'] }
       content:
         application/json:
           schema: { $ref: '#/components/schemas/OperationStatus' }
@@ -1357,7 +1485,9 @@ components:
                 id: op_01HZK4XQ5G8XGE
                 kind: instance.start
                 state: pending
+                target: 8a3f8b94-1c4e-4d2b-9c1a-1ad44e6b0dfe
                 created_at: '2026-05-09T14:10:00Z'
+                progress: { percent: 0 }
     BadRequest:
       description: Malformed request.
       content:
@@ -1410,11 +1540,13 @@ components:
 
     BootstrapReadinessResponse:
       type: object
-      required: [status, ca_provider, bootstrap, error_taxonomy, notes]
+      required: [status, management_websocket, ca_provider, bootstrap, error_taxonomy, notes]
       properties:
         status:
           type: string
           enum: [secure, degraded, disabled]
+        management_websocket:
+          $ref: '#/components/schemas/ManagementWebSocketDiscovery'
         ca_provider:
           $ref: '#/components/schemas/CaProviderReadiness'
         bootstrap:
@@ -1425,6 +1557,20 @@ components:
         notes:
           type: array
           items: { type: string }
+
+    ManagementWebSocketDiscovery:
+      type: object
+      required: [endpoint, source, protocol_version]
+      properties:
+        endpoint:
+          type: [string, 'null']
+          description: Public ws/wss URL, optionally containing the literal `{host}` browser-host placeholder.
+        source:
+          type: string
+          enum: [server_advertised, same_origin_fallback]
+        protocol_version:
+          type: string
+          pattern: '^[0-9]+\.[0-9]+$'
 
     CaProviderReadiness:
       type: object
@@ -1990,6 +2136,19 @@ components:
           type: boolean
           default: false
           description: Start the instance after provisioning succeeds.
+        vcpus:
+          type: integer
+          minimum: 1
+          maximum: 256
+          description: QEMU virtual CPU count. Ignored for non-QEMU runtimes.
+        memory_mb:
+          type: integer
+          minimum: 256
+          description: QEMU memory allocation in MiB. Ignored for non-QEMU runtimes.
+        disk_gb:
+          type: integer
+          minimum: 1
+          description: QEMU root-disk capacity in GiB. Ignored for non-QEMU runtimes.
         working_dir:
           type: string
           description: Optional launch working directory for host runtime instances. Ignored by qemu/docker provisioning.
@@ -2015,6 +2174,7 @@ components:
         - instance.destroy
         - instance.restart
         - instance.reprovision
+        - fleet.reconcile
 
     ChSnapshotRequest:
       type: object
@@ -2150,7 +2310,7 @@ components:
 
     OperationStatus:
       type: object
-      required: [id, kind, state, created_at]
+      required: [id, kind, state, target, created_at, progress]
       properties:
         id:
           type: string
@@ -2158,6 +2318,9 @@ components:
           examples: [op_01HZK4XQ5G8XGE]
         kind: { $ref: '#/components/schemas/OperationKind' }
         state: { $ref: '#/components/schemas/OperationState' }
+        target:
+          type: string
+          description: Stable instance id or operator target name associated with the operation.
         created_at: { type: string, format: date-time }
         started_at: { type: string, format: date-time }
         completed_at: { type: string, format: date-time }
@@ -2213,6 +2376,26 @@ components:
       oneOf:
         - required: [content]
         - required: [content_base64]
+
+    StorageDirectory:
+      type: object
+      required: [kind, scope, path, items, truncated, limit]
+      properties:
+        kind: { type: string, enum: [directory] }
+        scope: { $ref: '#/components/schemas/StorageScope' }
+        path: { type: string }
+        items:
+          type: array
+          maxItems: 500
+          items:
+            type: object
+            required: [name, kind]
+            properties:
+              name: { type: string }
+              kind: { type: string, enum: [directory, object] }
+              size_bytes: { type: integer, minimum: 0, nullable: true }
+        truncated: { type: boolean }
+        limit: { type: integer, enum: [500] }
 
     ContainerImage:
       type: object
@@ -2356,13 +2539,20 @@ components:
       type: object
       required: [name, manifest]
       properties:
-        name: { type: string, description: Unique loadout name. }
-        manifest: { type: string, description: Raw YAML manifest body. }
+        name:
+          type: string
+          pattern: '^[a-z0-9][a-z0-9_-]{0,79}$'
+          description: Unique catalog key. The manifest metadata.name value must match it.
+        manifest:
+          type: string
+          maxLength: 262144
+          description: Raw YAML manifest body containing a matching metadata.name value.
 
     LogEntry:
       type: object
-      required: [timestamp, level, target, message]
+      required: [id, timestamp, level, target, message]
       properties:
+        id: { type: string, pattern: '^log_[0-9]+$', description: Stable server-assigned log sequence identifier. }
         timestamp: { type: string, format: date-time }
         level:
           type: string
@@ -2380,7 +2570,7 @@ components:
       type: object
       required: [id, kind, timestamp]
       properties:
-        id: { type: string, description: Server-assigned event id (ULID). }
+        id: { type: string, pattern: '^ev_[0-9]+$', description: Stable server-assigned event sequence identifier. }
         kind:
           type: string
           description: Dotted event kind (e.g. `instance.state_changed`, `operation.completed`, `storage.object_written`).

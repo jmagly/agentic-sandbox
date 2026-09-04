@@ -22,7 +22,18 @@ on:
       - 'docs/contracts/**'
       - 'management/src/http/admin_v2.rs'
       - 'management/src/http/mcp.rs'
+      - 'management/src/http/**'
+      - 'management/ui/modules/**'
+      - 'management/ui/test/fixtures/**'
+      - 'management/ui/test/**'
+      - 'management/ui/index.html'
+      - 'management/ui/app.js'
+      - 'management/ui/styles.css'
       - 'scripts/lint-admin-openapi-coverage.sh'
+      - 'management/ui/route-matrix.json'
+      - 'management/ui/route-matrix.schema.json'
+      - 'scripts/lint-management-ui-route-matrix.mjs'
+      - 'scripts/run-management-ui-browser-smoke.sh'
   push:
     branches:
       - main
@@ -31,7 +42,18 @@ on:
       - 'docs/contracts/**'
       - 'management/src/http/admin_v2.rs'
       - 'management/src/http/mcp.rs'
+      - 'management/src/http/**'
+      - 'management/ui/modules/**'
+      - 'management/ui/test/fixtures/**'
+      - 'management/ui/test/**'
+      - 'management/ui/index.html'
+      - 'management/ui/app.js'
+      - 'management/ui/styles.css'
       - 'scripts/lint-admin-openapi-coverage.sh'
+      - 'management/ui/route-matrix.json'
+      - 'management/ui/route-matrix.schema.json'
+      - 'scripts/lint-management-ui-route-matrix.mjs'
+      - 'scripts/run-management-ui-browser-smoke.sh'
   workflow_dispatch:
 
 jobs:
@@ -155,6 +177,29 @@ jobs:
         run: |
           set -euo pipefail
           bash scripts/lint-admin-openapi-coverage.sh
+
+      - name: Management UI route classification drift gate (#804)
+        run: |
+          set -euo pipefail
+          ajv compile --spec=draft2020 -c ajv-formats \
+            -s management/ui/route-matrix.schema.json
+          ajv validate --spec=draft2020 -c ajv-formats \
+            -s management/ui/route-matrix.schema.json \
+            -d management/ui/route-matrix.json
+          ajv validate --spec=draft2020 -c ajv-formats \
+            -s management/ui/test/fixtures/http-outcomes.schema.json \
+            -d management/ui/test/fixtures/http-outcomes.json
+          node scripts/lint-management-ui-route-matrix.mjs
+
+      - name: Management UI deterministic acceptance gate (#810)
+        run: |
+          set -euo pipefail
+          node --test --test-concurrency=4 management/ui/test/management-ui.test.mjs
+
+      - name: Management UI focused browser gate (#810)
+        run: |
+          set -euo pipefail
+          ./scripts/run-management-ui-browser-smoke.sh
 
       # TODO(#204): Lint protobuf artifacts (buf lint or protoc) once
       # *.proto files are introduced under docs/contracts/ per ADR-006.
