@@ -361,19 +361,28 @@ jobs:
           npm ci --ignore-scripts
 
       - name: Run AIWG three-target restart and re-adoption UAT
-        working-directory: aiwg-fleet-uat
         env:
           AGENTIC_SANDBOX_MGMT_BIN: ${{ gitea.workspace }}/management/target/debug/agentic-mgmt
           AIWG_FLEET_SANDBOX_LIVE_REQUIRED: "1"
         run: |
           set -euo pipefail
-          # Keep Vite/esbuild package discovery inside the checked-out
-          # workspace. Host-home package.json files are outside the CI input
-          # contract and may be absent or intentionally empty.
-          workspace_package_json="${GITHUB_WORKSPACE}/package.json"
-          test ! -e "${workspace_package_json}"
-          printf '{"private":true}\n' > "${workspace_package_json}"
-          trap 'rm -f -- "${workspace_package_json}"' EXIT
+          # Vite/esbuild walks ancestor directories while loading its config.
+          # Run the pinned UAT beneath a private /tmp boundary so malformed
+          # package metadata in a runner home cannot affect repository input.
+          workspace_uat="${GITHUB_WORKSPACE}/aiwg-fleet-uat"
+          isolation_root="/tmp/agentic-sandbox-aiwg-uat-${GITHUB_RUN_ID:-$$}"
+          test -d "${workspace_uat}"
+          test ! -e "${isolation_root}"
+          mkdir -m 700 "${isolation_root}"
+          printf '{"private":true,"type":"module"}\n' > "${isolation_root}/package.json"
+          mv "${workspace_uat}" "${isolation_root}/worktree"
+          restore_uat() {
+            mv "${isolation_root}/worktree" "${workspace_uat}"
+            rm -f -- "${isolation_root}/package.json"
+            rmdir -- "${isolation_root}"
+          }
+          trap restore_uat EXIT
+          cd "${isolation_root}/worktree"
           npm run uat:fleet-sandbox-live
 
       - name: Upload reports
