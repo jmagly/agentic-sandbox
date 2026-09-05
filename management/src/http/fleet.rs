@@ -587,13 +587,9 @@ async fn reconcile(
     operation.state = OperationState::Completed;
     operation.completed_at = Some(Utc::now());
     operation.progress_percent = 100;
-    operation.result = Some(result);
-    let operation_id = operation_store.insert(operation.clone());
-    let mut response = (
-        StatusCode::ACCEPTED,
-        Json(super::admin_v2::operation_value(&operation)),
-    )
-        .into_response();
+    operation.result = Some(result.clone());
+    let operation_id = operation_store.insert(operation);
+    let mut response = (StatusCode::OK, Json(result)).into_response();
     response.headers_mut().insert(
         header::LOCATION,
         HeaderValue::from_str(&format!("/api/v2/admin/operations/{operation_id}"))

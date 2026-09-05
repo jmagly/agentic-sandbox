@@ -9,7 +9,7 @@
 // existing classic-script self-tests continue to load without a bundler.
 if (typeof window !== 'undefined') {
     window.ManagementUIReady = import('./modules/index.mjs').then((boundary) => {
-        window.ManagementUI = Object.freeze(boundary);
+        window.ManagementUI = Object.freeze({ ...boundary });
         return window.ManagementUI;
     });
 }

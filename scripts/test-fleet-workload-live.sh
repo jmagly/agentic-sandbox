@@ -126,8 +126,15 @@ REPLAY="$(auth_curl -X POST -H 'Content-Type: application/json' --data-binary "@
 INVENTORY="$(auth_curl "${BASE_URL}/api/v2/fleet/workloads")"
 [[ "$(printf '%s' "${INVENTORY}" | json_get records.0.lineage.task_id)" == "${TASK_ID}" ]]
 [[ "$(printf '%s' "${INVENTORY}" | json_get records.0.status.observed_state)" == "running" ]]
+INVENTORY_REVISION="$(printf '%s' "${INVENTORY}" | json_get inventory_revision)"
 
-RECONCILE="$(auth_curl -X POST -H 'Content-Type: application/json' --data '{"before_revision":2,"child_ids":["child-live"]}' "${BASE_URL}/api/v2/fleet/reconcile")"
+RECONCILE_BODY="${RUN_ROOT}/reconcile.json"
+python3 - "${RECONCILE_BODY}" "${INVENTORY_REVISION}" <<'PY'
+import json,sys
+with open(sys.argv[1],"w",encoding="utf-8") as f:
+  json.dump({"before_revision":int(sys.argv[2]),"child_ids":["child-live"]},f,separators=(",",":"),sort_keys=True)
+PY
+RECONCILE="$(auth_curl -X POST -H 'Content-Type: application/json' --data-binary "@${RECONCILE_BODY}" "${BASE_URL}/api/v2/fleet/reconcile")"
 [[ "$(printf '%s' "${RECONCILE}" | json_get rows.0.classification)" == "re-adopted" ]]
 
 echo "fleet live proof passed: child=child-live task=${TASK_ID} state=running replay=true reconciliation=re-adopted"

@@ -219,9 +219,9 @@ test('critical management workflows complete against deterministic mocked bounda
         ['GET', '/api/v2/activity/coverage', jsonResponse(200, { complete: true, unsupported_event_classes: [] })],
         ['POST', '/api/v2/activity/export', jsonResponse(200, { artifact_id: 'activity-export-1', signed: true })],
         ['POST', '/api/v2/fleet/workloads/worker-1/observations', jsonResponse(412, { code: 'revision.stale', detail: 'expected revision is stale' })],
-        ['POST', '/api/v2/fleet/reconcile', jsonResponse(202, {
-            id: 'op-fleet', kind: 'fleet.reconcile', state: 'succeeded',
-            result: { rows: [{ child_id: 'worker-1', classification: 're-adopted' }] },
+        ['POST', '/api/v2/fleet/reconcile', jsonResponse(200, {
+            document_type: 'reconciliation', api_version: 'agentic-orchestration/v1',
+            rows: [{ child_id: 'worker-1', classification: 're-adopted' }],
         }, { 'operation-id': 'op-fleet', location: '/api/v2/admin/operations/op-fleet' })],
         ['POST', '/api/v2/credentials/cred-1/leases', jsonResponse(201, { id: 'lease-1', state: 'active', expires_at: '2100-01-01T00:00:00Z' })],
         ['DELETE', '/api/v2/credentials/leases/lease-1', jsonResponse(200, { id: 'lease-1', state: 'revoked' })],
@@ -260,10 +260,9 @@ test('critical management workflows complete against deterministic mocked bounda
     assert.ok(conflict instanceof HttpOutcomeError);
     assert.equal(conflict.outcome.kind, 'conflict');
     const fleet = await transport.request('/api/v2/fleet/reconcile', { method: 'POST', owner: 'fleet-reconcile' });
-    const fleetOperation = operationFromAccepted(fleet, { target: 'fleet', kind: 'fleet.reconcile' });
-    state.trackOperation(fleetOperation);
-    assert.equal(state.operations.get('op-fleet').state, 'succeeded');
-    assert.equal(state.operations.get('op-fleet').result.rows[0].classification, 're-adopted');
+    assert.equal(fleet.kind, 'success');
+    assert.equal(fleet.operationId, 'op-fleet');
+    assert.equal(fleet.body.rows[0].classification, 're-adopted');
 
     const credentialIssued = await transport.request('/api/v2/credentials/cred-1/leases', {
         method: 'POST', owner: 'credential-issue',

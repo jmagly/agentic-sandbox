@@ -1342,10 +1342,6 @@ fn op_to_v2(op: &Operation) -> OperationStatusV2 {
     }
 }
 
-pub(crate) fn operation_value(op: &Operation) -> Value {
-    serde_json::to_value(op_to_v2(op)).unwrap_or_default()
-}
-
 /// Insert a synthetic "succeeded" operation for v1 endpoints that
 /// don't go through the OperationStore. Returns (op_id, op_status_json).
 fn synth_succeeded_op(

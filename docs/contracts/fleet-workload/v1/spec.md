@@ -71,7 +71,7 @@ contract under `/api/v2/fleet`:
 | `GET` | `/workloads` | Return a revisioned `inventory` document containing all durable workload records. |
 | `GET` | `/workloads/{child_id}` | Return one durable workload record. |
 | `POST` | `/workloads/{child_id}/observations` | Atomically advance a workload observation by exactly one revision and optionally bind newly assigned runtime identities. Stale writers or identity reassignment receive `409`. |
-| `POST` | `/reconcile` | Classify expected children as `re-adopted`, `terminal`, `unknown`, `failed-or-aborted`, or `operator-review-required`. Returns `202` with a canonical `fleet.reconcile` operation, a pollable `Location`, and terminal classification evidence. |
+| `POST` | `/reconcile` | Classify expected children as `re-adopted`, `terminal`, `unknown`, `failed-or-aborted`, or `operator-review-required`. Returns the reconciliation report synchronously and records the same terminal evidence in a canonical `fleet.reconcile` operation identified by `Operation-ID` and pollable `Location` headers. |
 
 Mutating routes require the normal management admin principal and accept an
 optional `Idempotency-Key`. An exact replay returns the original response with

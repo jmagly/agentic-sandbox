@@ -33,6 +33,7 @@ on:
       - 'management/ui/route-matrix.json'
       - 'management/ui/route-matrix.schema.json'
       - 'scripts/lint-management-ui-route-matrix.mjs'
+      - 'scripts/install-management-ui-browser.sh'
       - 'scripts/run-management-ui-browser-smoke.sh'
   push:
     branches:
@@ -53,6 +54,7 @@ on:
       - 'management/ui/route-matrix.json'
       - 'management/ui/route-matrix.schema.json'
       - 'scripts/lint-management-ui-route-matrix.mjs'
+      - 'scripts/install-management-ui-browser.sh'
       - 'scripts/run-management-ui-browser-smoke.sh'
   workflow_dispatch:
 
@@ -199,6 +201,8 @@ jobs:
       - name: Management UI focused browser gate (#810)
         run: |
           set -euo pipefail
+          MANAGEMENT_UI_BROWSER_BIN="$(scripts/install-management-ui-browser.sh)"
+          export MANAGEMENT_UI_BROWSER_BIN
           ./scripts/run-management-ui-browser-smoke.sh
 
       # TODO(#204): Lint protobuf artifacts (buf lint or protoc) once
