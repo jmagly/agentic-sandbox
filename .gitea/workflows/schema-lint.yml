@@ -205,6 +205,9 @@ jobs:
           set -euo pipefail
           MANAGEMENT_UI_BROWSER_BIN="$(scripts/install-management-ui-browser.sh)"
           export MANAGEMENT_UI_BROWSER_BIN
+          # build01 disables unprivileged user namespaces; this disposable
+          # browser only loads the loopback test server used by the smoke gate.
+          export MANAGEMENT_UI_BROWSER_DISABLE_SANDBOX=1
           if ldd "$MANAGEMENT_UI_BROWSER_BIN" | grep -q 'not found'; then
             sudo -n apt-get update
             select_package() {

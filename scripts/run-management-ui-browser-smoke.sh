@@ -18,6 +18,18 @@ if [[ -z "$BROWSER_BIN" || ! -x "$BROWSER_BIN" ]]; then
     exit 2
 fi
 
+browser_args=(
+    --headless
+    --disable-gpu
+    --no-first-run
+    --no-default-browser-check
+)
+if [[ "${MANAGEMENT_UI_BROWSER_DISABLE_SANDBOX:-0}" == "1" ]]; then
+    # CI runners may disable unprivileged user namespaces. The disposable
+    # browser only loads the loopback test server created below.
+    browser_args+=(--no-sandbox)
+fi
+
 SMOKE_TMP="$(mktemp -d "${TMPDIR:-/tmp}/management-ui-browser-smoke.XXXXXX")"
 SERVER_PID=""
 cleanup() {
@@ -63,10 +75,7 @@ for page in "${pages[@]}"; do
     output="$SMOKE_TMP/$(basename "$page").dom.html"
     profile="$SMOKE_TMP/profile-$(basename "$page")"
     "$BROWSER_BIN" \
-        --headless \
-        --disable-gpu \
-        --no-first-run \
-        --no-default-browser-check \
+        "${browser_args[@]}" \
         --user-data-dir="$profile" \
         --virtual-time-budget=20000 \
         --dump-dom "http://127.0.0.1:${PORT}/${page}" >"$output"
